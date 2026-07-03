@@ -1529,3 +1529,18 @@ Route::group([
 
     Route::delete('facturacion/{id}', [App\Http\Controllers\PortalPrestadores\Services\FacturacionPortalController::class, 'eliminar']);
 });
+
+Route::group([
+    'middleware' => ['jwt.verify'],
+    'prefix' => '/v1/presupuesto-prestacion-medica'
+], function () {
+    Route::post('procesar-proveedor', [App\Http\Controllers\PrestacionesMedicas\Services\ProveedorPresupuestosController::class, 'findByProcesar']);
+    Route::get('consultar-proveedor', [App\Http\Controllers\PrestacionesMedicas\Services\ProveedorPresupuestosController::class, 'findByConsultar']);
+
+    Route::post('procesar-presupuesto', [App\Http\Controllers\PrestacionesMedicas\Services\PresupuestoPrestacionMedicaController::class, 'procesar']);
+    Route::get('consultar-presupuestos', [App\Http\Controllers\PrestacionesMedicas\Services\PresupuestoPrestacionMedicaController::class, 'listar']);
+    Route::get('obtener-presupuesto', [App\Http\Controllers\PrestacionesMedicas\Services\PresupuestoPrestacionMedicaController::class, 'findById']);
+    Route::post('autoriza-presupuesto', [App\Http\Controllers\PrestacionesMedicas\Services\PresupuestoPrestacionMedicaController::class, 'autoriza']);
+    Route::post('anular-presupuesto', [App\Http\Controllers\PrestacionesMedicas\Services\PresupuestoPrestacionMedicaController::class, 'anular']);
+    Route::get('obtener-presupuesto-detalle', [App\Http\Controllers\PrestacionesMedicas\Services\PresupuestoPrestacionMedicaController::class, 'findByPresupuestoPrestacion']);
+});
