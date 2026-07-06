@@ -26,6 +26,34 @@ class Dashboard extends RoutingController
 
         $internacion = $this->aplicarFiltros(InternacionesEntity::query(), $request, 'fecha_internacion', 'afiliado')->count();
 
+        // Liquidaciones query using vw_liquidacion_factura_unica
+        $liqQuery = DB::table('vw_liquidacion_factura_unica');
+
+        // Apply filters to liquidaciones query
+        if ($request->id_locatario) {
+            $liqQuery->where('id_locatorio', $request->id_locatario);
+        }
+        if ($request->desde && $request->hasta) {
+            $liqQuery->whereBetween('fecha_registra_factura', [$request->desde, $request->hasta]);
+        }
+        if ($request->dni || $request->cuil_benef) {
+            $liqQuery->whereIn('id_factura', function ($subQuery) use ($request) {
+                $subQuery->select('l.id_factura')
+                    ->from('tb_liquidaciones as l')
+                    ->join('tb_padron as p', 'l.id_afiliado', '=', 'p.id')
+                    ->when($request->dni, function ($q) use ($request) {
+                        $q->where('p.dni', $request->dni);
+                    })
+                    ->when($request->cuil_benef, function ($q) use ($request) {
+                        $q->where('p.cuil_benef', $request->cuil_benef);
+                    });
+            });
+        }
+
+        $cantidadLiquidaciones = $liqQuery->count();
+        $totalLiquidaciones = $liqQuery->sum('total_neto') ?? 0;
+        $totalLiqFormateado = number_format($totalLiquidaciones, 2, ',', '.');
+
         $importeBonos = $this->aplicarFiltros(
             BonoClinicoEntity::query()->select(DB::raw('SUM(costo_bono) as total')),
             $request,
@@ -76,9 +104,51 @@ class Dashboard extends RoutingController
                 $item->total_formateado = number_format($item->total, 2, ',', '.');
                 return $item;
             });
+
+        $importesFamiliaBonos = $this->aplicarFiltros(
+            BonoClinicoEntity::query()->selectRaw("
+                SUM(CASE 
+                    WHEN tb_padron.id_parentesco = '00' THEN costo_bono 
+                    ELSE 0 
+                END) as total_titular,
+
+                SUM(CASE 
+                    WHEN tb_padron.id_parentesco != '00' THEN costo_bono 
+                    ELSE 0 
+                END) as total_familiar
+            ")
+            ->join('tb_padron', 'tb_padron.dni', '=', 'tb_bonos_medicos.dni_afiliado'),
+            $request,
+            'fecha_registra'
+        )->first();
+
+        $importesFamiliaAuto = $this->aplicarFiltros(
+            PrestacionesPracticaLaboratorioEntity::query()->selectRaw("
+                SUM(CASE 
+                    WHEN tb_padron.id_parentesco = '00' THEN monto_pagar 
+                    ELSE 0 
+                END) as total_titular,
+
+                SUM(CASE 
+                    WHEN tb_padron.id_parentesco != '00' THEN monto_pagar 
+                    ELSE 0 
+                END) as total_familiar
+            ")
+            ->join('tb_padron', 'tb_padron.dni', '=', 'tb_prestaciones_medicas.dni_afiliado'),
+            $request,
+            'fecha_registra'
+        )->first();
+
+        $totalTitularVal = ($importesFamiliaAuto->total_titular ?? 0) + ($importesFamiliaBonos->total_titular ?? 0);
+        $totalFamiliarVal = ($importesFamiliaAuto->total_familiar ?? 0) + ($importesFamiliaBonos->total_familiar ?? 0);
+        
         $totalImporte = number_format(($importeAutorizaciones + $importeBonos), 2, ',', '.');
         $totalBonos = number_format(($importeBonos), 2, ',', '.');
         $totalAuto = number_format(($importeAutorizaciones), 2, ',', '.');
+        
+        $totalTitular = number_format($totalTitularVal, 2, ',', '.');
+        $totalfamiliar = number_format($totalFamiliarVal, 2, ',', '.');
+
         return response()->json([
             'success' => true,
             'data' => [
@@ -89,6 +159,10 @@ class Dashboard extends RoutingController
                 'importe_bonos' => $totalBonos,
                 'importe_auto' => $totalAuto,
                 'importe_anual' => $importe_mensual,
+                'cantidad_liquidaciones' => $cantidadLiquidaciones,
+                'total_liquidaciones' => $totalLiqFormateado,
+                'titular' => $totalTitular,
+                'familia' => $totalfamiliar
             ]
         ]);
     }
@@ -108,6 +182,16 @@ class Dashboard extends RoutingController
             })
             ->when($request->desde && $request->hasta, function ($q) use ($request, $campoFecha) {
                 $q->whereBetween($campoFecha, [$request->desde, $request->hasta]);
+            })
+            ->when($request->dni, function ($q) use ($request, $relacion) {
+                $q->whereHas($relacion, function ($sub) use ($request) {
+                    $sub->where('dni', $request->dni);
+                });
+            })
+            ->when($request->cuil_benef, function ($q) use ($request, $relacion) {
+                $q->whereHas($relacion, function ($sub) use ($request) {
+                    $sub->where('cuil_benef', $request->cuil_benef);
+                });
             });
     }
 }
