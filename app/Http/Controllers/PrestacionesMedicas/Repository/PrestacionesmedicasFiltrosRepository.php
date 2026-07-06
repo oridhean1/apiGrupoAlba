@@ -98,24 +98,48 @@ class PrestacionesmedicasFiltrosRepository
         return $results;
     }
 
-    public function findByListFechaRegistraBetweenAndLimit($desde, $hasta, $limit, $tramite)
+    public function findByListFechaRegistraBetweenAndLimit($limit, $request)
     {
         $query = PrestacionesPracticaLaboratorioEntity::with($this->allRelations)
-            ->whereBetween('fecha_registra', [$desde, $hasta]);
-        if (!empty($tramite)) {
-            $query->where('numero_tramite', 'like', $tramite . '%');
-        }
+            ->when(!empty($request->desde) && !empty($request->hasta), function ($q) use ($request) {
+                $q->whereBetween('fecha_registra', [$request->desde, $request->hasta]);
+            })
+            ->when(!empty($request->tramite), function ($q) use ($request) {
+                $q->where('numero_tramite', 'like', $request->tramite . '%');
+            })
+            ->when(!empty($request->search), function ($q) use ($request) {
+                $q->where(function ($query) use ($request) {
+                    $query->where('dni_afiliado', 'like', $request->search . '%')
+                        ->orWhereHas('afiliado', function ($afiliado) use ($request) {
+                            $afiliado->where('apellidos', 'like', '%' . $request->search . '%')
+                                ->orWhere('nombre', 'like', '%' . $request->search . '%');
+                        });
+                });
+            })
+            ->when(!empty($request->cuil), function ($q) use ($request) {
+                $q->whereHas('afiliado', function ($afiliado) use ($request) {
+                    $afiliado->where('cuil_benef', $request->cuil);
+                });
+            })
+            ->when(!empty($request->estado), function ($q) use ($request) {
+                $q->where('cod_tipo_estado', $request->estado);
+            })
+            ->when(!empty($request->usuario), function ($q) use ($request) {
+                $q->where('usuario_registra', $request->usuario);
+            });
+
         $results = $query
             ->orderByRaw("
-                CASE 
-                    WHEN fecha_modifica IS NULL OR fecha_modifica = '' 
-                    THEN fecha_registra 
-                    ELSE fecha_modifica 
-                    END DESC
-                ")
+        CASE
+            WHEN fecha_modifica IS NULL OR fecha_modifica = ''
+            THEN fecha_registra
+            ELSE fecha_modifica
+                END DESC
+            ")
             ->orderBy('cod_prestacion', 'desc')
             ->limit($limit)
             ->get();
+
         return $results;
     }
 
