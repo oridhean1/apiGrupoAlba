@@ -907,6 +907,7 @@ Route::group([
 
     Route::get('obtener-dictamen-medico', [App\Http\Controllers\liquidaciones\LiqDictamenMedicoController::class, 'getBuscarId']);
     Route::get('facturas-liquidadas', [App\Http\Controllers\liquidaciones\LiquidacionesFacturaController::class, 'getFacturaLiquidaciones']);
+    Route::get('facturas-liquidadas-detallado-export', [App\Http\Controllers\liquidaciones\LiquidacionesFacturaController::class, 'getFacturaLiquidacionesDetallado']);
     Route::get('facturas-liquidadas-cabecera', [App\Http\Controllers\liquidaciones\LiquidacionesFacturaController::class, 'getCabeceraFacturaLiquidacion']);
     Route::get('obtener-matriz-medicamentos', [App\Http\Controllers\liquidaciones\LiqMatrizMedicamentosController::class, 'getMatriz']);
     Route::get('ver-adjunto', [App\Http\Controllers\liquidaciones\LiqDocumentosAdjuntosController::class, 'getVerAdjunto']);
@@ -1509,6 +1510,7 @@ Route::group([
     'prefix' => '/v1/dashboard-consumo'
 ], function () {
     Route::get('buscar-dashboard', [App\Http\Controllers\DashboardConsumo\Dashboard::class, 'getDashboard']);
+    Route::get('detalles-consumos-afiliado', [App\Http\Controllers\DashboardConsumo\Dashboard::class, 'getDetallesConsumosAfiliado']);
 });
 
 

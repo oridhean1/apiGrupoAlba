@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\DashboardConsumo;
 
 use App\Http\Controllers\Controller;
+use App\Models\afiliado\AfiliadoPadronEntity;
 use App\Models\BonoClinicoEntity;
 use App\Models\Internaciones\InternacionesEntity;
 use App\Models\PrestacionesMedicas\PrestacionesPracticaLaboratorioEntity;
@@ -163,6 +164,42 @@ class Dashboard extends RoutingController
                 'total_liquidaciones' => $totalLiqFormateado,
                 'titular' => $totalTitular,
                 'familia' => $totalfamiliar
+            ]
+        ]);
+
+    }
+
+    public function getDetallesConsumosAfiliado(Request $request)
+    {
+        $afiliado = AfiliadoPadronEntity::with(['obrasocial', 'tipoParentesco', 'sexo'])
+            ->when($request->dni, function ($q) use ($request) {
+                $q->where('dni', $request->dni);
+            })
+            ->when($request->cuil_benef, function ($q) use ($request) {
+                $q->where('cuil_benef', $request->cuil_benef);
+            })
+            ->first();
+
+        if (!$afiliado) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No se encontró un afiliado con los criterios de búsqueda.'
+            ], 404);
+        }
+
+        $bonos = $this->aplicarFiltros(BonoClinicoEntity::with(['tipoBono', 'medico', 'usuario']), $request, 'fecha_registra', 'afiliado')->get();
+
+        $autorizaciones = $this->aplicarFiltros(PrestacionesPracticaLaboratorioEntity::with(['estadoPrestacion', 'prestador', 'profesional']), $request, 'fecha_registra', 'afiliado')->get();
+
+        $internaciones = $this->aplicarFiltros(InternacionesEntity::with(['prestador', 'tipoInternacion', 'tipoHabitacion', 'categoria', 'estadoPrestacion']), $request, 'fecha_internacion', 'afiliado')->get();
+
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'afiliado' => $afiliado,
+                'bonos' => $bonos,
+                'autorizaciones' => $autorizaciones,
+                'internaciones' => $internaciones
             ]
         ]);
     }

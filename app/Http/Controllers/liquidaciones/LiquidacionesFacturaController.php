@@ -16,6 +16,11 @@ class LiquidacionesFacturaController extends Controller
         return $repo->findTopByFechaRecepcionBetweenAndEstadoAndNumFacturaLike($request);
     }
 
+    public function getFacturaLiquidacionesDetallado(LiquidacionesFacturaRepository $repo, Request $request)
+    {
+        return response()->json($repo->findTopByFechaRecepcionBetweenAndEstadoAndNumFacturaLikeDetallado($request));
+    }
+
 
     public function getCabeceraFacturaLiquidacion(LiquidacionesFacturaRepository $repo, Request $request)
     {
