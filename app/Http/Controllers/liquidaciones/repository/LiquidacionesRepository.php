@@ -146,7 +146,7 @@ class LiquidacionesRepository
     {
         return DB::select("SELECT fecha_prestacion,id_identificador_practica,codigo_practica,practica,
             costo_practica,cantidad,porcentaje_hon,porcentaje_gast,monto_facturado,monto_aprobado,monto_debitado,
-            coseguro,debita_coseguro,debita_iva,id_tipo_motivo_debito,motivo_debito,observacion_debito,id_detalle
+            coseguro,debita_coseguro,debita_iva,id_tipo_motivo_debito,motivo_debito,observacion_debito,id_detalle,hospital,periodo
             FROM vw_detalle_liquidaciones WHERE id_liquidacion = ?", [$id]);
     }
 
@@ -161,7 +161,7 @@ class LiquidacionesRepository
     {
         return DB::select("SELECT fecha_prestacion,id_identificador_practica,codigo_practica,practica,
             costo_practica,cantidad,porcentaje_hon,porcentaje_gast,monto_facturado,monto_aprobado,monto_debitado,
-            coseguro,debita_coseguro,debita_iva,id_tipo_motivo_debito,motivo_debito,observacion_debito,id_detalle
+            coseguro,debita_coseguro,debita_iva,id_tipo_motivo_debito,motivo_debito,observacion_debito,id_detalle,hospital,periodo
             FROM vw_detalle_liquidaciones WHERE id_liquidacion = ?", [$id]);
     }
 
@@ -225,6 +225,8 @@ class LiquidacionesRepository
                 'id_tipo_motivo_debito' => $value['id_tipo_motivo_debito'],
                 'observacion_debito' => $value['observacion_debito'],
                 'monto_debitado' => $value['monto_debitado'],
+                'hospital' => $value['hospital'] ?? null,
+                'periodo' => $value['periodo'] ?? null,
             ];
 
             $totalFacturado += $value['monto_facturado'];

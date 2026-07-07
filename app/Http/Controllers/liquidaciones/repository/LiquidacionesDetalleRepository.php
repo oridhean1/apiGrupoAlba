@@ -29,7 +29,9 @@ class LiquidacionesDetalleRepository
             'id_tipo_motivo_debito' => $params['id_tipo_motivo_debito'],
             'observacion_debito' => $params['observacion_debito'],
             'monto_debitado' => $params['monto_debitado'],
-            'estado' => '1'
+            'estado' => '1',
+            'hospital' => $params['hospital'],
+            'periodo' => $params['periodo'],
         ]);
     }
 
@@ -73,6 +75,8 @@ class LiquidacionesDetalleRepository
         $linea->id_tipo_motivo_debito = $params->id_tipo_motivo_debito;
         $linea->observacion_debito = $params->observacion_debito;
         $linea->monto_debitado = $params->monto_debitado;
+        $linea->hospital = $params->hospital;
+        $linea->periodo = $params->periodo;
         $linea->update();
 
         return $linea;
@@ -95,6 +99,8 @@ class LiquidacionesDetalleRepository
         $linea->id_tipo_motivo_debito = $params['id_tipo_motivo_debito'];
         $linea->observacion_debito = $params['observacion_debito'];
         $linea->monto_debitado = $params['monto_debitado'];
+        $linea->hospital = $params['hospital'];
+        $linea->periodo = $params['periodo'];
         $linea->update();
 
         return $linea;

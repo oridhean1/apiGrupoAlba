@@ -29,6 +29,8 @@ class LiquidacionDetalleEntity extends Model
         'id_tipo_motivo_debito',
         'observacion_debito',
         'monto_debitado',
-        'estado'
+        'estado',
+        'hospital',
+        'periodo'
     ];
 }
