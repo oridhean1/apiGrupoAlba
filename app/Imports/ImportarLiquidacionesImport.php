@@ -82,7 +82,9 @@ class ImportarLiquidacionesImport implements ToCollection, WithStartRow
                         'observacion_debito'       => $row[8],
                         'monto_debitado'           => $row[6],
                         'id_afiliado'              => $afiliado->id,
-                        'dni_afiliado'             => $afiliado->dni
+                        'dni_afiliado'             => $afiliado->dni,
+                        'hospital'                 =>null,
+                        'periodo'                  =>null,
                     ];
                 } else {
                     $this->practicasNoEncontradas[] = [
