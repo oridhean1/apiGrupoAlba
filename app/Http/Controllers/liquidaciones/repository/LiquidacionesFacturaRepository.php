@@ -134,7 +134,7 @@ class LiquidacionesFacturaRepository
                     det.motivo_debito,
                     det.observacion_debito,
                     det.afiliado,
-                    det.edad_afiliado,
+                    COALESCE(TIMESTAMPDIFF(YEAR, padron.fe_nac, COALESCE(NULLIF(det.fecha_prestacion, ''), fa.fecha_recepcion, CURDATE())), det.edad_afiliado, 0) as edad_afiliado,
                     det.dni_afiliado,
                     det.fecha_prestacion,
                     det.tipo as detalle_tipo,
@@ -150,18 +150,18 @@ class LiquidacionesFacturaRepository
                 LEFT JOIN (
                     SELECT  codigo_practica, practica, monto_facturado, monto_aprobado, monto_debitado, 
                             coseguro, debita_coseguro, motivo_debito, observacion_debito, afiliado, 
-                            edad_afiliado, dni_afiliado, tipo, id_factura, fecha_prestacion
+                            edad_afiliado, dni_afiliado, tipo, id_factura, fecha_prestacion, id_liquidacion
                     FROM vw_detalle_liquidaciones WHERE id_factura IN ($facturasStr)
                     UNION ALL
                     SELECT id_medicamento as codigo_practica, medicamento as practica, monto_facturado, 
                            0 as monto_aprobado, 0 as monto_debitado, 0 as coseguro, 0 as debita_coseguro, 
                            motivo_debito, '' as observacion_debito, '' as afiliado, '' as edad_afiliado, 
-                           '' as dni_afiliado, tipo, id_factura, '' as fecha_prestacion
+                           '' as dni_afiliado, tipo, id_factura, '' as fecha_prestacion, id_liquidacion
                     FROM vw_detalle_medicamentos WHERE id_factura IN ($facturasStr)
                 ) as det ON fa.id_factura = det.id_factura
-                LEFT JOIN tb_padron padron ON padron.dni = det.dni_afiliado AND det.dni_afiliado != ''
-                LEFT JOIN tb_liquidaciones l ON l.id_factura = fa.id_factura AND l.id_afiliado = padron.id AND det.tipo = 'Practica'
-                LEFT JOIN tb_liquidaciones_medicamentos lm ON lm.id_factura = fa.id_factura AND lm.id_afiliado = padron.id AND det.tipo = 'Medicamento'
+                LEFT JOIN tb_liquidaciones l ON l.id_liquidacion = det.id_liquidacion AND det.tipo = 'Practica'
+                LEFT JOIN tb_liquidaciones_medicamentos lm ON lm.id_liquidacion = det.id_liquidacion AND det.tipo = 'Medicamento'
+                LEFT JOIN tb_padron padron ON padron.id = COALESCE(l.id_afiliado, lm.id_afiliado)
                 WHERE fa.id_factura IN ($facturasStr)
                 ORDER BY fa.fecha_registra_factura DESC, fa.prestador_fantasia ASC
             ";
