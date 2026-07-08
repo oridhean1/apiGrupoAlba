@@ -21,6 +21,7 @@ use App\Models\RelacionLaboralModelo;
 use App\Models\User;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Carbon\Carbon;
+use Exception;
 use GuzzleHttp\Exception\ServerException;
 use GuzzleHttp\Client;
 use Illuminate\Http\Request;
@@ -1312,6 +1313,142 @@ class PadronController extends Controller
             $pdf = Pdf::loadView('memorando.memorando', ['data' => $model, 'tipo' => $request->tipo, 'periodo' => $request->desde]);
             $pdf->setPaper('A4');
             return $pdf->download('memorando.pdf');
+        }
+    }
+
+    public function importarExcelPadron(Request $request)
+    {
+        $request->validate([
+            'archivo_excel' => 'required|mimes:xlsx,xls,csv'
+        ]);
+        try {
+            // 1. Leer el archivo Excel y mapearlo
+            $datosExcel = Excel::toArray([], $request->file('archivo_excel'))[0];
+            array_shift($datosExcel); // Quitar encabezados
+            $datosMapeadosDelExcel = [];
+            foreach ($datosExcel as $fila) {
+                if (isset($fila[0])) {
+                    $cuil = $fila[0];
+                    $datosMapeadosDelExcel[$cuil] = [
+                        'cuil' => $cuil,
+                        'origen' => $fila[1] ?? null // Origen desde el excel (columna 2)
+                    ];
+                }
+            }
+            $cuilsDelExcel = array_keys($datosMapeadosDelExcel);
+            // =================================================================
+            // 2. CREAR LA CONEXIÓN DINÁMICA HACIA EL ORIGEN
+            // =================================================================
+            config(['database.connections.db_origen' => [
+                'driver'    => 'mysql',
+                'host'      => '127.0.0.1',
+                'port'      => '3306',
+                'database'  => 'u979626107_albasalud',
+                'username'  => 'u979626107_albasalud',
+                'password'  => 'zDHwQ|T4*',
+                'charset'   => 'utf8mb4',
+                'collation' => 'utf8mb4_unicode_ci',
+                'prefix'    => '',
+                'strict'    => true,
+                'engine'    => null,
+            ]]);
+            // 3. Dividimos en lotes de 1000
+            $lotes = array_chunk($cuilsDelExcel, 1000);
+            // Iniciamos transacción en la base de datos DESTINO (Tu .env actual)
+            DB::beginTransaction();
+            foreach ($lotes as $loteDeCuils) {
+
+                // 4. BÚSQUEDA MASIVA EN EL ORIGEN (Conexión dinámica)
+                $registrosEncontrados = DB::connection('db_origen')->table('tb_padron')
+                    ->whereIn('cuil_benef', $loteDeCuils)
+                    ->get();
+
+                // Buscar los que YA existen en DESTINO (Tu .env actual) para ignorarlos
+                $cuilsExistentes = DB::table('tb_padron')
+                    ->whereIn('cuil_benef', $loteDeCuils)
+                    ->pluck('cuil_benef')
+                    ->toArray();
+
+                // 5. PREPARAR DATA E INYECTAR CAMPOS EXTRA
+                $datosAInsertar = [];
+                foreach ($registrosEncontrados as $registro) {
+
+                    // Si ya existe en la BD destino, saltamos este registro
+                    if (in_array($registro->cuil_benef, $cuilsExistentes)) {
+                        continue;
+                    }
+
+                    $dataDelExcel = $datosMapeadosDelExcel[$registro->cuil_benef];
+                    // --- AGREGAMOS LOS CAMPOS EXTRA ---
+                    $datosAInsertar[] = [
+                        'cuil_tit' => $registro->cuil_tit,
+                        'cuil_benef'=> $registro->cuil_benef,
+                        'id_tipo_documento'=> $registro->id_tipo_documento,
+                        'dni'=> $registro->dni,
+                        'nombre'=> $registro->nombre,
+                        'apellidos'=> $registro->apellidos,
+                        'id_sexo'=> $registro->id_sexo,
+                        'id_estado_civil'=> $registro->id_estado_civil,
+                        'fe_nac'=> $registro->fe_nac,
+                        'id_nacionalidad'=> $registro->id_nacionalidad,
+                        'calle'=> $registro->calle,
+                        'numero'=> $registro->numero,
+                        'piso'=> $registro->piso,
+                        'depto'=> $registro->depto,
+                        'id_localidad'=> $registro->id_localidad,
+                        'id_partido'=> $registro->id_partido,
+                        'id_provincia'=> $registro->id_provincia,
+                        'telefono'=> $registro->telefono,
+                        'fe_alta'=> $registro->fe_alta,
+                        'id_usuario'=> 2,
+                        'fecha_carga'=> $registro->fecha_carga,
+                        'id_tipo_beneficiario'=> $registro->id_tipo_beneficiario,
+                        'id_situacion_de_revista'=> $registro->id_situacion_de_revista,
+                        'id_tipo_domicilio'=> $registro->id_tipo_domicilio,
+                        'id_parentesco'=> $registro->id_parentesco,
+                        'email'=> $registro->email,
+                        'celular'=> $registro->celular,
+                        'fe_baja'=> $registro->fe_baja,
+                        'activo'=> $registro->activo,
+                        'id_estado_super'=> $registro->id_estado_super,
+                        'id_cpostal'=> $registro->id_cpostal,
+                        'observaciones'=> $registro->observaciones,
+                        'id_delegacion'=> 1,
+                        'domicilio_postal'=> $registro->domicilio_postal,
+                        'domicilio_laboral'=> $registro->domicilio_laboral,
+                        'id_locatario'=> 8,
+                        'patologia'=> $registro->patologia,
+                        'descripcion_patologia'=> $registro->descripcion_patologia,
+                        'medicacion'=> $registro->medicacion,
+                        'descripcion_medicacion'=> $registro->descripcion_medicacion,
+                        'credencial'=> $registro->credencial,
+                        'extracapita'=> $registro->extracapita,
+                        'id_baja_motivos'=> $registro->id_baja_motivos,
+                        'id_comercial_origen'=> 8,
+                        'id_comercial_caja'=> 11,
+                        'discapacidad'=> $registro->discapacidad,
+                        'orden_grupo'=> $registro->orden_grupo,
+                        // Campos Extra:
+                        'estado_imprimir' => "0",
+                    ];
+                }
+                // 6. INSERT MASIVO EN LA DB DESTINO (Usando .env actual)
+                if (count($datosAInsertar) > 0) {
+                    DB::table('tb_padron')
+                        ->insert($datosAInsertar);
+                }
+            }
+            // Confirmamos que todo salió bien y guardamos permanentemente en el destino
+            DB::commit();
+            DB::purge('db_origen'); // Limpiamos la conexión de memoria origen
+            return response()->json([
+                'message' => 'Procesamiento exitoso',
+                'total_procesados' => count($cuilsDelExcel)
+            ]);
+        } catch (Exception $e) {
+            // Si algo falla, revertimos los cambios en el destino
+            DB::rollBack();
+            return response()->json(['error' => 'Error: ' . $e->getMessage()], 500);
         }
     }
 }

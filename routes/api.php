@@ -82,6 +82,7 @@ Route::group([
     Route::get('getReportesAfil', [App\Http\Controllers\PadronController::class, 'srvReportesAfiliado']);
     Route::get('getReportesCuadroAfil', [App\Http\Controllers\PadronController::class, 'srvReportesCuadroAfiliado']);
     Route::post('postExportMemo', [App\Http\Controllers\PadronController::class, 'exportarMemo']);
+    Route::post('importarExcelPadron', [App\Http\Controllers\PadronController::class, 'importarExcelPadron']);
 });
 
 Route::group([

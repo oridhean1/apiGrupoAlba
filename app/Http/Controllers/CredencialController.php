@@ -80,6 +80,10 @@ class CredencialController extends Controller
         DB::table('tb_usuarios')->insertOrIgnore($data); */
 
         $datos = AfiliadoPadronEntity::with('detalleplan.addplan', 'tipoParentesco', 'origen')->where('dni', $request->dni)->first();
+        if ($datos->estado_imprimir == 0) {
+            return response()->json(['error' => 'No tiene permiso para imprimir'], 404);
+        }
+
         if ($datos->activo != 0) {
             $now = new \DateTime('now', new \DateTimeZone('America/Argentina/Buenos_Aires'));
             $grupal = AfiliadoPadronEntity::with('detalleplan.addplan', 'tipoParentesco', 'origen')->where('cuil_tit', $datos->cuil_tit)->where('activo', '1')
@@ -162,6 +166,9 @@ class CredencialController extends Controller
         $user = Auth::user();
         $now = new \DateTime('now', new \DateTimeZone('America/Argentina/Buenos_Aires'));
         $datos = AfiliadoPadronEntity::with('detalleplan.addplan', 'tipoParentesco', 'origen')->where('dni', $user->documento)->first();
+        if ($datos->estado_imprimir == 0) {
+            return response()->json(['error' => 'No tiene permiso para imprimir'], 404);
+        }
         if ($request->id == '0') {
             $grupal = AfiliadoPadronEntity::with('detalleplan.addplan', 'tipoParentesco', 'origen')->where('cuil_tit', $datos->cuil_tit)->where('activo', '1')
                 ->OrderBy('id_parentesco', 'asc')->get();
@@ -170,10 +177,10 @@ class CredencialController extends Controller
                 ->OrderBy('id_parentesco', 'asc')->get();
         }
         $grupal = $grupal->map(function ($item, $index) use ($request) {
-                $item->correlativo = $index; // empieza en 0
-                $item->es_seleccionado = ($item->dni == $request->dni);
-                return $item;
-            });
+            $item->correlativo = $index; // empieza en 0
+            $item->es_seleccionado = ($item->dni == $request->dni);
+            return $item;
+        });
         if ($datos) {
             foreach ($grupal as $afiliado) {
                 if ($afiliado->id_parentesco == '00') {
