@@ -64,6 +64,9 @@ class LiquidacionesFacturaRepository
 
     public function findTopByFechaRecepcionBetweenAndEstadoAndNumFacturaLikeDetallado($params)
     {
+        
+        $wherePadron = "";
+
         $query = DB::table('vw_liquidacion_factura_unica');
 
         if (!empty($params->num_factura)) {
@@ -89,8 +92,20 @@ class LiquidacionesFacturaRepository
             });
         }
 
+        if (!empty($params->id_comercial_origen)) {
+            $wherePadron .= " AND padron.id_comercial_origen = " . (int)$params->id_comercial_origen;
+        }
+
+        if (!empty($params->id_comercial_caja)) {
+            $wherePadron .= " AND padron.id_comercial_caja = " . (int)$params->id_comercial_caja;
+        }
+
+        if (!empty($params->id_tipo_plan)) {
+            $wherePadron .= " AND detalle_plan.id_tipo_plan = " . (int)$params->id_tipo_plan;
+        }
+
         $facturas = $query->pluck('id_factura')->toArray();
-        
+
         if (count($facturas) == 0) {
             return [];
         }
@@ -121,7 +136,7 @@ class LiquidacionesFacturaRepository
                     fa.delegacion,
                     fa.periodo,
                     fa.tipo_carga_detalle,
-                    fa.locatorio as origen, 
+                    fa.locatorio as marca, 
                     fa.fecha_registra_factura as fecha_registro_factura,
                     
                     det.codigo_practica,
@@ -141,7 +156,9 @@ class LiquidacionesFacturaRepository
                     
                     padron.cuil_tit as cuil_titular,
                     padron.cuil_benef as cuil_beneficiario,
-                    
+                    plan.tipo as tipo_plan,
+                    origen.detalle_comercial_origen,
+                    caja.detalle_comercial_caja,
                     COALESCE(l.diagnostico, lm.diagnostico) as diagnostico,
                     COALESCE(l.observaciones, lm.observaciones) as observaciones,
                     COALESCE(l.fecha_registra, lm.fecha_registra) as fecha_registro_liq,
@@ -162,10 +179,22 @@ class LiquidacionesFacturaRepository
                 LEFT JOIN tb_liquidaciones l ON l.id_liquidacion = det.id_liquidacion AND det.tipo = 'Practica'
                 LEFT JOIN tb_liquidaciones_medicamentos lm ON lm.id_liquidacion = det.id_liquidacion AND det.tipo = 'Medicamento'
                 LEFT JOIN tb_padron padron ON padron.id = COALESCE(l.id_afiliado, lm.id_afiliado)
+                LEFT JOIN(
+                        SELECT
+                        id_padron,
+                        MAX(id_tipo_plan) id_tipo_plan
+                        FROM tb_detalle_padron_tipo_plan
+                        GROUP BY id_padron
+                        ) detalle_plan
+                ON detalle_plan.id_padron = padron.dni
+                LEFT JOIN tb_tipo_plan plan on detalle_plan.id_tipo_plan = plan.id_tipo_plan
+                LEFT JOIN tb_comercial_caja caja on caja.id_comercial_caja=padron.id_comercial_caja
+                LEFT JOIN tb_comercial_origen origen on origen.id_comercial_origen = padron.id_comercial_origen
                 WHERE fa.id_factura IN ($facturasStr)
+                $wherePadron
                 ORDER BY fa.fecha_registra_factura DESC, fa.prestador_fantasia ASC
             ";
-            
+
             $chunkResults = DB::select($sql);
             $results = array_merge($results, $chunkResults);
         }
