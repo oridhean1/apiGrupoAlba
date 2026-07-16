@@ -34,8 +34,9 @@ return new class extends Migration
             // cruzando la columna "banco" del Excel contra las cuentas de la razón social elegida;
             // nullable porque un mismo extracto puede traer movimientos de bancos que no matcheamos.
             $table->integer('id_cuenta_bancaria')->nullable()->after('id_extracto');
-            // Razón social desnormalizada desde la cuenta bancaria, para filtrar sin JOIN
-            $table->integer('id_razon')->after('id_cuenta_bancaria');
+            // Razón social desnormalizada desde la cuenta bancaria, para filtrar sin JOIN.
+            // Nullable en un primer paso para no romper filas históricas; se completa abajo.
+            $table->integer('id_razon')->nullable()->after('id_cuenta_bancaria');
 
             // Columnas del Excel (modelo unificado)
             $table->date('fecha')->nullable()->after('id_razon');
@@ -57,8 +58,15 @@ return new class extends Migration
             $table->dateTime('fecha_confirma')->nullable()->after('id_usuario_confirma');
 
             $table->foreign('id_cuenta_bancaria')->references('id_cuenta_bancaria')->on('tb_tes_cuentas_bancarias');
-            $table->foreign('id_razon')->references('id_razon')->on('tb_razones_sociales');
             $table->foreign('id_movimiento_match')->references('id_movimiento')->on('tb_tes_movimiento_cuenta_bancaria');
+        });
+
+        // Backfill de filas históricas (si las hay) antes de exigir id_razon NOT NULL.
+        DB::table('tb_tes_extracto_bancarios')->whereNull('id_razon')->update(['id_razon' => 1]);
+
+        Schema::table('tb_tes_extracto_bancarios', function (Blueprint $table) {
+            $table->integer('id_razon')->nullable(false)->change();
+            $table->foreign('id_razon')->references('id_razon')->on('tb_razones_sociales');
         });
     }
 
