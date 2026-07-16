@@ -14,8 +14,9 @@ return new class extends Migration
     public function up()
     {
         Schema::table('tb_tes_extracto_bancarios', function (Blueprint $table) {
-            // Eliminar columnas que ya no se usan del esquema viejo
+            // Eliminar columnas del esquema viejo (no usadas por el modelo unificado Cygnus)
             $table->dropColumn([
+                'id_entidad_bancaria',
                 'fecha_operacion',
                 'fecha_valor',
                 'codigo',
@@ -29,15 +30,35 @@ return new class extends Migration
                 'causal'
             ]);
 
-            // Agregar las columnas nuevas que pide el Excel y Cygnus AI
-            $table->date('fecha')->nullable()->after('id_entidad_bancaria');
+            // Cuenta bancaria propia (reemplaza a id_entidad_bancaria). Se resuelve por fila
+            // cruzando la columna "banco" del Excel contra las cuentas de la razón social elegida;
+            // nullable porque un mismo extracto puede traer movimientos de bancos que no matcheamos.
+            $table->integer('id_cuenta_bancaria')->nullable()->after('id_extracto');
+            // Razón social desnormalizada desde la cuenta bancaria, para filtrar sin JOIN
+            $table->integer('id_razon')->after('id_cuenta_bancaria');
+
+            // Columnas del Excel (modelo unificado)
+            $table->date('fecha')->nullable()->after('id_razon');
+            $table->string('banco', 100)->nullable()->after('fecha'); // texto informativo tal cual viene en la columna B del Excel
             $table->decimal('saldo', 18, 2)->nullable()->after('importe');
             $table->string('referencia', 100)->nullable()->after('saldo');
-            
-            // Campos de Inteligencia y Conciliación
-            $table->string('estado_conciliacion', 50)->default('PENDIENTE')->after('detalle');
+
+            // Detalle parseado (formato "NOMBRE | CUIT | INFO") para las reglas de score
+            $table->string('detalle_nombre', 150)->nullable()->after('detalle');
+            $table->string('detalle_cuit', 20)->nullable()->after('detalle_nombre');
+
+            // Conciliación / matching
+            $table->string('estado_conciliacion', 50)->default('PENDIENTE')->after('detalle_cuit');
             $table->integer('score_matching')->nullable()->after('estado_conciliacion');
-            $table->integer('id_comprobante_financiero')->nullable()->after('score_matching');
+            $table->integer('id_movimiento_match')->nullable()->after('score_matching');
+
+            // Auditoría de confirmación manual
+            $table->integer('id_usuario_confirma')->nullable()->after('fecha_registra');
+            $table->dateTime('fecha_confirma')->nullable()->after('id_usuario_confirma');
+
+            $table->foreign('id_cuenta_bancaria')->references('id_cuenta_bancaria')->on('tb_tes_cuentas_bancarias');
+            $table->foreign('id_razon')->references('id_razon')->on('tb_razones_sociales');
+            $table->foreign('id_movimiento_match')->references('id_movimiento')->on('tb_tes_movimiento_cuenta_bancaria');
         });
     }
 
@@ -49,17 +70,28 @@ return new class extends Migration
     public function down()
     {
         Schema::table('tb_tes_extracto_bancarios', function (Blueprint $table) {
-            // Revertir agregados
+            $table->dropForeign(['id_cuenta_bancaria']);
+            $table->dropForeign(['id_razon']);
+            $table->dropForeign(['id_movimiento_match']);
+
             $table->dropColumn([
+                'id_cuenta_bancaria',
+                'id_razon',
                 'fecha',
+                'banco',
                 'saldo',
                 'referencia',
+                'detalle_nombre',
+                'detalle_cuit',
                 'estado_conciliacion',
                 'score_matching',
-                'id_comprobante_financiero'
+                'id_movimiento_match',
+                'id_usuario_confirma',
+                'fecha_confirma'
             ]);
 
             // Restaurar viejas (tipos genéricos para rollback)
+            $table->integer('id_entidad_bancaria')->nullable();
             $table->date('fecha_operacion')->nullable();
             $table->date('fecha_valor')->nullable();
             $table->string('codigo')->nullable();

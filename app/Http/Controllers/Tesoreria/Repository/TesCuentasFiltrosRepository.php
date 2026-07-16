@@ -9,9 +9,10 @@ use Illuminate\Support\Facades\DB;
 class TesCuentasFiltrosRepository
 {
 
-    public function findByListAlls()
+    public function findByListAlls($idRazon = null)
     {
-        return TesCuentasBancariasEntity::with(['tipoCuenta', 'entidadBancaria', 'tipoMoneda'])
+        return TesCuentasBancariasEntity::with(['tipoCuenta', 'entidadBancaria', 'tipoMoneda', 'razonSocial'])
+            ->when($idRazon, fn ($q) => $q->where('id_razon', $idRazon))
             ->orderByDesc('id_cuenta_bancaria')
             ->get();
     }

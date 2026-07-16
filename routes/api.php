@@ -1196,8 +1196,10 @@ Route::group(
         Route::post('operacion-manual', [App\Http\Controllers\Tesoreria\Services\TesOperacionesManualesController::class, 'getNuevaOperacion']);
         Route::post('operacion-manual-enlazar-factura', [App\Http\Controllers\Tesoreria\Services\TesOperacionesManualesController::class, 'getEnalazarFacturaObraSocial']);
         Route::post('procesar-conciliacion-bancaria', [App\Http\Controllers\Tesoreria\Services\TesConciliacionBancariaController::class, 'getProcesar']);
-        Route::post('import-extracto-bancario', [App\Http\Controllers\Tesoreria\Services\TesExtractosBacariosController::class, 'getImportarExtracto']);
+        Route::post('previsualizar-extracto-bancario', [App\Http\Controllers\Tesoreria\Services\TesExtractosBacariosController::class, 'getPrevisualizarExtracto']);
+        Route::post('guardar-conciliacion-bancaria', [App\Http\Controllers\Tesoreria\Services\TesExtractosBacariosController::class, 'getGuardarConciliacion']);
         Route::post('ejecutar-cygnus-finance-ai', [App\Http\Controllers\Tesoreria\Services\CygnusFinanceAiController::class, 'ejecutarMotorMatching']);
+        Route::post('confirmar-match-extracto', [App\Http\Controllers\Tesoreria\Services\TesExtractosBacariosController::class, 'getConfirmarMatch']);
         Route::post('procesar-cheque', [App\Http\Controllers\Tesoreria\Services\TesChequesController::class, 'getProcesar']);
 
         Route::get('imprimir-reporte-pago-opa/{id}', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'printOrderPay']);

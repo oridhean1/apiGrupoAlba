@@ -17,7 +17,7 @@ class TesCuentasFilterController extends Controller
         if (!is_null($request->banco)) {
             $data = $repo->findByListBanco($request->banco);
         } else {
-            $data = $repo->findByListAlls();
+            $data = $repo->findByListAlls($request->id_razon);
         }
 
         return response()->json($data);

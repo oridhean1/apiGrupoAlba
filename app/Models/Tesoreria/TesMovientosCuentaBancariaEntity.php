@@ -28,4 +28,19 @@ class TesMovientosCuentaBancariaEntity extends Model
     {
         return $this->hasOne(TesCuentasBancariasEntity::class, 'id_cuenta_bancaria', 'id_cuenta_bancaria');
     }
+
+    public function pago()
+    {
+        return $this->hasOne(TesPagoEntity::class, 'id_pago', 'id_pago');
+    }
+
+    public function operacion()
+    {
+        return $this->hasOne(TesOperacionesManualesEntity::class, 'id_operacion', 'id_operacion');
+    }
+
+    public function matcheos()
+    {
+        return $this->hasMany(TesConciliacionMatcheoEntity::class, 'id_movimiento_interno', 'id_movimiento');
+    }
 }

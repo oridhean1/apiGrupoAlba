@@ -2,7 +2,7 @@
 
 namespace App\Models\Tesoreria;
 
-use App\Models\LocatorioModelos;
+use App\Models\configuracion\RazonSocialModelo;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 
@@ -15,7 +15,8 @@ class TesExtractosBancariosEntity extends Model
     public $timestamps = false;
 
     protected $fillable = [
-        'id_entidad_bancaria',
+        'id_cuenta_bancaria',
+        'id_razon',
         'fecha',
         'banco',
         'concepto',
@@ -23,24 +24,37 @@ class TesExtractosBancariosEntity extends Model
         'saldo',
         'referencia',
         'detalle',
+        'detalle_nombre',
+        'detalle_cuit',
         // Campos Cygnus Finance AI
         'estado_conciliacion',
         'score_matching',
-        'id_comprobante_financiero',
+        'id_movimiento_match',
         // Campos de auditoría
         'id_usuario',
         'fecha_registra',
-        'observaciones',
-        'id_locatario'
+        'id_usuario_confirma',
+        'fecha_confirma',
+        'observaciones'
     ];
 
-    public function entidadBancaria()
+    public function cuentaBancaria()
     {
-        return $this->hasOne(TesEntidadesBancariasEntity::class, 'id_entidad_bancaria', 'id_entidad_bancaria');
+        return $this->hasOne(TesCuentasBancariasEntity::class, 'id_cuenta_bancaria', 'id_cuenta_bancaria');
     }
 
-    public function locatario()
+    public function razonSocial()
     {
-        return $this->hasOne(LocatorioModelos::class, 'id_locatorio', 'id_locatario');
+        return $this->hasOne(RazonSocialModelo::class, 'id_razon', 'id_razon');
+    }
+
+    public function movimientoMatch()
+    {
+        return $this->hasOne(TesMovientosCuentaBancariaEntity::class, 'id_movimiento', 'id_movimiento_match');
+    }
+
+    public function matcheos()
+    {
+        return $this->hasMany(TesConciliacionMatcheoEntity::class, 'id_extracto_bancario', 'id_extracto');
     }
 }

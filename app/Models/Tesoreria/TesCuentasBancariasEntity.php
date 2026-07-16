@@ -2,6 +2,7 @@
 
 namespace App\Models\Tesoreria;
 
+use App\Models\configuracion\RazonSocialModelo;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 
@@ -14,6 +15,7 @@ class TesCuentasBancariasEntity extends Model
     public $timestamps = false;
 
     protected $fillable = [
+        'id_razon',
         'numero_cuenta',
         'nombre_cuenta',
         'id_tipo_cuenta',
@@ -28,6 +30,11 @@ class TesCuentasBancariasEntity extends Model
         'id_tipo_moneda',
         'limite_sobregiro'
     ];
+
+    public function razonSocial()
+    {
+        return $this->hasOne(RazonSocialModelo::class, 'id_razon', 'id_razon');
+    }
 
     public function tipoCuenta()
     {

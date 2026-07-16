@@ -6,33 +6,40 @@ use App\Models\User;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 
-class FinanceAiMatchingEntity extends Model
+class TesConciliacionMatcheoEntity extends Model
 {
     use HasFactory;
 
-    protected $table = 'tb_finance_ai_matching';
+    protected $table = 'tb_tes_conciliacion_matcheo';
     protected $primaryKey = 'id_matching';
     public $timestamps = false;
 
     protected $fillable = [
-        'id_extracto_bancario', // BIGINT / INT
-        'tipo_origen_interno',  // VARCHAR(50) Ej: 'MOVIMIENTO_TESORERIA', 'ORDEN_PAGO'
-        'id_origen_interno',    // BIGINT / INT
-        'score_obtenido',       // DECIMAL(5,2) / FLOAT / INT (Para porcentaje del 0 al 100)
-        'reglas_cumplidas',     // JSON / TEXT (Para guardar arrays stringificados)
-        'id_usuario_aprobador', // BIGINT / INT (Nullable)
-        'fecha_matching',       // DATETIME / TIMESTAMP
-        'observaciones'         // TEXT / VARCHAR(255) (Nullable)
+        'id_extracto_bancario',
+        'id_movimiento_interno',
+        'tipo_origen_interno', // PAGO / TRANSFERENCIA / OPERACION_MANUAL (informativo)
+        'score_obtenido',
+        'reglas_cumplidas',
+        'estado', // 0 = cargado/sugerido, 1 = aprobado
+        'id_usuario_aprobador',
+        'fecha_matching',
+        'observaciones'
     ];
 
     protected $casts = [
         'reglas_cumplidas' => 'array',
+        'estado' => 'boolean',
         'fecha_matching' => 'datetime'
     ];
 
     public function extracto()
     {
         return $this->belongsTo(TesExtractosBancariosEntity::class, 'id_extracto_bancario', 'id_extracto');
+    }
+
+    public function movimiento()
+    {
+        return $this->belongsTo(TesMovientosCuentaBancariaEntity::class, 'id_movimiento_interno', 'id_movimiento');
     }
 
     public function usuarioAprobador()
