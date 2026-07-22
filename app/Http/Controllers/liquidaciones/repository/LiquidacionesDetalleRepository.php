@@ -32,6 +32,7 @@ class LiquidacionesDetalleRepository
             'estado' => '1',
             'hospital' => $params['hospital'],
             'periodo' => $params['periodo'],
+            'tipo_hospital' => $params['tipo_hospital'],
         ]);
     }
 
@@ -77,6 +78,7 @@ class LiquidacionesDetalleRepository
         $linea->monto_debitado = $params->monto_debitado;
         $linea->hospital = $params->hospital;
         $linea->periodo = $params->periodo;
+        $linea->tipo_hospital = $params->tipo_hospital;
         $linea->update();
 
         return $linea;
@@ -101,6 +103,7 @@ class LiquidacionesDetalleRepository
         $linea->monto_debitado = $params['monto_debitado'];
         $linea->hospital = $params['hospital'];
         $linea->periodo = $params['periodo'];
+        $linea->tipo_hospital = $params['tipo_hospital'];
         $linea->update();
 
         return $linea;

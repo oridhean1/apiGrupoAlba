@@ -85,6 +85,7 @@ class ImportarLiquidacionesImport implements ToCollection, WithStartRow
                         'dni_afiliado'             => $afiliado->dni,
                         'hospital'                 =>null,
                         'periodo'                  =>null,
+                        'tipo_hospital'            =>null,
                     ];
                 } else {
                     $this->practicasNoEncontradas[] = [

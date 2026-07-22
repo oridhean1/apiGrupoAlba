@@ -227,6 +227,7 @@ class LiquidacionesRepository
                 'monto_debitado' => $value['monto_debitado'],
                 'hospital' => $value['hospital'] ?? null,
                 'periodo' => $value['periodo'] ?? null,
+                'tipo_hospital' => $value['tipo_hospital'] ?? null,
             ];
 
             $totalFacturado += $value['monto_facturado'];

@@ -31,6 +31,7 @@ class LiquidacionDetalleEntity extends Model
         'monto_debitado',
         'estado',
         'hospital',
-        'periodo'
+        'periodo',
+        'tipo_hospital'
     ];
 }
