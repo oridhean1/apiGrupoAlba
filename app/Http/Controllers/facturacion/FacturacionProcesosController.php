@@ -181,12 +181,10 @@ class FacturacionProcesosController extends Controller
 
 
                 /* || $facturacion->id_tipo_factura == 17 */
-                if (!is_null($facturacion->id_proveedor)) {
+                if (!is_null($facturacion->id_proveedor) || !is_null($facturacion->id_prestador)) {
                     $opaData = (object) [
-
-                        // $tesoreria->findByCreate(new TesOrdenPagoEntity([
-                        "id_proveedor" => $facturacion->id_tipo_factura == 16 || $facturacion->id_tipo_factura == 20 ? $facturacion->id_proveedor : null,
-                        "id_prestador" => $facturacion->id_tipo_factura == 17 ? $facturacion->id_prestador : null,
+                        "id_proveedor" => $facturacion->id_proveedor,
+                        "id_prestador" => $facturacion->id_prestador,
                         "monto_orden_pago" => $facturacion->total_neto,
                         "id_moneda" => '1',
                         "fecha_emision" => $facturacion->fecha_comprobante,
@@ -196,8 +194,7 @@ class FacturacionProcesosController extends Controller
                         "monto_anticipado" => 0.00,
                         "observaciones" => '',
                         "id_factura" => $facturacion->id_factura,
-                        "tipo_factura" => $facturacion->id_tipo_factura == 17 ? 'PRESTADOR' : 'PROVEEDOR'
-                        // ]));
+                        "tipo_factura" => !is_null($facturacion->id_prestador) ? 'PRESTADOR' : 'PROVEEDOR'
                     ];
                     $opaCreada = $tesoreria->findByCreate($opaData);
 
@@ -216,7 +213,7 @@ class FacturacionProcesosController extends Controller
                             'monto_opa' => $facturacion->total_neto,
                             'recursor' => '0',
                             'fecha_probable_pago' => $fechaActual,
-                            'tipo_factura' => 'PROVEEDOR',
+                            'tipo_factura' => !is_null($facturacion->id_prestador) ? 'PRESTADOR' : 'PROVEEDOR',
                             'pago_emergencia' => '0'
                         ];
 

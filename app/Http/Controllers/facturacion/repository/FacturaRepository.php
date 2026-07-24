@@ -50,7 +50,9 @@ class FacturaRepository
             'id_locatorio' => $params->id_locatorio,
             'estado' => ($params->id_tipo_factura == 16 || $params->id_tipo_factura == 20 ? '1' : ($params->id_tipo_factura == 17 ? '0' : '0')),
             'observaciones_resumen' => $params->observaciones_resumen,
-            'comprobante_relacionado' => $params->comprobante_relacionado
+            'comprobante_relacionado' => $params->comprobante_relacionado,
+            'tipo_hospital' => $params->tipo_hospital ?? null,
+            'cod_hospital' => $params->cod_hospital ?? null
         ]);
     }
 
@@ -156,6 +158,9 @@ class FacturaRepository
         $facturacion->id_locatorio = $params->id_locatorio;
         $facturacion->observaciones_resumen = $params->observaciones_resumen;
         $facturacion->comprobante_relacionado = $params->comprobante_relacionado;
+        $facturacion->tipo_hospital = $params->tipo_hospital ?? null;
+        $facturacion->cod_hospital = $params->cod_hospital ?? null;
+        
         $facturacion->fecha_registra = $params->fecha_registra;
 
         if (!is_null($nombre_archivo)) {

@@ -54,7 +54,9 @@ class FacturacionDatosEntity extends Model
         'total_aprobado_liquidacion',
         'estado_pago',
         'observaciones_resumen',
-        'comprobante_relacionado'
+        'comprobante_relacionado',
+        'tipo_hospital',
+        'cod_hospital',
     ];
 
     public function detalle()

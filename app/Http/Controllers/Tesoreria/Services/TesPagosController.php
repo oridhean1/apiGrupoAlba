@@ -176,7 +176,8 @@ class TesPagosController extends Controller
                         1,
                         $dataOpa->monto_orden_pago,
                         '1',
-                        $params->fecha_confirma_pago
+                        $params->fecha_confirma_pago,
+                        $params->tipo_factura
                     ));
                     //@ASIGNAMOS CODDIGO BARRAS
                     $codigoVerificado = $generadorCodigos->getGenerarCodigoUnico($boletaPago->id_pago);

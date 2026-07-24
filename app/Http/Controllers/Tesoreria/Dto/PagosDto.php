@@ -19,7 +19,7 @@ class PagosDto
     public $tipo_factura;
     public $pago_emergencia;
 
-    public function __construct($id_orden_pago,  $id_cuenta_bancaria,  $fecha_probable_pago,  $anticipo,  $comprobante,  $id_forma_pago,  $monto_pago,  $observaciones,  $id_estado_orden_pago,  $monto_opa,  $recursor,  $fecha_confirma_pago)
+    public function __construct($id_orden_pago,  $id_cuenta_bancaria,  $fecha_probable_pago,  $anticipo,  $comprobante,  $id_forma_pago,  $monto_pago,  $observaciones,  $id_estado_orden_pago,  $monto_opa,  $recursor,  $fecha_confirma_pago, $tipo_factura = 'PROVEEDOR')
     {
         $this->id_orden_pago = $id_orden_pago;
         $this->id_cuenta_bancaria = $id_cuenta_bancaria;
@@ -33,7 +33,7 @@ class PagosDto
         $this->monto_opa = $monto_opa;
         $this->recursor = $recursor;
         $this->fecha_confirma_pago = $fecha_confirma_pago;
-        $this->tipo_factura = 'PROVEEDOR';
+        $this->tipo_factura = $tipo_factura;
         $this->pago_emergencia = 0;
     }
 }
