@@ -259,6 +259,19 @@ class TesPagosRepository
         }
     }
 
+    /**
+     * Cuenta de origen que viene en una fila del modal, normalizada.
+     *
+     * El front manda '' cuando el select quedó sin elegir, y la columna es int: MySQL rechaza el
+     * string vacío con "1366 Incorrect integer value".
+     */
+    private function cuentaDeLaFila($fila): ?int
+    {
+        $valor = $fila->id_cuenta_bancaria ?? null;
+
+        return ($valor === '' || is_null($valor)) ? null : (int) $valor;
+    }
+
     public function findByConfirmarPago($params)
     {
 
@@ -302,6 +315,13 @@ class TesPagosRepository
                     ));
                 }
 
+                // La cuenta de origen se guarda EN EL ABONO. Hasta el 2026-09-09 este create no
+                // la incluía: los pagos que nacían acá quedaban con la cuenta en NULL y el retiro
+                // de fondos caía de rebote a la cuenta de la boleta, así que dos transferencias de
+                // bancos distintos se debitaban las dos de la misma. El modelo lo soportaba desde
+                // 2026_09_06_100000; este camino no lo usaba.
+                $idCuentaFila = $this->cuentaDeLaFila($pagos) ?? $this->cuentaDeLaFila($params);
+
                 $nuevo = TesPagosParciales::create([
                     'fecha_registra' => $this->fechaActual,
                     'fecha_confirma_pago' => $pagos->fecha_confirma_pago,
@@ -313,6 +333,8 @@ class TesPagosRepository
                     'id_pago' => $pago->id_pago,
                     'monto_restante' => $pagos->monto_restante,
                     'id_fecha_probable' => $idFecha,
+                    'id_cuenta_bancaria' => $idCuentaFila,
+                    'id_banco_emisor' => $this->bancoDeCuenta($idCuentaFila),
                 ]);
 
                 if (!is_null($idFecha)) {
@@ -328,6 +350,13 @@ class TesPagosRepository
                 $query->num_cheque=$pagos->num_cheque;
                 $query->id_usuario=$this->user->cod_usuario;
                 $query->id_pago=$pagos->id_pago;
+                // La cuenta editada en la fila también se guarda. Si la fila no la trae, se deja
+                // la que el abono ya tenía: no se pisa con null.
+                $cuentaEditada = $this->cuentaDeLaFila($pagos);
+                if (!is_null($cuentaEditada)) {
+                    $query->id_cuenta_bancaria = $cuentaEditada;
+                    $query->id_banco_emisor    = $this->bancoDeCuenta($cuentaEditada);
+                }
                 $query->monto_restante=$pagos->monto_restante;
                 $query->update();
             }
@@ -366,9 +395,24 @@ class TesPagosRepository
         // "1366 Incorrect integer value". Llega vacío cuando la orden ya tiene sus pagos emitidos
         // y el modal no pide la cuenta (la define cada abono desde 2026_09_06_100000), o cuando
         // el campo quedó sin completar en el circuito viejo. (2026-09-06)
-        $pago->id_cuenta_bancaria = $params->id_cuenta_bancaria !== '' && $params->id_cuenta_bancaria !== null
-            ? $params->id_cuenta_bancaria
-            : null;
+        // Cuenta a nivel BOLETA: desde el 2026-09-09 el modal ya no la pregunta —cada abono trae
+        // la suya— así que acá suele venir vacía. Es informativa: la que vale para debitar es la
+        // de cada abono.
+        //
+        // Si no viene, NO se pisa con null: eso borraría la cuenta de las 255 boletas que ya la
+        // tienen, y es el valor al que cae de rebote el retiro de fondos de los abonos viejos que
+        // no tienen cuenta propia. En su defecto se toma la del primer abono, para que ese
+        // rebote siga teniendo a dónde caer.
+        $cuentaDelRequest = $this->cuentaDeLaFila($params);
+
+        if (!is_null($cuentaDelRequest)) {
+            $pago->id_cuenta_bancaria = $cuentaDelRequest;
+        } elseif (is_null($pago->id_cuenta_bancaria)) {
+            $pago->id_cuenta_bancaria = collect($params->lista_pagos)
+                ->map(fn($f) => $this->cuentaDeLaFila($f))
+                ->filter()
+                ->first();
+        }
         $pago->fecha_confirma_pago = $this->fechaActual;
         $pago->id_forma_pago = 0;
         $pago->monto_pago = $params->anticipo == '1' ? $params->monto_anticipado : $params->monto_pago;
