@@ -1261,6 +1261,8 @@ Route::group(
         Route::put('instrumentos-pago/{idPago}/numero', [App\Http\Controllers\Tesoreria\Services\TesInstrumentoPagoController::class, 'getGuardarNumero']);  // Guardar un numero como borrador
         Route::post('instrumentos-pago/{idPago}/acreditar', [App\Http\Controllers\Tesoreria\Services\TesInstrumentoPagoController::class, 'getAcreditar']);  // Acreditar (desde conciliacion)
         Route::post('instrumentos-pago/{idPago}/rechazar', [App\Http\Controllers\Tesoreria\Services\TesInstrumentoPagoController::class, 'getRechazar']);  // Rechazar (carga MANUAL del usuario)
+        Route::put('instrumentos-pago/{idPago}/editar', [App\Http\Controllers\Tesoreria\Services\TesInstrumentoPagoController::class, 'getEditarAbono']);  // Corregir cuenta y/o monto de un pago sin emitir
+        Route::post('instrumentos-pago/{idPago}/anular', [App\Http\Controllers\Tesoreria\Services\TesInstrumentoPagoController::class, 'getAnularAbono']);  // Anular un pago sin emitir: su fecha vuelve al plan
 
         // Endpoints de saldos - deudas pendientes
         Route::get('saldos-proveedores-prestadores', [App\Http\Controllers\Tesoreria\Services\SaldosController::class, 'getListarProveedoresPrestadoresConDeudas']);  // Lista proveedores/prestadores con deudas

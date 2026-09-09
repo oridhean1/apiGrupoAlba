@@ -695,6 +695,24 @@ class TestOrdenPagoRepository
     }
 
     /**
+     * Razón social (entidad pagadora del grupo) a la que pertenece una OPA.
+     *
+     * No es una columna propia de la orden: sale de sus facturas
+     * (`tb_tes_orden_pago_detalle` -> `tb_facturacion_datos.id_locatorio`), igual que el filtro
+     * de Carga de eCheq. Un ANTICIPO no tiene facturas imputadas, así que devuelve null y las
+     * validaciones que dependan de esto no se aplican.
+     */
+    public function razonSocialDeOpa($idOpa): ?int
+    {
+        $idRazon = DB::table('tb_tes_orden_pago_detalle as od')
+            ->join('tb_facturacion_datos as fd', 'fd.id_factura', '=', 'od.id_factura')
+            ->where('od.id_orden_pago', $idOpa)
+            ->value('fd.id_locatorio');
+
+        return $idRazon ? (int) $idRazon : null;
+    }
+
+    /**
      * Total efectivamente pagado de una OPA: suma de sus pagos CONFIRMADOS.
      *
      * OJO con el monto: `monto_pago` viene NULL en buena parte de los pagos confirmados

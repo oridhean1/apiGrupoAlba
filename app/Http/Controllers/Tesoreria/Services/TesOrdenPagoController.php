@@ -329,7 +329,11 @@ class TesOrdenPagoController extends Controller
             'pagos',
             'pagos.formaPago',
             'pagos.cuenta.entidadBancaria',
-            'pagos.pagosParciales',
+            // Solo abonos VIVOS: un eCheq anulado o rechazado no va en el comprobante — es un
+            // documento que sale al proveedor, no puede listar pagos que se dieron de baja. Y al
+            // excluirlos, la fecha que quedó liberada vuelve a salir como pendiente de emisión,
+            // que es lo correcto: está de nuevo en "A emitir". (2026-09-07)
+            'pagos.pagosParciales' => fn($q) => $q->vivos(),
             'pagos.fechaprobablepagos',
             'pagos.pagosParciales.bancoEmisor',
             'pagos.pagosParciales.estadoInstrumento',
@@ -422,7 +426,8 @@ class TesOrdenPagoController extends Controller
             'prestador.tipoIva',
             'pagos.formaPago',
             'pagos.cuenta.entidadBancaria',
-            'pagos.pagosParciales'
+            // Igual que en printOrderPay: un eCheq anulado o rechazado no va en el comprobante.
+            'pagos.pagosParciales' => fn($q) => $q->vivos(),
         ])->whereRelation('factura', 'id_factura', $id)
             ->first();
 

@@ -39,6 +39,31 @@ class TesPagosParciales extends Model
         'fecha_rechazo',
     ];
 
+    /**
+     * Abonos VIVOS: los que efectivamente representan plata.
+     *
+     * Un abono RECHAZADO (5) o ANULADO (6) no cuenta para nada — esa plata no salió, o volvió.
+     * El resto del sistema ya aplicaba esta exclusión a mano en cada consulta (el tope de
+     * emisión, lo pagado de la orden, los listados de eCheq); acá queda en un solo lugar para
+     * que las relaciones también la respeten.
+     *
+     * Los pagos del circuito VIEJO tienen `id_estado_instrumento` en NULL y siguen contando: son
+     * anteriores al ciclo de vida del instrumento, no son abonos muertos.
+     *
+     * Se agregó el 2026-09-07: después de anular dos eCheq de la OPA-4284, el modal de Confirmar
+     * Pago los seguía listando como abonos, y el comprobante PDF también los imprimía.
+     */
+    public function scopeVivos($query)
+    {
+        return $query->where(function ($q) {
+            $q->whereNull('id_estado_instrumento')
+                ->orWhereNotIn('id_estado_instrumento', [
+                    \App\Http\Controllers\Tesoreria\Repository\TesInstrumentoPagoRepository::RECHAZADO,
+                    \App\Http\Controllers\Tesoreria\Repository\TesInstrumentoPagoRepository::ANULADO,
+                ]);
+        });
+    }
+
     public function formaPago()
     {
         return $this->hasOne(TesTipoFormasPagoEntity::class, 'id_forma_pago', 'id_forma_pago');

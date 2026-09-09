@@ -265,6 +265,80 @@ class TesInstrumentoPagoController extends Controller
     }
 
     /**
+     * PUT /v1/tesoreria/instrumentos-pago/{idPago}/editar
+     *
+     * Corrige la cuenta de origen y/o el monto de un pago que todavía no salió.
+     *
+     * El requerimiento lo habilita: *"mientras el pago esté creado pero sin confirmar, la orden
+     * es editable por completo"*. Antes, corregir una cuenta mal elegida obligaba a anular y
+     * reemitir la ORDEN entera, con número de OPA nuevo. (2026-09-07)
+     */
+    public function getEditarAbono(Request $request, $idPago)
+    {
+        try {
+            $datos = [];
+
+            // `array_key_exists`, no `filled`: mandar la cuenta en null es un cambio válido
+            // (quitarla), y un monto ausente significa "no lo toques", que es distinto de cero.
+            if ($request->has('id_cuenta_bancaria')) {
+                $cuenta = $request->input('id_cuenta_bancaria');
+                $datos['id_cuenta_bancaria'] = ($cuenta === '' || is_null($cuenta)) ? null : (int) $cuenta;
+            }
+
+            if ($request->has('monto')) {
+                $datos['monto'] = $request->input('monto');
+            }
+
+            if (empty($datos)) {
+                return response()->json(['message' => 'No se indicó qué cambiar del pago'], 422);
+            }
+
+            $pago = $this->repository->editarAbonoNoEmitido($idPago, $datos, $this->opaRepository);
+
+            return response()->json([
+                'message' => 'Pago actualizado',
+                'data'    => $pago,
+            ], 200);
+        } catch (QueryException $e) {
+            Log::error('Error editar abono: ' . $e->getMessage());
+            return response()->json(['message' => 'Error al editar el pago'], 500);
+        } catch (\Exception $e) {
+            return response()->json(['message' => $e->getMessage()], 409);
+        }
+    }
+
+    /**
+     * POST /v1/tesoreria/instrumentos-pago/{idPago}/anular
+     *
+     * Anula un pago que todavía no salió y devuelve su fecha al plan, para reemitirla bien.
+     *
+     * Distinto de `getRechazar`: el rechazo es para un eCheq que YA salió y el banco devolvió.
+     * Esto es para uno que nunca tendría que haber existido.
+     */
+    public function getAnularAbono(Request $request, $idPago)
+    {
+        try {
+            $motivo = $request->input('motivo_rechazo');
+
+            if (is_null($motivo) || trim((string) $motivo) === '') {
+                return response()->json(['message' => 'El motivo de la anulación es requerido'], 422);
+            }
+
+            $pago = $this->repository->anularAbonoNoEmitido($idPago, $motivo, $this->opaRepository);
+
+            return response()->json([
+                'message' => 'Pago anulado. Su fecha vuelve a estar disponible para emitir.',
+                'data'    => $pago,
+            ], 200);
+        } catch (QueryException $e) {
+            Log::error('Error anular abono: ' . $e->getMessage());
+            return response()->json(['message' => 'Error al anular el pago'], 500);
+        } catch (\Exception $e) {
+            return response()->json(['message' => $e->getMessage()], 409);
+        }
+    }
+
+    /**
      * GET /v1/tesoreria/instrumentos-pago/pendientes-numero?id_banco=
      *
      * OPs vigentes con eCheq todavía sin número, agrupadas por banco emisor.

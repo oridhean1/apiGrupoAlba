@@ -131,10 +131,17 @@ class TesInstrumentoPagoRepository
     {
         return DB::table('tb_tes_fecha_probable_pago as fp')
             ->whereIn('fp.id_pago', $this->boletasDeOpa($idOpa))
+            // Un abono ANULADO o RECHAZADO no ocupa su fecha: la fecha vuelve al plan y se puede
+            // volver a emitir. Sin esta exclusión, anular un pago mal cargado dejaba la fecha
+            // muerta para siempre y la orden imposible de completar. (2026-09-07)
             ->whereNotExists(function ($q) {
                 $q->select(DB::raw(1))
                     ->from('tb_tes_pago_parcial as pp')
-                    ->whereColumn('pp.id_fecha_probable', 'fp.id_fecha_probable');
+                    ->whereColumn('pp.id_fecha_probable', 'fp.id_fecha_probable')
+                    ->where(function ($w) {
+                        $w->whereNull('pp.id_estado_instrumento')
+                            ->orWhereNotIn('pp.id_estado_instrumento', [self::RECHAZADO, self::ANULADO]);
+                    });
             })
             ->orderBy('fp.orden_cuotas')
             ->get();
@@ -159,7 +166,17 @@ class TesInstrumentoPagoRepository
                 throw new \Exception("No se encontró la fecha de pago {$idFechaProbable}.");
             }
 
-            if (TesPagosParciales::where('id_fecha_probable', $idFechaProbable)->exists()) {
+            // Un abono ANULADO o RECHAZADO no ocupa su fecha: la fecha vuelve al plan y se puede
+            // volver a emitir. Sin esta exclusión, anular un pago mal cargado dejaba la fecha
+            // muerta para siempre y la orden imposible de completar. (2026-09-07)
+            if (
+                TesPagosParciales::where('id_fecha_probable', $idFechaProbable)
+                    ->where(function ($q) {
+                        $q->whereNull('id_estado_instrumento')
+                            ->orWhereNotIn('id_estado_instrumento', [self::RECHAZADO, self::ANULADO]);
+                    })
+                    ->exists()
+            ) {
                 throw new \Exception('Esa fecha de pago ya tiene su pago emitido.');
             }
 
@@ -176,20 +193,12 @@ class TesInstrumentoPagoRepository
             $boleta = TesPagoEntity::find($fecha->id_pago);
             $opa = TesOrdenPagoEntity::find($boleta->id_orden_pago);
 
-            // Lo ya emitido sobre esta orden, para saber cuánto queda.
-            //
-            // Los abonos RECHAZADOS y ANULADOS no cuentan: esa plata no salió (o volvió), así que
-            // no puede seguir ocupando lugar en el tope. Sin esta exclusión, rechazar un eCheq
-            // dejaba la orden imposible de volver a pagar.
-            $yaEmitido = (float) TesPagosParciales::whereIn(
-                'id_pago',
-                TesPagoEntity::where('id_orden_pago', $opa->id_orden_pago)->pluck('id_pago')
-            )
-                ->where(function ($q) {
-                    $q->whereNull('id_estado_instrumento')
-                        ->orWhereNotIn('id_estado_instrumento', [self::RECHAZADO, self::ANULADO]);
-                })
-                ->sum('monto_pago');
+            $opaRepo = new TestOrdenPagoRepository();
+
+            // Lo ya emitido sobre esta orden, para saber cuánto queda. Los abonos RECHAZADOS y
+            // ANULADOS no cuentan: esa plata no salió (o volvió), así que no puede seguir ocupando
+            // lugar en el tope. Sin eso, rechazar un eCheq dejaba la orden imposible de repagar.
+            $yaEmitido = $this->emitidoVivoDeOpa($opa->id_orden_pago);
 
             // No se puede emitir por encima de lo que realmente hay que pagarle al beneficiario.
             //
@@ -199,13 +208,7 @@ class TesInstrumentoPagoRepository
             // en abonos sobre una orden cuyo neto real era $78.960 — $1.060.351,04 de sobrepago,
             // y lo único que avisaba era un saldo en rojo en la grilla, que no bloquea nada.
             // (2026-09-05, ver docs/circuito-pagos/revisar-debito-no-descontado.md)
-            //
-            // Un ANTICIPO no tiene facturas imputadas: ahí el tope es su propio monto.
-            $tope = (new TestOrdenPagoRepository())->montoPagableOpa($opa->id_orden_pago);
-
-            if (self::aCentavos($tope) <= 0) {
-                $tope = (float) $opa->monto_orden_pago;
-            }
+            $tope = $this->topeDeOpa($opa->id_orden_pago, $opaRepo);
 
             if (self::aCentavos($yaEmitido + $monto) > self::aCentavos($tope)) {
                 $disponible = max(0, $tope - $yaEmitido);
@@ -218,6 +221,20 @@ class TesInstrumentoPagoRepository
                     number_format($disponible, 2, ',', '.')
                 ));
             }
+
+            // La cuenta de origen tiene que ser de la MISMA razón social que la orden.
+            //
+            // Esto ya se validaba al confirmar el pago (`TesPagosController::getConfirmarPago`),
+            // pero no acá — así que se podía emitir un eCheq desde una cuenta de otra entidad del
+            // grupo y recién enterarse al final, con el instrumento ya cargado y el número de
+            // eCheq gastado. Es el caso que lo destapó: la OPA 4521 (razón 1) terminó con un
+            // abono de $100.000 sobre una cuenta del Macro de la razón 2. (2026-09-07)
+            //
+            // Si el pago debita una cuenta de una razón y el asiento imputa la deuda en el plan
+            // de cuentas de otra, quedan dos contabilidades descuadradas entre sí.
+            $idCuenta = $datos['id_cuenta_bancaria'] ?? $boleta->id_cuenta_bancaria ?? null;
+
+            $this->validarCuentaDeRazonSocial($idCuenta, $opa->id_orden_pago, $opaRepo);
 
             $esEcheq = (int) $datos['id_forma_pago'] === self::FORMA_PAGO_ECHEQ;
 
@@ -240,14 +257,14 @@ class TesInstrumentoPagoRepository
                 'id_estado_instrumento' => $esEcheq ? self::PENDIENTE_EMISION : self::EMITIDO,
                 'fecha_emision_echeq'   => $fecha->fecha_probable_pago,
                 'id_banco_emisor'       => $this->resolverBancoEmisor(
-                    $datos['id_cuenta_bancaria'] ?? $boleta->id_cuenta_bancaria ?? null,
+                    $idCuenta,
                     $datos['id_banco_emisor'] ?? null
                 ),
                 // La cuenta de origen se guarda EN EL ABONO, no en la boleta: cada pago de una
                 // misma orden puede salir de una cuenta distinta. Hasta el 2026-09-06 esto vivía
                 // en `tb_tes_pago` y obligaba a que toda la orden se pagara desde una sola.
                 // Si no se indica, se hereda la de la boleta para no perder el dato.
-                'id_cuenta_bancaria'    => $datos['id_cuenta_bancaria'] ?? $boleta->id_cuenta_bancaria ?? null,
+                'id_cuenta_bancaria'    => $idCuenta,
             ]);
         });
     }
@@ -447,6 +464,183 @@ class TesInstrumentoPagoRepository
     }
 
     /**
+     * Corrige un pago que todavía NO salió: su cuenta de origen y/o su monto.
+     *
+     * Hasta el 2026-09-07 un eCheq ya emitido pero sin número no se podía tocar: si se elegía la
+     * cuenta equivocada, el único camino era anular y reemitir la ORDEN ENTERA, que además le
+     * cambia el número de OPA. Un mazazo para corregir un banco mal tipeado.
+     *
+     * El requerimiento lo habilita explícitamente: *"mientras el pago esté creado pero sin
+     * confirmar, la orden es editable por completo"*. Y hay precedente directo — `cambiarFormaPago()`
+     * ya edita un abono en este mismo estado, con este mismo guard.
+     *
+     * @param array $datos ['id_cuenta_bancaria' => ?int, 'monto' => ?float]
+     */
+    public function editarAbonoNoEmitido($idAbono, array $datos, TestOrdenPagoRepository $opaRepo): TesPagosParciales
+    {
+        return DB::transaction(function () use ($idAbono, $datos, $opaRepo) {
+            $abono = TesPagosParciales::find($idAbono);
+
+            if (is_null($abono)) {
+                throw new \Exception("No se encontró el abono {$idAbono}.");
+            }
+
+            // El límite es "todavía no salió". Un EMITIDO ya tiene número del banco y un
+            // ACREDITADO ya movió plata: esos van por rechazo, no por edición.
+            if (!in_array((int) $abono->id_estado_instrumento, [self::BORRADOR, self::PENDIENTE_EMISION], true)) {
+                throw new \Exception('Solo se puede editar un pago que todavía no fue emitido.');
+            }
+
+            $idOpa = $this->opaDeAbono($abono);
+
+            if (array_key_exists('id_cuenta_bancaria', $datos)) {
+                $idCuenta = $datos['id_cuenta_bancaria'];
+
+                $this->validarCuentaDeRazonSocial($idCuenta, $idOpa, $opaRepo);
+
+                $abono->id_cuenta_bancaria = $idCuenta;
+                // El banco sale de la cuenta: si se cambia una, la otra tiene que seguirla, si no
+                // queda un eCheq apuntando al banco viejo con la cuenta nueva.
+                $abono->id_banco_emisor = $this->resolverBancoEmisor($idCuenta, null);
+            }
+
+            if (array_key_exists('monto', $datos) && !is_null($datos['monto'])) {
+                $monto = (float) $datos['monto'];
+
+                if (self::aCentavos($monto) <= 0) {
+                    throw new \Exception('Hay que indicar el monto del pago.');
+                }
+
+                // El mismo tope que al emitir, pero sin contarse a sí mismo: si no, editar un
+                // abono de $100 a $101 se rechazaría por "ya emitido $100".
+                $tope = $this->topeDeOpa($idOpa, $opaRepo);
+                $yaEmitido = $this->emitidoVivoDeOpa($idOpa, $abono->id_pago_parcial);
+
+                if (self::aCentavos($yaEmitido + $monto) > self::aCentavos($tope)) {
+                    $disponible = max(0, $tope - $yaEmitido);
+
+                    throw new \Exception(sprintf(
+                        'El pago se pasa de lo que hay que pagar en esta orden. '
+                            . 'A pagar: $%s. Ya emitido: $%s. Disponible: $%s.',
+                        number_format($tope, 2, ',', '.'),
+                        number_format($yaEmitido, 2, ',', '.'),
+                        number_format($disponible, 2, ',', '.')
+                    ));
+                }
+
+                $abono->monto_pago     = $monto;
+                $abono->monto_restante = max(0, $tope - ($yaEmitido + $monto));
+            }
+
+            $abono->save();
+
+            $opaRepo->recalcularEstadoOpa($idOpa);
+
+            return $abono;
+        });
+    }
+
+    /**
+     * Anula un pago que todavía no salió y **devuelve su fecha al plan**.
+     *
+     * Es la salida para un abono que directamente no tendría que existir (el caso que lo motivó:
+     * el abono 1222, cargado sobre una cuenta de otra razón social). Sin esto, corregirlo obligaba
+     * a anular la orden completa.
+     *
+     * No se borra la fila: queda en ANULADO (6). El estado existía en el catálogo desde el
+     * principio pero solo lo usaba la anulación de la orden entera. Un abono anulado no cuenta
+     * para nada — ni para el tope, ni para lo pagado, ni para el estado de la orden — y su fecha
+     * planificada vuelve a aparecer en "A emitir" para reemitirla bien.
+     */
+    public function anularAbonoNoEmitido($idAbono, ?string $motivo, TestOrdenPagoRepository $opaRepo): TesPagosParciales
+    {
+        return DB::transaction(function () use ($idAbono, $motivo, $opaRepo) {
+            $abono = TesPagosParciales::find($idAbono);
+
+            if (is_null($abono)) {
+                throw new \Exception("No se encontró el abono {$idAbono}.");
+            }
+
+            if (!in_array((int) $abono->id_estado_instrumento, [self::BORRADOR, self::PENDIENTE_EMISION], true)) {
+                throw new \Exception(
+                    'Solo se puede anular un pago que todavía no fue emitido. '
+                        . 'Un eCheq ya emitido se da de baja por rechazo.'
+                );
+            }
+
+            $abono->id_estado_instrumento = self::ANULADO;
+            $abono->motivo_rechazo        = $motivo;
+            $abono->fecha_rechazo         = $this->fechaActual;
+            $abono->fecha_confirma_pago   = null;
+            $abono->save();
+
+            $opaRepo->recalcularEstadoOpa($this->opaDeAbono($abono));
+
+            return $abono;
+        });
+    }
+
+    /**
+     * La cuenta de origen tiene que ser de la misma razón social que la orden.
+     *
+     * Un ANTICIPO no tiene facturas imputadas, así que no tiene razón social: ahí no se valida.
+     */
+    private function validarCuentaDeRazonSocial($idCuenta, $idOpa, TestOrdenPagoRepository $opaRepo): void
+    {
+        if (is_null($idCuenta)) {
+            return;
+        }
+
+        $razonOpa = $opaRepo->razonSocialDeOpa($idOpa);
+
+        if (is_null($razonOpa)) {
+            return;
+        }
+
+        $razonCuenta = DB::table('tb_tes_cuentas_bancarias')
+            ->where('id_cuenta_bancaria', $idCuenta)
+            ->value('id_razon');
+
+        if (!is_null($razonCuenta) && (int) $razonCuenta !== $razonOpa) {
+            throw new \Exception(
+                'La cuenta de origen no pertenece a la razón social de la orden. '
+                    . 'Elegí una cuenta de la misma razón social para emitir este pago.'
+            );
+        }
+    }
+
+    /** Lo máximo que se puede pagar de una orden: lo imputado menos el débito de liquidación. */
+    private function topeDeOpa($idOpa, TestOrdenPagoRepository $opaRepo): float
+    {
+        $tope = $opaRepo->montoPagableOpa($idOpa);
+
+        if (self::aCentavos($tope) <= 0) {
+            // Un ANTICIPO no tiene facturas: su tope es su propio monto.
+            $tope = (float) TesOrdenPagoEntity::where('id_orden_pago', $idOpa)->value('monto_orden_pago');
+        }
+
+        return $tope;
+    }
+
+    /**
+     * Lo ya emitido sobre una orden, sin contar RECHAZADOS ni ANULADOS: esa plata no salió (o
+     * volvió), así que no puede seguir ocupando lugar en el tope.
+     */
+    private function emitidoVivoDeOpa($idOpa, $idAbonoExcluir = null): float
+    {
+        return (float) TesPagosParciales::whereIn(
+            'id_pago',
+            TesPagoEntity::where('id_orden_pago', $idOpa)->pluck('id_pago')
+        )
+            ->when(!is_null($idAbonoExcluir), fn($q) => $q->where('id_pago_parcial', '!=', $idAbonoExcluir))
+            ->where(function ($q) {
+                $q->whereNull('id_estado_instrumento')
+                    ->orWhereNotIn('id_estado_instrumento', [self::RECHAZADO, self::ANULADO]);
+            })
+            ->sum('monto_pago');
+    }
+
+    /**
      * Agrega a cada fila `monto_pagable` y `monto_disponible`, que es lo que la pantalla tiene que
      * mostrar y ofrecer para cargar.
      *
@@ -490,7 +684,20 @@ class TesInstrumentoPagoRepository
             ->select('p.id_orden_pago', DB::raw('SUM(pp.monto_pago) AS emitido'))
             ->pluck('emitido', 'p.id_orden_pago');
 
+        // Razón social de cada orden, para que el front solo ofrezca cuentas de esa entidad.
+        // Antes el desplegable listaba TODAS las cuentas del grupo y nada frenaba elegir una
+        // ajena: el error saltaba recién al confirmar el pago. (2026-09-07)
+        $razones = DB::table('tb_tes_orden_pago_detalle as od')
+            ->join('tb_facturacion_datos as fd', 'fd.id_factura', '=', 'od.id_factura')
+            ->whereIn('od.id_orden_pago', $idsOpa)
+            ->groupBy('od.id_orden_pago')
+            ->select('od.id_orden_pago', DB::raw('MIN(fd.id_locatorio) AS id_razon'))
+            ->pluck('id_razon', 'od.id_orden_pago');
+
         foreach ($filas as $fila) {
+            // Null en un ANTICIPO (no tiene facturas): ahí el front no filtra nada.
+            $fila->id_razon = $razones[$fila->id_orden_pago] ?? null;
+
             // Una orden sin facturas imputadas (un ANTICIPO) no tiene débito que descontar: su
             // tope es su propio monto, igual que en el freno.
             $pagable = (float) ($pagables[$fila->id_orden_pago] ?? 0);
@@ -528,10 +735,17 @@ class TesInstrumentoPagoRepository
             ->join('tb_tes_orden_pago as o', 'o.id_orden_pago', '=', 'p.id_orden_pago')
             ->leftJoin('tb_proveedor as prov', 'prov.cod_proveedor', '=', 'o.id_proveedor')
             ->leftJoin('tb_prestador as pres', 'pres.cod_prestador', '=', 'o.id_prestador')
+            // Un abono ANULADO o RECHAZADO no ocupa su fecha: la fecha vuelve al plan y se puede
+            // volver a emitir. Sin esta exclusión, anular un pago mal cargado dejaba la fecha
+            // muerta para siempre y la orden imposible de completar. (2026-09-07)
             ->whereNotExists(function ($q) {
                 $q->select(DB::raw(1))
                     ->from('tb_tes_pago_parcial as pp')
-                    ->whereColumn('pp.id_fecha_probable', 'fp.id_fecha_probable');
+                    ->whereColumn('pp.id_fecha_probable', 'fp.id_fecha_probable')
+                    ->where(function ($w) {
+                        $w->whereNull('pp.id_estado_instrumento')
+                            ->orWhereNotIn('pp.id_estado_instrumento', [self::RECHAZADO, self::ANULADO]);
+                    });
             })
             ->where('p.id_estado_orden_pago', '!=', TestOrdenPagoRepository::ESTADO_OPA_RECHAZADO)
             ->whereIn('o.id_estado_orden_pago', $this->estadosOpaViva())
@@ -591,6 +805,11 @@ class TesInstrumentoPagoRepository
             ])
             ->with(['bancoEmisor', 'cuentaBancaria', 'formaPago', 'pago.opa.proveedor', 'pago.opa.prestador'])
             ->get();
+
+        // Estas filas ahora se pueden editar en la pantalla (cuenta y monto), así que necesitan
+        // los mismos datos que "A emitir": la razón social para filtrar el desplegable de cuentas
+        // y el disponible para validar el monto. (2026-09-07)
+        $this->agregarMontosPagables($sinNumero);
 
         return ['planificados' => $planificados, 'sin_numero' => $sinNumero];
     }

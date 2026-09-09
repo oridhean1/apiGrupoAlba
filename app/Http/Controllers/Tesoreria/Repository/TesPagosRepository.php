@@ -122,7 +122,10 @@ class TesPagosRepository
             //'opa.factura.razonSocial',
             'opa.opadetalle.detallefc',
             'comprobantes',
-            'pagosParciales',
+            // Solo los abonos VIVOS: un eCheq anulado o rechazado no es un pago. Sin este filtro
+            // el modal de Confirmar Pago seguía listando los eCheq que se habían dado de baja y
+            // los sumaba como si fueran plata. (2026-09-07, OPA-4284)
+            'pagosParciales' => fn($q) => $q->vivos(),
             'pagosParciales.formaPago',
             // La cuenta de origen es del abono desde 2026_09_06_100000: el modal de Confirmar
             // Pago la muestra en vez de volver a preguntarla.
@@ -236,6 +239,26 @@ class TesPagosRepository
             ->get();
     }
 
+    /**
+     * Normaliza una fecha a 'Y-m-d' para poder compararla con el cronograma.
+     *
+     * El front manda a veces '2026-09-05' y a veces '2026-09-05 00:00:00'; el cronograma guarda
+     * `date`. Sin normalizar, la comparación de strings falla y el pago parece no pertenecer a
+     * ninguna fecha planificada.
+     */
+    private function soloFecha($valor): ?string
+    {
+        if (empty($valor)) {
+            return null;
+        }
+
+        try {
+            return \Carbon\Carbon::parse($valor)->toDateString();
+        } catch (\Throwable $e) {
+            return null;
+        }
+    }
+
     public function findByConfirmarPago($params)
     {
 
@@ -243,10 +266,43 @@ class TesPagosRepository
         $estado = null;
         $pago = TesPagoEntity::find($params->id_pago);
 
+        // Fechas del cronograma de esta boleta, indexadas por fecha, y cuáles ya están ocupadas
+        // por un abono vivo. Se calcula una sola vez, fuera del loop.
+        //
+        // ⚠️ Los abonos que nacían acá NO guardaban `id_fecha_probable`: quedaban sueltos del
+        // cronograma. Por eso no ocupaban ninguna fecha y nada impedía cargar una transferencia
+        // en la misma fecha en que ya había un eCheq emitido — el circuito de eCheq sí lo
+        // bloquea (`emitirPagoDeFecha`), pero este camino se lo saltaba entero.
+        // (2026-09-08, reportado sobre la OPA-4284)
+        $plan = DB::table('tb_tes_fecha_probable_pago')
+            ->where('id_pago', $pago->id_pago)
+            ->pluck('id_fecha_probable', 'fecha_probable_pago');
+
+        $ocupadas = TesPagosParciales::where('id_pago', $pago->id_pago)
+            ->whereNotNull('id_fecha_probable')
+            ->vivos()
+            ->pluck('id_pago_parcial', 'id_fecha_probable');
+
         foreach ($params->lista_pagos as $pagos) {
             $pagosparciales = $pagosparciales + $pagos->monto_pago;
             if (empty($pagos->id_pago_parcial)) {
-                TesPagosParciales::create([
+                // La fecha elegida se resuelve contra el cronograma. Si no coincide con ninguna
+                // fecha planificada queda en null: es un pago libre del circuito viejo, y así
+                // seguía funcionando antes (292 de 302 abonos en Alba están así).
+                $fechaElegida = $this->soloFecha($pagos->fecha_confirma_pago);
+                $idFecha = $fechaElegida ? ($plan[$fechaElegida] ?? null) : null;
+
+                if (!is_null($idFecha) && isset($ocupadas[$idFecha])) {
+                    throw new \Exception(sprintf(
+                        'La fecha %s ya tiene un pago cargado en esta orden (abono %s). '
+                            . 'Cada fecha del cronograma admite un solo pago: elegí otra fecha, '
+                            . 'o dá de baja el pago que ya está.',
+                        $fechaElegida,
+                        $ocupadas[$idFecha]
+                    ));
+                }
+
+                $nuevo = TesPagosParciales::create([
                     'fecha_registra' => $this->fechaActual,
                     'fecha_confirma_pago' => $pagos->fecha_confirma_pago,
                     'id_forma_pago' => $pagos->id_forma_pago,
@@ -256,7 +312,12 @@ class TesPagosRepository
                     'id_usuario' => $this->user->cod_usuario,
                     'id_pago' => $pago->id_pago,
                     'monto_restante' => $pagos->monto_restante,
+                    'id_fecha_probable' => $idFecha,
                 ]);
+
+                if (!is_null($idFecha)) {
+                    $ocupadas[$idFecha] = $nuevo->id_pago_parcial;
+                }
             }else{
                 $query=TesPagosParciales::find($pagos->id_pago_parcial);
                 $query->fecha_registra=$this->fechaActual;
@@ -271,10 +332,34 @@ class TesPagosRepository
                 $query->update();
             }
         }
-        if ($pagosparciales < $pago->monto_opa) {
-            $estado = 6;
-        } elseif ($pagosparciales == $pago->monto_opa) {
-            $estado = 5;
+        // Se compara contra lo PAGABLE (imputado menos débito de liquidación), no contra
+        // `$pago->monto_opa` — ese es el bruto que trajo la boleta al crearse, mismo problema que
+        // se corrigió para el estado derivado de la OPA (ver montoPagableOpa). Comparación en
+        // centavos: sumar floats de a uno arrastra error de redondeo y `==` nunca da exacto.
+        //
+        // ⚠️ Antes de este fix, `$estado` se calculaba y NUNCA se usaba: dos líneas más abajo
+        // `id_estado_orden_pago` quedaba hardcodeado en 5 (PAGADO) sin importar cuánto se hubiera
+        // pagado. Por eso el modal exigía "exactamente N abonos, uno por cada fecha planificada"
+        // antes de dejar confirmar: era la única forma de garantizar que el 5 hardcodeado no
+        // mintiera. Con el cálculo real acá, ya no hace falta esa restricción — se puede
+        // confirmar un pago PARCIAL (menos abonos que fechas) y la boleta queda en 6, no en 5.
+        // (2026-09-07)
+        $pagable = (new TestOrdenPagoRepository())->montoPagableOpa($pago->id_orden_pago);
+
+        if ($pagable <= 0) {
+            $pagable = (float) $pago->monto_opa;
+        }
+
+        $aCentavos = fn($monto) => (int) round(((float) $monto) * 100);
+
+        if ($aCentavos($pagosparciales) >= $aCentavos($pagable)) {
+            $estado = TestOrdenPagoRepository::ESTADO_OPA_PAGADO;
+        } elseif ($pagosparciales > 0) {
+            $estado = TestOrdenPagoRepository::ESTADO_OPA_PAGO_PARCIAL;
+        } else {
+            // Sin ningún abono (por ejemplo, un anticipo que todavía no se pagó): no se toca el
+            // estado previo de la boleta.
+            $estado = $pago->id_estado_orden_pago;
         }
 
         // El string vacío no es un id: la columna es int y MySQL lo rechaza con
@@ -287,7 +372,7 @@ class TesPagosRepository
         $pago->fecha_confirma_pago = $this->fechaActual;
         $pago->id_forma_pago = 0;
         $pago->monto_pago = $params->anticipo == '1' ? $params->monto_anticipado : $params->monto_pago;
-        $pago->id_estado_orden_pago = 5;
+        $pago->id_estado_orden_pago = $estado;
         $pago->anticipo = $params->anticipo;
         $pago->monto_anticipado = $params->monto_anticipado;
         $pago->num_cheque = $params->num_cheque;
