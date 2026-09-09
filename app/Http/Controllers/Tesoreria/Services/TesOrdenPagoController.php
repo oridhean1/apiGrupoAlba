@@ -75,6 +75,46 @@ class TesOrdenPagoController extends Controller
     }
 
     /**
+     * POST /v1/tesoreria/anular-opa
+     * Body: { id_orden_pago, motivo }
+     *
+     * Anula la orden SIN reemplazarla: se usa cuando directamente no tendría que existir.
+     * Sus facturas vuelven a estar disponibles para una orden nueva.
+     *
+     * 409 cuando choca contra una guarda (pagos confirmados, eCheq ya emitidos): el mensaje
+     * viene redactado para el usuario.
+     */
+    public function getAnularOpa(Request $request, TestOrdenPagoRepository $opa)
+    {
+        try {
+            $idOpa  = $request->input('id_orden_pago');
+            $motivo = $request->input('motivo');
+
+            if (!$idOpa) {
+                return response()->json(['message' => 'id_orden_pago es requerido'], 422);
+            }
+
+            if (is_null($motivo) || trim((string) $motivo) === '') {
+                return response()->json(['message' => 'El motivo de la anulacion es requerido'], 422);
+            }
+
+            $res = $opa->anularOpa($idOpa, $motivo);
+
+            if (!$res['ok']) {
+                return response()->json(['message' => $res['message']], 409);
+            }
+
+            return response()->json([
+                'message' => $res['message'],
+                'data'    => ['anulada' => $res['anulada']],
+            ], 200);
+        } catch (\Throwable $e) {
+            Log::error('Error anular OPA: ' . $e->getMessage());
+            return response()->json(['message' => 'Error al anular la orden de pago'], 500);
+        }
+    }
+
+    /**
      * POST /v1/tesoreria/anular-reemitir-opa
      * Body: { id_orden_pago, motivo }
      *

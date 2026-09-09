@@ -581,7 +581,11 @@ class TesInstrumentoPagoRepository
     }
 
     /**
-     * La cuenta de origen tiene que ser de la misma razón social que la orden.
+     * La cuenta de origen tiene que pertenecer a una de las razones sociales de la orden.
+     *
+     * Se valida contra el CONJUNTO, no contra una sola: una orden que mezcla facturas de dos
+     * entidades (anomalía de datos, pero existe) no tiene una razón social única, y elegir una al
+     * azar hacía que el sistema exigiera la cuenta equivocada. Ver `razonesSocialesDeOpa()`.
      *
      * Un ANTICIPO no tiene facturas imputadas, así que no tiene razón social: ahí no se valida.
      */
@@ -591,9 +595,9 @@ class TesInstrumentoPagoRepository
             return;
         }
 
-        $razonOpa = $opaRepo->razonSocialDeOpa($idOpa);
+        $razonesOpa = $opaRepo->razonesSocialesDeOpa($idOpa);
 
-        if (is_null($razonOpa)) {
+        if (empty($razonesOpa)) {
             return;
         }
 
@@ -601,7 +605,7 @@ class TesInstrumentoPagoRepository
             ->where('id_cuenta_bancaria', $idCuenta)
             ->value('id_razon');
 
-        if (!is_null($razonCuenta) && (int) $razonCuenta !== $razonOpa) {
+        if (!is_null($razonCuenta) && !in_array((int) $razonCuenta, $razonesOpa, true)) {
             throw new \Exception(
                 'La cuenta de origen no pertenece a la razón social de la orden. '
                     . 'Elegí una cuenta de la misma razón social para emitir este pago.'
@@ -684,19 +688,29 @@ class TesInstrumentoPagoRepository
             ->select('p.id_orden_pago', DB::raw('SUM(pp.monto_pago) AS emitido'))
             ->pluck('emitido', 'p.id_orden_pago');
 
-        // Razón social de cada orden, para que el front solo ofrezca cuentas de esa entidad.
+        // Razones sociales de cada orden, para que el front solo ofrezca cuentas de esa entidad.
         // Antes el desplegable listaba TODAS las cuentas del grupo y nada frenaba elegir una
         // ajena: el error saltaba recién al confirmar el pago. (2026-09-07)
+        //
+        // Se traen TODAS, no un `MIN(id_locatorio)`. Ese MIN elegía una al azar cuando la orden
+        // mezclaba facturas de dos entidades: la OPA-1102 se filtraba correctamente por razón 2
+        // pero se mostraba como razón 1, que son $273.838 de $12.312.369. (2026-09-09)
         $razones = DB::table('tb_tes_orden_pago_detalle as od')
             ->join('tb_facturacion_datos as fd', 'fd.id_factura', '=', 'od.id_factura')
             ->whereIn('od.id_orden_pago', $idsOpa)
-            ->groupBy('od.id_orden_pago')
-            ->select('od.id_orden_pago', DB::raw('MIN(fd.id_locatorio) AS id_razon'))
-            ->pluck('id_razon', 'od.id_orden_pago');
+            ->whereNotNull('fd.id_locatorio')
+            ->distinct()
+            ->get(['od.id_orden_pago', 'fd.id_locatorio'])
+            ->groupBy('id_orden_pago')
+            ->map(fn($g) => $g->pluck('id_locatorio')->map(fn($r) => (int) $r)->sort()->values()->all());
 
         foreach ($filas as $fila) {
-            // Null en un ANTICIPO (no tiene facturas): ahí el front no filtra nada.
-            $fila->id_razon = $razones[$fila->id_orden_pago] ?? null;
+            // Vacío en un ANTICIPO (no tiene facturas): ahí el front no filtra nada.
+            $fila->razones = $razones[$fila->id_orden_pago] ?? [];
+
+            // `id_razon` solo cuando es inequívoca. Con más de una no hay respuesta única, y
+            // contestar cualquiera es lo que causaba el bug.
+            $fila->id_razon = count($fila->razones) === 1 ? $fila->razones[0] : null;
 
             // Una orden sin facturas imputadas (un ANTICIPO) no tiene débito que descontar: su
             // tope es su propio monto, igual que en el freno.

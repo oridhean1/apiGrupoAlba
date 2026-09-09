@@ -704,12 +704,39 @@ class TestOrdenPagoRepository
      */
     public function razonSocialDeOpa($idOpa): ?int
     {
-        $idRazon = DB::table('tb_tes_orden_pago_detalle as od')
+        $razones = $this->razonesSocialesDeOpa($idOpa);
+
+        // Con más de una razón social no hay respuesta única, y devolver cualquiera de ellas es
+        // peor que no contestar: el `->value()` que había acá agarraba una arbitraria. En la
+        // OPA-1102 (id 3152) devolvía la razón 1, que son $273.838 de un total de $12.312.369 —
+        // el 2%. El sistema exigía pagar los $12,3M desde una cuenta de esa razón y rechazaba la
+        // que corresponde al 98% restante. (2026-09-09)
+        return count($razones) === 1 ? $razones[0] : null;
+    }
+
+    /**
+     * TODAS las razones sociales (entidades pagadoras del grupo) que aparecen en las facturas de
+     * una OPA.
+     *
+     * Normalmente es una sola: una orden se le paga a un beneficiario por cuenta de una entidad.
+     * Que haya más es una anomalía de datos —una sola en todo el sistema al 2026-09-09, la
+     * OPA-1102— pero el código no puede resolverla eligiendo una al azar.
+     *
+     * Un ANTICIPO no tiene facturas imputadas: devuelve vacío, y las validaciones que dependen
+     * de esto no se aplican.
+     */
+    public function razonesSocialesDeOpa($idOpa): array
+    {
+        return DB::table('tb_tes_orden_pago_detalle as od')
             ->join('tb_facturacion_datos as fd', 'fd.id_factura', '=', 'od.id_factura')
             ->where('od.id_orden_pago', $idOpa)
-            ->value('fd.id_locatorio');
-
-        return $idRazon ? (int) $idRazon : null;
+            ->whereNotNull('fd.id_locatorio')
+            ->distinct()
+            ->pluck('fd.id_locatorio')
+            ->map(fn($r) => (int) $r)
+            ->sort()
+            ->values()
+            ->all();
     }
 
     /**
@@ -1280,51 +1307,138 @@ class TestOrdenPagoRepository
      *
      * @return array{ok: bool, message: string, anulada: ?TesOrdenPagoEntity, nueva: ?TesOrdenPagoEntity}
      */
+    /**
+     * ¿Se puede anular esta orden? Devuelve el motivo del bloqueo, o null si se puede.
+     *
+     * Las guardas viven acá y no repetidas en cada método: `anularOpa()` y `anularYReemitir()`
+     * tienen que frenar exactamente por lo mismo. Si una fuera más permisiva que la otra, el
+     * camino laxo se volvería la puerta de atrás del estricto.
+     */
+    public function motivoQueImpideAnular($idOpa): ?string
+    {
+        $opa = TesOrdenPagoEntity::find($idOpa);
+
+        if (is_null($opa)) {
+            return "No se encontró la orden de pago {$idOpa}.";
+        }
+
+        if ((int) $opa->id_estado_orden_pago === self::ESTADO_OPA_RECHAZADO) {
+            return 'Esta orden de pago ya está anulada.';
+        }
+
+        // Guarda 1: plata efectivamente pagada. Anular por debajo de un pago confirmado dejaría
+        // el movimiento bancario sin ninguna orden que lo respalde.
+        if ($this->tienePagosConfirmados($idOpa)) {
+            return 'No se puede anular: la orden tiene pagos confirmados.';
+        }
+
+        // Guarda 2: un eCheq ya emitido está circulando aunque todavía no se haya acreditado.
+        // Hay que rechazarlo o anularlo primero; anular la OP por debajo dejaría el papel suelto.
+        // Los eCheq son ABONOS de la boleta, no la boleta misma (ver 2026_09_04_100900).
+        $emitidos = \App\Models\Tesoreria\TesPagosParciales::whereIn(
+            'id_pago',
+            TesPagoEntity::where('id_orden_pago', $idOpa)->pluck('id_pago')
+        )->whereIn('id_estado_instrumento', [
+            TesInstrumentoPagoRepository::EMITIDO,
+            TesInstrumentoPagoRepository::ACREDITADO,
+        ])->count();
+
+        if ($emitidos > 0) {
+            return "No se puede anular: hay {$emitidos} eCheq ya emitido(s). "
+                . 'Primero hay que rechazarlos o anularlos.';
+        }
+
+        return null;
+    }
+
+    /**
+     * Da de baja lo que cuelga de una orden que se está anulando.
+     *
+     * Los instrumentos que todavía no salieron pasan a ANULADO, y las boletas de la orden a
+     * RECHAZADO. Sin lo segundo la boleta seguía en su estado anterior y la orden anulada
+     * continuaba apareciendo como pendiente en la grilla de Pagos de Prestador/Proveedor, que
+     * muestra `tb_tes_pago.id_estado_orden_pago` directo como badge.
+     */
+    private function darDeBajaLoQueCuelgaDe($idOpa): void
+    {
+        $idsBoleta = TesPagoEntity::where('id_orden_pago', $idOpa)->pluck('id_pago');
+
+        \App\Models\Tesoreria\TesPagosParciales::whereIn('id_pago', $idsBoleta)
+            ->whereIn('id_estado_instrumento', [
+                TesInstrumentoPagoRepository::BORRADOR,
+                TesInstrumentoPagoRepository::PENDIENTE_EMISION,
+            ])->update(['id_estado_instrumento' => TesInstrumentoPagoRepository::ANULADO]);
+
+        TesPagoEntity::whereIn('id_pago', $idsBoleta)
+            ->update(['id_estado_orden_pago' => self::ESTADO_OPA_RECHAZADO]);
+    }
+
+    /**
+     * Anula una orden de pago, sin reemplazarla.
+     *
+     * Es el hermano simple de `anularYReemitir()`: mismas guardas, pero acá la orden muere y no
+     * nace ninguna otra. Se usa cuando la orden directamente no tendría que existir —a diferencia
+     * del reemplazo, que es para rehacerla.
+     *
+     * **Las facturas quedan libres.** No se toca el puente (`tb_tes_opa_factura`): la imputación
+     * ocurrió y es historia. Lo que las libera es que todos los cálculos de saldo e imputación
+     * excluyen las órdenes en estado RECHAZADO, así que la factura vuelve sola a estar disponible
+     * para una orden nueva.
+     *
+     * No se borra nada: la orden queda en RECHAZADO con su motivo, fecha y usuario.
+     *
+     * @return array{ok: bool, message: string, anulada: ?TesOrdenPagoEntity}
+     */
+    public function anularOpa($idOpa, ?string $motivo = null): array
+    {
+        return DB::transaction(function () use ($idOpa, $motivo) {
+            if (empty(trim((string) $motivo))) {
+                return ['ok' => false, 'message' => 'Hay que indicar el motivo de la anulación.',
+                        'anulada' => null];
+            }
+
+            $bloqueo = $this->motivoQueImpideAnular($idOpa);
+
+            if (!is_null($bloqueo)) {
+                return ['ok' => false, 'message' => $bloqueo, 'anulada' => null];
+            }
+
+            $opa = TesOrdenPagoEntity::find($idOpa);
+
+            $this->darDeBajaLoQueCuelgaDe($idOpa);
+
+            $opa->id_estado_orden_pago = self::ESTADO_OPA_RECHAZADO;
+            $opa->motivo_rechazo       = $motivo;
+            $opa->fecha_rechazo        = $this->fechaActual;
+            $opa->cod_usuario_rechaza  = $this->user->cod_usuario ?? null;
+            $opa->save();
+
+            return [
+                'ok'      => true,
+                'message' => "Orden {$opa->num_orden_pago} anulada. "
+                    . 'Sus facturas vuelven a estar disponibles.',
+                'anulada' => $opa->refresh(),
+            ];
+        });
+    }
+
     public function anularYReemitir($idOpa, ?string $motivo = null): array
     {
         return DB::transaction(function () use ($idOpa, $motivo) {
-            $original = TesOrdenPagoEntity::find($idOpa);
-
-            if (is_null($original)) {
-                return ['ok' => false, 'message' => "No se encontró la orden de pago {$idOpa}.",
-                        'anulada' => null, 'nueva' => null];
-            }
-
-            if ((int) $original->id_estado_orden_pago === self::ESTADO_OPA_RECHAZADO) {
-                return ['ok' => false, 'message' => 'Esta orden de pago ya está anulada.',
-                        'anulada' => null, 'nueva' => null];
-            }
-
             if (empty(trim((string) $motivo))) {
                 return ['ok' => false, 'message' => 'Hay que indicar el motivo de la anulación.',
                         'anulada' => null, 'nueva' => null];
             }
 
-            // Guarda 1: plata efectivamente pagada.
-            if ($this->tienePagosConfirmados($idOpa)) {
-                return ['ok' => false,
-                        'message' => 'No se puede anular: la orden tiene pagos confirmados.',
-                        'anulada' => null, 'nueva' => null];
+            // Mismas guardas que `anularOpa()`: viven en un solo lugar para que los dos caminos
+            // de anulación no puedan divergir.
+            $bloqueo = $this->motivoQueImpideAnular($idOpa);
+
+            if (!is_null($bloqueo)) {
+                return ['ok' => false, 'message' => $bloqueo, 'anulada' => null, 'nueva' => null];
             }
 
-            // Guarda 2: un eCheq ya emitido está circulando aunque todavía no se haya acreditado.
-            // Hay que rechazarlo o anularlo primero; anular la OP por debajo dejaría el papel
-            // suelto sin nada que lo respalde.
-            // Los eCheq son ABONOS de la boleta, no la boleta misma (ver 2026_09_04_100900).
-            $emitidos = \App\Models\Tesoreria\TesPagosParciales::whereIn(
-                'id_pago',
-                TesPagoEntity::where('id_orden_pago', $idOpa)->pluck('id_pago')
-            )->whereIn('id_estado_instrumento', [
-                TesInstrumentoPagoRepository::EMITIDO,
-                TesInstrumentoPagoRepository::ACREDITADO,
-            ])->count();
-
-            if ($emitidos > 0) {
-                return ['ok' => false,
-                        'message' => "No se puede anular: hay {$emitidos} eCheq ya emitido(s). "
-                            . 'Primero hay que rechazarlos o anularlos.',
-                        'anulada' => null, 'nueva' => null];
-            }
+            $original = TesOrdenPagoEntity::find($idOpa);
 
             $detalle = TesOrdenPagoDetalleEntity::where('id_orden_pago', $idOpa)->get();
 
@@ -1334,14 +1448,9 @@ class TestOrdenPagoRepository
                         'anulada' => null, 'nueva' => null];
             }
 
-            // 1) Los instrumentos que todavía no salieron se dan de baja junto con la orden.
-            \App\Models\Tesoreria\TesPagosParciales::whereIn(
-                'id_pago',
-                TesPagoEntity::where('id_orden_pago', $idOpa)->pluck('id_pago')
-            )->whereIn('id_estado_instrumento', [
-                TesInstrumentoPagoRepository::BORRADOR,
-                TesInstrumentoPagoRepository::PENDIENTE_EMISION,
-            ])->update(['id_estado_instrumento' => TesInstrumentoPagoRepository::ANULADO]);
+            // 1) Los instrumentos que todavía no salieron, y las boletas, se dan de baja junto
+            //    con la orden.
+            $this->darDeBajaLoQueCuelgaDe($idOpa);
 
             // 2) Anular la original. Se conserva su puente: la imputación ocurrió y es historia.
             $original->id_estado_orden_pago = self::ESTADO_OPA_RECHAZADO;
