@@ -326,7 +326,16 @@ class TesPagosController extends Controller
                         'nombre'             => $proveedorPrestador->razon_social ?? '',
                         'numero_pago'        => 'PAGO-' . $pagoDb->num_pago,
                         'fecha_registra'     => $pagoDb->fecha_registra,
-                        'id_cuenta_bancaria' => $params->id_cuenta_bancaria,
+                        // La cuenta de la que sale la plata. Desde el 2026-09-09 el modal ya no
+                        // la pregunta —cada abono trae la suya—, asi que `$params` la trae vacia y
+                        // el asiento fallaba con "la cuenta bancaria no tiene una cuenta contable
+                        // asignada" aunque la cuenta si la tuviera. Se toma la del pago real.
+                        'id_cuenta_bancaria' => $params->id_cuenta_bancaria
+                            ?: (array_key_first($montosPorCuenta) ?? $pagoDb->id_cuenta_bancaria),
+                        // Desglose por cuenta: el HABER se parte en una linea por cada cuenta de
+                        // la que efectivamente salio plata. Con una sola cuenta da exactamente lo
+                        // mismo que antes; con dos, antes acreditaba TODO a una sola.
+                        'cuentas'            => $montosPorCuenta,
                         'monto_total'        => $monto_total,
                     ];
 

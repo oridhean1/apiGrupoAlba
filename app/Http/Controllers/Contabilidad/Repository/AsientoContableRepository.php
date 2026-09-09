@@ -529,10 +529,14 @@ class AsientoContableRepository
         $idTipoFactura = $datosPago['id_tipo_factura'] ?? null;
         $esFacturaProveedor = !is_null($idTipoFactura) ? ($idTipoFactura == 16) : !empty($idProveedor);
 
-        // Validar cuenta bancaria
-        $cuentaBancaria = $this->obtenerCuentaContableByCuentaBancaria($datosPago['id_cuenta_bancaria']);
-        if (!$cuentaBancaria) {
-            throw new Exception("La cuenta bancaria seleccionada no tiene una cuenta contable asignada. Por favor contacte con Contabilidad.");
+        // Validar cuenta bancaria. Si vino el desglose por cuenta, cada una se valida en el loop
+        // del HABER — chequear ademas `id_cuenta_bancaria` acá haría fallar por una cuenta que ni
+        // siquiera se va a usar.
+        if (empty($datosPago['cuentas'])) {
+            $cuentaBancaria = $this->obtenerCuentaContableByCuentaBancaria($datosPago['id_cuenta_bancaria']);
+            if (!$cuentaBancaria) {
+                throw new Exception("La cuenta bancaria seleccionada no tiene una cuenta contable asignada. Por favor contacte con Contabilidad.");
+            }
         }
 
         $montoTotal = (float) $datosPago['monto_total'];
@@ -582,22 +586,45 @@ class AsientoContableRepository
             'id_detalle_plan'                   => $idDetallePlanDebe,
         ]);
 
-        // HABER — salida de fondos de la cuenta bancaria
-        $this->findByCrearDetalleAsiento([
-            'id_asiento_contable'               => $asiento->id_asiento_contable,
-            'cod_proveedor'                     => null,
-            'cod_prestador'                     => null,
-            'id_proveedor_cuenta_contable'      => null,
-            'id_tipo_prestador_cuenta_contable' => null,
-            'id_forma_pago_cuenta_contable'     => null,
-            'id_familia_cuenta_contable'        => null,
-            'id_cuenta_bancaria_cuenta_contable'=> $cuentaBancaria->id_cuenta_bancaria_cuenta_contable ?? null,
-            'id_retencion_cuenta_contable'      => null,
-            'monto_debe'                        => 0,
-            'monto_haber'                       => $montoTotal,
-            'observaciones'                     => 'Salida de fondos - Cuenta: ' . $datosPago['id_cuenta_bancaria'],
-            'id_detalle_plan'                   => $cuentaBancaria->id_detalle_plan,
-        ]);
+        // HABER — salida de fondos, UNA LINEA POR CUENTA BANCARIA.
+        //
+        // Desde el 2026-09-06 una orden puede pagarse desde dos cuentas de bancos distintos (cada
+        // abono trae la suya). Con una sola linea por el total, el asiento acreditaba TODO a un
+        // banco: la contabilidad decia que salieron $300 del Macro cuando en realidad salieron
+        // $100 del Macro y $200 del BBVA. Con una sola cuenta -el caso habitual- esto produce
+        // exactamente el mismo asiento que antes. (2026-09-09)
+        $desglose = $datosPago['cuentas'] ?? [];
+
+        if (empty($desglose)) {
+            $desglose = [$datosPago['id_cuenta_bancaria'] => $montoTotal];
+        }
+
+        foreach ($desglose as $idCuenta => $montoCuenta) {
+            $cuentaDelHaber = $this->obtenerCuentaContableByCuentaBancaria($idCuenta);
+
+            if (!$cuentaDelHaber) {
+                throw new Exception(
+                    "La cuenta bancaria seleccionada no tiene una cuenta contable asignada. "
+                        . "Por favor contacte con Contabilidad."
+                );
+            }
+
+            $this->findByCrearDetalleAsiento([
+                'id_asiento_contable'               => $asiento->id_asiento_contable,
+                'cod_proveedor'                     => null,
+                'cod_prestador'                     => null,
+                'id_proveedor_cuenta_contable'      => null,
+                'id_tipo_prestador_cuenta_contable' => null,
+                'id_forma_pago_cuenta_contable'     => null,
+                'id_familia_cuenta_contable'        => null,
+                'id_cuenta_bancaria_cuenta_contable'=> $cuentaDelHaber->id_cuenta_bancaria_cuenta_contable ?? null,
+                'id_retencion_cuenta_contable'      => null,
+                'monto_debe'                        => 0,
+                'monto_haber'                       => round((float) $montoCuenta, 2),
+                'observaciones'                     => 'Salida de fondos - Cuenta: ' . $idCuenta,
+                'id_detalle_plan'                   => $cuentaDelHaber->id_detalle_plan,
+            ]);
+        }
 
         return $asiento;
     }

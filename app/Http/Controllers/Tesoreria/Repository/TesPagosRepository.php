@@ -216,7 +216,54 @@ class TesPagosRepository
 
         // $jquery->orderBy('id_estado_orden_pago', 'asc');
         $jquery->orderBy('fecha_probable_pago');
-        return $jquery->get();
+
+        $boletas = $jquery->get();
+
+        $this->agregarMontoPagable($boletas);
+
+        return $boletas;
+    }
+
+    /**
+     * Agrega `monto_pagable` a cada boleta: lo que realmente hay que pagarle al beneficiario.
+     *
+     * Es el mismo criterio que `montoPagableOpa()` y que el freno de sobrepago — por cada factura
+     * imputada, `min(monto_aplicado, neto - debito)` — resuelto en una sola consulta agrupada.
+     *
+     * El modal de Confirmar Pago lo necesita para proponer el monto a pagar. Lo calculaba solo,
+     * como `monto_orden_pago - debito`, y eso falla por dos lados: la cabecera puede estar
+     * desincronizada con lo realmente imputado (la OPA-1206 dice $2.266.110,16 cuando sus facturas
+     * suman $2.214.425,55), y no aplica el tope por factura. El resultado era proponer un importe
+     * que el backend despues rechazaba por pasarse. (2026-09-09)
+     */
+    private function agregarMontoPagable($boletas): void
+    {
+        $idsOpa = collect($boletas)->pluck('id_orden_pago')->filter()->unique()->values();
+
+        if ($idsOpa->isEmpty()) {
+            return;
+        }
+
+        $pagables = DB::table('tb_tes_opa_factura as pf')
+            ->join('tb_facturacion_datos as f', 'f.id_factura', '=', 'pf.id_factura')
+            ->whereIn('pf.id_orden_pago', $idsOpa)
+            ->groupBy('pf.id_orden_pago')
+            ->select('pf.id_orden_pago', DB::raw(
+                'SUM(LEAST(pf.monto_aplicado, GREATEST(0, f.total_neto - COALESCE(f.total_debitado_liquidacion, 0)))) AS pagable'
+            ))
+            ->pluck('pagable', 'pf.id_orden_pago');
+
+        foreach ($boletas as $boleta) {
+            $pagable = (float) ($pagables[$boleta->id_orden_pago] ?? 0);
+
+            // Una orden sin facturas imputadas (un ANTICIPO) no tiene debito que descontar: su
+            // tope es su propio monto. Mismo criterio que `topeDeOpa()`.
+            if ($pagable <= 0) {
+                $pagable = (float) $boleta->monto_opa;
+            }
+
+            $boleta->monto_pagable = round($pagable, 2);
+        }
     }
 
     /**
@@ -297,7 +344,6 @@ class TesPagosRepository
             ->pluck('id_pago_parcial', 'id_fecha_probable');
 
         foreach ($params->lista_pagos as $pagos) {
-            $pagosparciales = $pagosparciales + $pagos->monto_pago;
             if (empty($pagos->id_pago_parcial)) {
                 // La fecha elegida se resuelve contra el cronograma. Si no coincide con ninguna
                 // fecha planificada queda en null: es un pago libre del circuito viejo, y así
@@ -337,28 +383,57 @@ class TesPagosRepository
                     'id_banco_emisor' => $this->bancoDeCuenta($idCuentaFila),
                 ]);
 
+                $pagosparciales += (float) $pagos->monto_pago;
+
                 if (!is_null($idFecha)) {
                     $ocupadas[$idFecha] = $nuevo->id_pago_parcial;
                 }
             }else{
                 $query=TesPagosParciales::find($pagos->id_pago_parcial);
+
+                // Un abono del circuito de eCheq NO se modifica desde acá.
+                //
+                // Se reconoce por tener `id_estado_instrumento`. Esos se gestionan en *Carga de
+                // eCheq*, que aplica las guardas del instrumento: solo se tocan antes de emitir,
+                // la cuenta tiene que ser de la razón social de la orden y el monto no puede
+                // pasarse del tope. Este camino no aplica ninguna, así que dejaba cambiarle la
+                // forma de pago, el monto o la cuenta a un eCheq que YA tenía número del banco.
+                //
+                // Se saltean solo los campos que son del instrumento, y NO se corta con una
+                // excepción: el front manda la lista completa —los eCheq incluidos— así que
+                // rechazar la fila haría fallar la confirmación entera de una orden que tiene un
+                // eCheq emitido. La fecha y los montos de referencia se siguen actualizando, que
+                // es el comportamiento de siempre. (2026-09-09)
+                $esInstrumento = !is_null($query->id_estado_instrumento);
+
                 $query->fecha_registra=$this->fechaActual;
                 $query->fecha_confirma_pago=$pagos->fecha_confirma_pago;
-                $query->id_forma_pago=$pagos->id_forma_pago;
-                $query->monto_pago=$pagos->monto_pago;
                 $query->monto_opa=$pagos->monto_opa;
-                $query->num_cheque=$pagos->num_cheque;
                 $query->id_usuario=$this->user->cod_usuario;
                 $query->id_pago=$pagos->id_pago;
-                // La cuenta editada en la fila también se guarda. Si la fila no la trae, se deja
-                // la que el abono ya tenía: no se pisa con null.
-                $cuentaEditada = $this->cuentaDeLaFila($pagos);
-                if (!is_null($cuentaEditada)) {
-                    $query->id_cuenta_bancaria = $cuentaEditada;
-                    $query->id_banco_emisor    = $this->bancoDeCuenta($cuentaEditada);
+
+                if (!$esInstrumento) {
+                    $query->id_forma_pago=$pagos->id_forma_pago;
+                    $query->monto_pago=$pagos->monto_pago;
+                    $query->num_cheque=$pagos->num_cheque;
+
+                    // La cuenta editada en la fila también se guarda. Si la fila no la trae, se
+                    // deja la que el abono ya tenía: no se pisa con null.
+                    $cuentaEditada = $this->cuentaDeLaFila($pagos);
+                    if (!is_null($cuentaEditada)) {
+                        $query->id_cuenta_bancaria = $cuentaEditada;
+                        $query->id_banco_emisor    = $this->bancoDeCuenta($cuentaEditada);
+                    }
                 }
                 $query->monto_restante=$pagos->monto_restante;
                 $query->update();
+
+                // Para el estado de la boleta cuenta lo que quedó GUARDADO, no lo que mandó el
+                // front: el monto de un abono del circuito de eCheq no se modifica acá, así que
+                // sumar el del request haría derivar el estado de un número que nunca se escribió.
+                $pagosparciales += $esInstrumento
+                    ? (float) $query->monto_pago
+                    : (float) $pagos->monto_pago;
             }
         }
         // Se compara contra lo PAGABLE (imputado menos débito de liquidación), no contra
@@ -380,6 +455,36 @@ class TesPagosRepository
         }
 
         $aCentavos = fn($monto) => (int) round(((float) $monto) * 100);
+
+        // Si el cronograma declara N fechas y ya se cargaron las N, los abonos TIENEN que cubrir
+        // lo pagable. Un pago parcial es válido mientras falten fechas por cargar —ahí se sabe que
+        // el resto viene después—, pero con todas las fechas usadas y la suma corta, la orden
+        // quedaría en PAGO PARCIAL sin ninguna fecha libre donde cargar la diferencia: trabada,
+        // y sin que nadie se entere hasta que alguien la busque. (2026-09-09)
+        $fechasDelPlan = DB::table('tb_tes_fecha_probable_pago')
+            ->where('id_pago', $pago->id_pago)
+            ->count();
+
+        $abonosCargados = count($params->lista_pagos);
+
+        if (
+            $fechasDelPlan > 0
+            && $abonosCargados >= $fechasDelPlan
+            && $aCentavos($pagosparciales) < $aCentavos($pagable)
+        ) {
+            $falta = $pagable - $pagosparciales;
+
+            throw new \Exception(sprintf(
+                'Los montos cargados no cubren lo que hay que pagar en esta orden. '
+                    . 'A pagar: $%s. Cargado: $%s. Falta: $%s. '
+                    . 'Ya se usaron las %d fecha(s) del cronograma, así que no queda ninguna libre '
+                    . 'para la diferencia: corregí los importes, o agregá otra fecha de pago a la orden.',
+                number_format($pagable, 2, ',', '.'),
+                number_format($pagosparciales, 2, ',', '.'),
+                number_format($falta, 2, ',', '.'),
+                $fechasDelPlan
+            ));
+        }
 
         if ($aCentavos($pagosparciales) >= $aCentavos($pagable)) {
             $estado = TestOrdenPagoRepository::ESTADO_OPA_PAGADO;
