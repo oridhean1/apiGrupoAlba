@@ -20,33 +20,28 @@ class InternacionesRepository
 
     public function findByPrestacionInternacionId($id)
     {
-        //, "profesional"
-        $prestacion = PrestacionesPracticaLaboratorioEntity::with([
-            "detalle",
-            "detalle.practica",
-            "estadoPrestacion",
-            "afiliado",
-            "usuario",
-            "prestador",
-            "datosTramite",
-            "documentacion"
-        ])
-            ->where('cod_internacion', $id)
-            ->first();
+        // Solo devolvemos la internacion para precargar datos base (afiliado, prestador).
+        // La prestacion va SIEMPRE vacía (sin cod_prestacion, sin detalle)
+        // para que el frontend SIEMPRE cree un nuevo registro independiente
+        // y cada autorización conserve su propia observación. (T-00000804)
+        $internacion = InternacionesEntity::with(['afiliado'])->find($id);
 
-        $detalle = DetallePrestacionesPracticaLaboratorioEntity::with(["practica"])
-            ->whereHas('prestacion', function ($query) use ($id) {
-                $query->where('cod_internacion', $id);
-            })
-            ->get();
+        $prestacion = new \stdClass();
+        $prestacion->arrayDetalle   = [];
+        $prestacion->observaciones  = null;
+        $prestacion->cod_prestacion = null;
+        $prestacion->afiliado       = $internacion?->afiliado ?? null;
+        $prestacion->cod_prestador  = $internacion?->cod_prestador ?? null;
+        $prestacion->cod_profesional        = null;
+        $prestacion->dni_afiliado           = $internacion?->dni_afiliado ?? null;
+        $prestacion->datos_tramite          = null;
+        $prestacion->domicilio_profesional  = null;
+        $prestacion->domicilio_prestador    = null;
+        $prestacion->diagnostico            = null;
+        $prestacion->id_diagnostico         = null;
+        $prestacion->documentacion          = [];
 
-        $prestacion['arrayDetalle'] = $detalle->toArray();
-
-        $internacion = InternacionesEntity::with(['afiliado'])
-            ->find($id);
-        $data = ['internacion' => $internacion, "prestacion" => $prestacion];
-
-        return $data;
+        return ['internacion' => $internacion, 'prestacion' => $prestacion];
     }
 
     public function findBySave($params)

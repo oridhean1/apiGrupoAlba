@@ -110,6 +110,12 @@ class InternacionesEntity extends Model
         return $this->hasOne(PrestacionesPracticaLaboratorioEntity::class, 'cod_internacion', 'cod_internacion');
     }
 
+    // Todas las autorizaciones principales (1:N) — T-00000804
+    public function prestaciones_principales()
+    {
+        return $this->hasMany(PrestacionesPracticaLaboratorioEntity::class, 'cod_internacion', 'cod_internacion');
+    }
+
     public function autorizacion()
     {
         return $this->hasMany(InternacionAutorizacionEntity::class, 'cod_internacion', 'cod_internacion');

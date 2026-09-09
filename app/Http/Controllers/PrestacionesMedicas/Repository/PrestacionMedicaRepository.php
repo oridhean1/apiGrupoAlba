@@ -78,7 +78,7 @@ class PrestacionMedicaRepository
             if ($key->cod_detalle == '') {
                 DetallePrestacionesPracticaLaboratorioEntity::create([
                     'cantidad_solicitada' => $key->cantidad_solicitada,
-                    'cantidad_autorizada' => $key->cantidad_autorizada ?? $key->cantidad_solicitada,
+                    'cantidad_autorizada' => ($key->cantidad_autorizada !== null && $key->cantidad_autorizada !== '') ? $key->cantidad_autorizada : $key->cantidad_solicitada,
                     'precio_unitario' => ($key->monto_pagar / $key->cantidad_solicitada),
                     'monto_pagar' => $key->monto_pagar,
                     'id_identificador_practica' => $key->id_identificador_practica,
@@ -124,7 +124,7 @@ class PrestacionMedicaRepository
             if (is_numeric($key->cod_detalle)) {
                 $item = DetallePrestacionesPracticaLaboratorioEntity::find($key->cod_detalle);
                 $item->cantidad_solicitada = $key->cantidad_solicitada;
-                $item->cantidad_autorizada = $key->cantidad_autorizada ?? $key->cantidad_solicitada;
+                $item->cantidad_autorizada = ($key->cantidad_autorizada !== null && $key->cantidad_autorizada !== '') ? $key->cantidad_autorizada : $key->cantidad_solicitada;
                 $item->precio_unitario = ($key->monto_pagar / $key->cantidad_solicitada);
                 $item->monto_pagar = $key->monto_pagar;
                 $item->id_identificador_practica = $key->id_identificador_practica;
@@ -132,7 +132,7 @@ class PrestacionMedicaRepository
             } else {
                 DetallePrestacionesPracticaLaboratorioEntity::create([
                     'cantidad_solicitada' => $key->cantidad_solicitada,
-                    'cantidad_autorizada' => $key->cantidad_autorizada ?? $key->cantidad_solicitada,
+                    'cantidad_autorizada' => ($key->cantidad_autorizada !== null && $key->cantidad_autorizada !== '') ? $key->cantidad_autorizada : $key->cantidad_solicitada,
                     'precio_unitario' => ($key->monto_pagar / $key->cantidad_solicitada),
                     'monto_pagar' => $key->monto_pagar,
                     'id_identificador_practica' => $key->id_identificador_practica,
