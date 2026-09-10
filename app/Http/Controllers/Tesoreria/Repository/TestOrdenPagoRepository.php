@@ -829,6 +829,68 @@ class TestOrdenPagoRepository
         return $this->montoPagadoOpa($idOpa);
     }
 
+    /**
+     * Pone el estado de las BOLETAS de una orden al día, con el mismo criterio que la orden.
+     *
+     * La grilla de Pagos muestra `tb_tes_pago.id_estado_orden_pago` directo como badge, así que
+     * cuando la boleta y su OPA usan criterios distintos el usuario ve dos verdades sobre lo
+     * mismo. Pasó en los dos sentidos:
+     *
+     *  - Confirmar el pago movía la boleta y no la orden (corregido el 2026-09-10).
+     *  - Acreditar un eCheq movía la orden y no la boleta: la orden quedaba PAGADA y la grilla de
+     *    Pagos seguía mostrando PAGO PARCIAL hasta que alguien volvía a confirmar. (2026-09-10)
+     *
+     * Cuenta lo mismo que la orden: abonos VIVOS y CONFIRMADOS. Un eCheq emitido pero todavía sin
+     * acreditar no es plata cobrada.
+     *
+     * Una boleta RECHAZADA no se toca: esa está dada de baja a propósito. Y una boleta SIN abonos
+     * tampoco: son las del circuito viejo, donde el pago se registraba en la cabecera sin
+     * desglose, y no hay de dónde derivarle un estado.
+     */
+    public function recalcularEstadoBoletas($idOpa): void
+    {
+        $pagable = $this->montoPagableOpa($idOpa);
+
+        foreach (TesPagoEntity::where('id_orden_pago', $idOpa)->get() as $boleta) {
+            if ((int) $boleta->id_estado_orden_pago === self::ESTADO_OPA_RECHAZADO) {
+                continue;
+            }
+
+            $abonos = \App\Models\Tesoreria\TesPagosParciales::where('id_pago', $boleta->id_pago)
+                ->vivos()
+                ->get();
+
+            if ($abonos->isEmpty()) {
+                continue;
+            }
+
+            $tope = $pagable > 0 ? $pagable : (float) $boleta->monto_opa;
+
+            if ($tope <= 0) {
+                continue;
+            }
+
+            $cobrado = (float) $abonos
+                ->filter(fn($a) => !is_null($a->fecha_confirma_pago))
+                ->sum('monto_pago');
+
+            $aCentavos = fn($m) => (int) round(((float) $m) * 100);
+
+            if ($aCentavos($cobrado) >= $aCentavos($tope)) {
+                $estado = self::ESTADO_OPA_PAGADO;
+            } elseif ($cobrado > 0.01) {
+                $estado = self::ESTADO_OPA_PAGO_PARCIAL;
+            } else {
+                continue;
+            }
+
+            if ((int) $boleta->id_estado_orden_pago !== $estado) {
+                $boleta->id_estado_orden_pago = $estado;
+                $boleta->save();
+            }
+        }
+    }
+
     public function recalcularEstadoOpa($idOpa): int
     {
         $opa = TesOrdenPagoEntity::find($idOpa);
@@ -867,6 +929,11 @@ class TestOrdenPagoRepository
             $opa->id_estado_orden_pago = $nuevo;
             $opa->save();
         }
+
+        // Las boletas van con la orden. Engancharlo acá y no en cada llamador cubre de una todos
+        // los caminos que mueven plata —confirmar, acreditar, rechazar, anular— y hace imposible
+        // que la grilla de Pagos y el visor de OPA vuelvan a mostrar estados distintos.
+        $this->recalcularEstadoBoletas($idOpa);
 
         return $nuevo;
     }

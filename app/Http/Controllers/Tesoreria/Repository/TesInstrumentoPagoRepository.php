@@ -416,6 +416,31 @@ class TesInstrumentoPagoRepository
                 throw new \Exception('Solo se puede acreditar un eCheq que esté emitido.');
             }
 
+            // No se acredita un eCheq cuyo PAGO todavía no se confirmó.
+            //
+            // Acreditar dice que la plata salió del banco. Pero el asiento contable y el descuento
+            // del saldo de la cuenta se hacen **solo** al confirmar el pago
+            // (`TesPagosController::getConfirmarPago`): no hay una sola línea que los genere en
+            // este camino. Sin esta guarda, un eCheq podía recorrer todo su ciclo —emitir, número,
+            // confirmar emisión, acreditar— sin que la contabilidad se enterara ni el saldo de la
+            // cuenta se moviera. La orden figuraba PAGADA con plata que el sistema nunca debitó.
+            //
+            // El orden correcto es: emitir -> número -> confirmar emisión -> CONFIRMAR PAGO ->
+            // acreditar. Relevado el 2026-09-10: 0 eCheq acreditados en esa situación en las dos
+            // bases, y 2 emitidos que ahora tienen que pasar por Confirmar Pago primero.
+            //
+            // El RECHAZO no lleva esta guarda a propósito: un eCheq que el banco devolvió tiene
+            // que poder registrarse siempre, esté el pago confirmado o no.
+            $boletaDelAbono = TesPagoEntity::find($abono->id_pago);
+
+            if (is_null($boletaDelAbono?->fecha_confirma_pago)) {
+                throw new \Exception(
+                    'Este eCheq todavía no tiene el pago confirmado, así que no se puede acreditar. '
+                        . 'Andá a Pagos y confirmá el pago de esta orden: ahí se genera el asiento '
+                        . 'contable y se descuenta el saldo de la cuenta. Después volvé a acreditarlo.'
+                );
+            }
+
             $abono->id_estado_instrumento = self::ACREDITADO;
             $abono->fecha_confirma_pago   = $fechaAcreditacion;
             $abono->save();
