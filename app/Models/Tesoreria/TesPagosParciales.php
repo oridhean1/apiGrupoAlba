@@ -16,6 +16,10 @@ class TesPagosParciales extends Model
     protected $fillable = [
         'fecha_registra',
         'fecha_confirma_pago',
+        // Cuando este abono entro en un pago CONFIRMADO. Sin esto, un eCheq emitido
+        // despues de que la boleta ya estaba confirmada heredaba el permiso de la boleta
+        // y se podia acreditar sin pasar nunca por Confirmar Pago. Ver 2026_09_10_100000.
+        'fecha_confirmado_en_pago',
         'id_forma_pago',
         'monto_pago',
         'id_usuario',

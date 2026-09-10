@@ -381,6 +381,8 @@ class TesPagosRepository
                     'id_fecha_probable' => $idFecha,
                     'id_cuenta_bancaria' => $idCuentaFila,
                     'id_banco_emisor' => $this->bancoDeCuenta($idCuentaFila),
+                    // Este abono nace dentro de un pago confirmado.
+                    'fecha_confirmado_en_pago' => $this->fechaActual,
                 ]);
 
                 $pagosparciales += (float) $pagos->monto_pago;
@@ -411,6 +413,11 @@ class TesPagosRepository
                 $query->monto_opa=$pagos->monto_opa;
                 $query->id_usuario=$this->user->cod_usuario;
                 $query->id_pago=$pagos->id_pago;
+
+                // Queda registrado que este abono entro en un pago confirmado. Es lo que habilita
+                // acreditarlo despues: un eCheq emitido sobre una boleta YA confirmada no hereda
+                // ese permiso, tiene que pasar por acá. (2026-09-10, OPA-1120)
+                $query->fecha_confirmado_en_pago = $this->fechaActual;
 
                 if (!$esInstrumento) {
                     $query->id_forma_pago=$pagos->id_forma_pago;

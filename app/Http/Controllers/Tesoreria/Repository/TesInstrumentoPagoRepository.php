@@ -431,13 +431,22 @@ class TesInstrumentoPagoRepository
             //
             // El RECHAZO no lleva esta guarda a propósito: un eCheq que el banco devolvió tiene
             // que poder registrarse siempre, esté el pago confirmado o no.
-            $boletaDelAbono = TesPagoEntity::find($abono->id_pago);
-
-            if (is_null($boletaDelAbono?->fecha_confirma_pago)) {
+            // Se mira ESTE ABONO, no la boleta.
+            //
+            // La primera versión de esta guarda miraba `tb_tes_pago.fecha_confirma_pago`, y eso
+            // dejaba un agujero: una vez confirmada la boleta —por ejemplo con una transferencia—
+            // cualquier eCheq emitido DESPUÉS heredaba el permiso y se podía acreditar sin pasar
+            // por Confirmar Pago, salteándose la validación de que los montos cubran la orden.
+            // Reportado sobre la OPA-1120: se anuló un eCheq de $1.000.000 y se emitió uno de
+            // $500 que no cubría nada, y el sistema lo iba a dejar acreditar. Es el mismo error
+            // que ya nos pasó con la razón social: validar la boleta en vez de cada abono.
+            // (2026-09-10, ver 2026_09_10_100000)
+            if (is_null($abono->fecha_confirmado_en_pago)) {
                 throw new \Exception(
-                    'Este eCheq todavía no tiene el pago confirmado, así que no se puede acreditar. '
-                        . 'Andá a Pagos y confirmá el pago de esta orden: ahí se genera el asiento '
-                        . 'contable y se descuenta el saldo de la cuenta. Después volvé a acreditarlo.'
+                    'Este eCheq todavía no se cargó en un pago, así que no se puede acreditar. '
+                        . 'Andá a Pagos, agregalo al pago de esta orden y confirmalo: ahí se '
+                        . 'valida que los montos cubran la orden, se genera el asiento contable y '
+                        . 'se descuenta el saldo de la cuenta. Después volvé a acreditarlo.'
                 );
             }
 
@@ -927,6 +936,14 @@ class TesInstrumentoPagoRepository
                 'tb_tes_orden_pago.tipo_factura',
                 'tb_tes_orden_pago.id_proveedor',
                 'tb_tes_orden_pago.id_prestador',
+                // Si ESTE ABONO no entró en un pago confirmado, no se puede acreditar (ver
+                // `marcarAcreditado`): el asiento contable, el descuento del saldo y la validación
+                // de cobertura salen de Confirmar Pago. El front lo usa para deshabilitar el botón
+                // y explicar por qué, en vez de dejar clickear algo que va a rebotar con 409.
+                //
+                // Se mira el abono y NO la boleta: un eCheq emitido después de que la boleta ya
+                // estaba confirmada no hereda ese permiso. (2026-09-10, OPA-1120)
+                DB::raw('CASE WHEN tb_tes_pago_parcial.fecha_confirmado_en_pago IS NULL THEN 0 ELSE 1 END AS pago_confirmado'),
             ])
             ->join('tb_tes_pago', 'tb_tes_pago.id_pago', '=', 'tb_tes_pago_parcial.id_pago')
             ->join('tb_tes_orden_pago', 'tb_tes_orden_pago.id_orden_pago', '=', 'tb_tes_pago.id_orden_pago')
