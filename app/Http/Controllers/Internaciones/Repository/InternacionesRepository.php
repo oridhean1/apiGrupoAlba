@@ -18,13 +18,41 @@ class InternacionesRepository
         $this->fechaActual = Carbon::now('America/Argentina/Buenos_Aires');
     }
 
-    public function findByPrestacionInternacionId($id)
+    public function findByPrestacionInternacionId($id, $codPrestacion = null)
     {
-        // Solo devolvemos la internacion para precargar datos base (afiliado, prestador).
-        // La prestacion va SIEMPRE vacía (sin cod_prestacion, sin detalle)
-        // para que el frontend SIEMPRE cree un nuevo registro independiente
-        // y cada autorización conserve su propia observación. (T-00000804)
         $internacion = InternacionesEntity::with(['afiliado'])->find($id);
+
+        // EDICION: se pidio una autorizacion puntual -> la devolvemos completa con su
+        // detalle para que el frontend la actualice en vez de crear otra. (T-00000804)
+        if (!empty($codPrestacion)) {
+            $prestacion = PrestacionesPracticaLaboratorioEntity::with([
+                "detalle",
+                "detalle.practica",
+                "estadoPrestacion",
+                "afiliado",
+                "usuario",
+                "prestador",
+                "datosTramite",
+                "documentacion"
+            ])
+                ->where('cod_prestacion', $codPrestacion)
+                ->where('cod_internacion', $id)
+                ->first();
+
+            if ($prestacion) {
+                $detalle = DetallePrestacionesPracticaLaboratorioEntity::with(["practica"])
+                    ->where('cod_prestacion', $prestacion->cod_prestacion)
+                    ->get();
+
+                $prestacion['arrayDetalle'] = $detalle->toArray();
+
+                return ['internacion' => $internacion, "prestacion" => $prestacion];
+            }
+        }
+
+        // ALTA: sin cod_prestacion devolvemos la prestacion VACIA (sin cod_prestacion, sin
+        // detalle) para que el frontend cree un registro nuevo e independiente y cada
+        // autorizacion conserve su propia observacion. (T-00000804)
 
         $prestacion = new \stdClass();
         $prestacion->arrayDetalle   = [];
