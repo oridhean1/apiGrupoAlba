@@ -358,6 +358,16 @@ class TesPagosController extends Controller
                 }
             }
 
+            // El estado de la ORDEN se deriva de lo efectivamente cobrado. Confirmar el pago
+            // actualizaba la BOLETA pero nunca la orden, asi que quedaban diciendo cosas distintas:
+            // la boleta en PAGO PARCIAL y la OPA todavia en EN PROCESO. Solo se recalculaba al
+            // anular. (2026-09-10, reportado sobre la OPA-4284)
+            //
+            // OJO: un eCheq emitido pero NO acreditado no cuenta como cobrado —esa plata todavia
+            // no salio—, asi que una orden pagada solo con eCheq sigue en EN PROCESO hasta que se
+            // acredite en Carga de eCheq. Es el diseño del circuito, no una falla de esto.
+            $opa->recalcularEstadoOpa($params->id_orden_pago);
+
             DB::commit();
             return response()->json(['message' => 'El Pago ha sido confirmado y procesado con éxito.']);
         } catch (\Throwable $th) {

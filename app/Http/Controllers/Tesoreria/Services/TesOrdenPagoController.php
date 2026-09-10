@@ -418,7 +418,33 @@ class TesOrdenPagoController extends Controller
                 ? 'PENDIENTE DE EMISION - COPIA PARA TESORERIA'
                 : 'COMPROBANTE DEFINITIVO');
 
+        // Lo que REALMENTE hay que pagar y lo que REALMENTE se entregó.
+        //
+        // El comprobante calculaba el total como `monto_orden_pago - debito`, o sea partiendo de
+        // la cabecera. Esa puede estar desincronizada con lo imputado (ver
+        // revisar-cabeceras-desincronizadas.md), y entonces el total impreso no coincide ni con
+        // las facturas listadas arriba ni con lo que el sistema deja pagar. `montoPagableOpa()`
+        // es el mismo criterio que usa el freno de sobrepago y el modal de Confirmar Pago.
+        //
+        // Y la columna "Valores Entregados" cerraba con ese mismo total: mostraba lo A PAGAR
+        // debajo de una lista de pagos, así que el numero no era la suma de las filas de arriba.
+        // Ahora cierra con lo entregado y lo que falta. (2026-09-10)
+        $montoPagable = (new TestOrdenPagoRepository())->montoPagableOpa($id);
+
+        if ($montoPagable <= 0) {
+            $montoPagable = max(0, (float) ($query?->monto_orden_pago ?? 0) - $debito);
+        }
+
+        $totalEntregado = $instrumentos->sum(fn($i) => (float) $i->monto_pago)
+            + ($query?->pagos ?? collect())
+                ->flatMap(fn($p) => $p->pagosParciales ?? collect())
+                ->filter(fn($a) => is_null($a->id_estado_instrumento))
+                ->sum(fn($a) => (float) $a->monto_pago);
+
         $datos = [
+            "monto_pagable" => round($montoPagable, 2),
+            "total_entregado" => round($totalEntregado, 2),
+            "total_restante" => round(max(0, $montoPagable - $totalEntregado), 2),
             "instrumentos" => $instrumentos,
             "fechas_pendientes" => $fechasPendientes,
             "version_comprobante" => $versionComprobante,

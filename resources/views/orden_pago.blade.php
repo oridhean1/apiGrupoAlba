@@ -293,9 +293,13 @@
                                 <td colspan="2" class="text-right text-red">Débito:</td>
                                 <td class="text-right text-red">${{ number_format($debito ?? 0, 2, ',', '.') }}</td>
                             </tr>
+                            {{-- El total sale de las facturas imputadas (monto_pagable), no de
+                                 `cabecera - debito`: la cabecera puede estar desincronizada con lo
+                                 imputado y entonces el total no cerraba ni con las filas de arriba
+                                 ni con lo que el sistema deja pagar. --}}
                             <tr class="total-final-row">
                                 <td colspan="2" class="text-right">Total a Pagar:</td>
-                                <td class="text-right">${{ number_format(($total ?? 0) - ($debito ?? 0), 2, ',', '.') }}</td>
+                                <td class="text-right">${{ number_format($monto_pagable ?? (($total ?? 0) - ($debito ?? 0)), 2, ',', '.') }}</td>
                             </tr>
                         </tbody>
                     </table>
@@ -424,13 +428,19 @@
                             @php $totalFilas2++; @endphp
                             @endwhile
 
+                            {{-- Esta columna lista los valores entregados, asi que cierra con la
+                                 SUMA DE ESAS FILAS y con lo que queda. Antes repetia el "total a
+                                 pagar" de la columna de facturas: debajo de una lista de pagos por
+                                 $70.000 decia $78.960, que no era la suma de nada de lo de arriba.
+                                 Y arrastraba una fila de "Débito", que es una deduccion de la
+                                 factura y ya figura en la columna izquierda. (2026-09-10) --}}
                             <tr class="total-row">
-                                <td colspan="2" class="text-right text-red">Débito:</td>
-                                <td class="text-right text-red">${{ number_format($debito ?? 0, 2, ',', '.') }}</td>
+                                <td colspan="2" class="text-right">Entregado:</td>
+                                <td class="text-right">${{ number_format($total_entregado ?? 0, 2, ',', '.') }}</td>
                             </tr>
                             <tr class="total-final-row" style="background-color: #065933;">
-                                <td colspan="2" class="text-right" style="background-color: #065933;">Total:</td>
-                                <td class="text-right" style="background-color: #065933;">${{ number_format(($total ?? 0) - ($debito ?? 0), 2, ',', '.') }}</td>
+                                <td colspan="2" class="text-right" style="background-color: #065933;">Restante:</td>
+                                <td class="text-right" style="background-color: #065933;">${{ number_format($total_restante ?? 0, 2, ',', '.') }}</td>
                             </tr>
                         </tbody>
                     </table>
