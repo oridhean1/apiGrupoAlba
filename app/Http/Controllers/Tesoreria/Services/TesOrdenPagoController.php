@@ -400,12 +400,33 @@ class TesOrdenPagoController extends Controller
         // instrumento (monto y forma de pago) nace despues, al emitir cada fecha. Estas son
         // las fechas que ya se planificaron pero todavia no tienen su pago emitido -> sin
         // esto, imprimir la orden recien confirmada salia sin sello y sin ningun dato.
-        $idsFechaConInstrumento = $instrumentos->pluck('id_fecha_probable')->filter()->values();
+        // Una fecha esta cubierta si tiene CUALQUIER abono vivo, tenga o no estado de instrumento.
+        //
+        // Antes se miraban solo los `$instrumentos` (los del circuito de eCheq). Una transferencia
+        // cargada desde Confirmar Pago tiene `id_estado_instrumento` en NULL, asi que no entraba
+        // en esa lista y su fecha seguia saliendo como "Pendiente de emitir" — la misma cuota
+        // aparecia DOS veces: una como pendiente y otra como el pago que la cubre. Se vio en la
+        // OPA-1413 (id 4524): la transferencia de $100.000 ocupa la fecha 220 y esa fecha salia
+        // igual en la lista de pendientes. (2026-09-10)
+        //
+        // `pagosParciales` ya viene filtrado por `vivos()`, asi que un abono anulado no tapa su
+        // fecha: vuelve a figurar como pendiente, que es lo correcto.
+        $abonosVivos = ($query?->pagos ?? collect())
+            ->flatMap(fn($p) => $p->pagosParciales ?? collect());
+
+        $idsFechaOcupada = $abonosVivos->pluck('id_fecha_probable')->filter()->unique();
+
         $fechasPendientes = ($query?->pagos ?? collect())
             ->flatMap(fn($p) => $p->fechaprobablepagos ?? collect())
-            ->reject(fn($f) => $idsFechaConInstrumento->contains($f->id_fecha_probable))
+            ->reject(fn($f) => $idsFechaOcupada->contains($f->id_fecha_probable))
             ->sortBy('orden_cuotas')
             ->values();
+
+        // Numero de cuota real de cada abono, para no mostrar el indice del loop: con dos abonos
+        // el comprobante decia "1" y "2" sin importar que cuotas del cronograma cubrian.
+        $cuotaPorFecha = ($query?->pagos ?? collect())
+            ->flatMap(fn($p) => $p->fechaprobablepagos ?? collect())
+            ->pluck('orden_cuotas', 'id_fecha_probable');
 
         // Las dos versiones que pide el circuito salen de la MISMA plantilla: lo unico que
         // cambia es si los numeros ya se cargaron. La inicial va a Tesoreria para que emita;
@@ -442,6 +463,7 @@ class TesOrdenPagoController extends Controller
                 ->sum(fn($a) => (float) $a->monto_pago);
 
         $datos = [
+            "cuota_por_fecha" => $cuotaPorFecha,
             "monto_pagable" => round($montoPagable, 2),
             "total_entregado" => round($totalEntregado, 2),
             "total_restante" => round(max(0, $montoPagable - $totalEntregado), 2),

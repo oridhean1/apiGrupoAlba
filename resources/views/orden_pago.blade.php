@@ -375,7 +375,9 @@
                                             @endif
                                         </div>
                                     </td>
-                                    <td class="text-center font-bold">{{ $loop->iteration }}</td>
+                                    {{-- La cuota REAL del cronograma, no el indice del loop: con dos
+                                         abonos decia "1" y "2" sin importar que cuotas cubrian. --}}
+                                    <td class="text-center font-bold">{{ ($cuota_por_fecha ?? collect())[$inst?->id_fecha_probable] ?? $loop->iteration }}</td>
                                     <td class="text-right font-bold text-dark">${{ number_format($inst?->monto_pago ?? 0, 2, ',', '.') }}</td>
                                 </tr>
                                 @php $totalFilas2++; @endphp
@@ -397,7 +399,7 @@
                                             <span class="text-blue" style="font-size: 8px;">{{ $pagosP?->fecha_confirma_pago }}</span>
                                         </div>
                                     </td>
-                                    <td class="text-center font-bold">{{ $loop->iteration }}</td>
+                                    <td class="text-center font-bold">{{ ($cuota_por_fecha ?? collect())[$pagosP?->id_fecha_probable] ?? $loop->iteration }}</td>
                                     <td class="text-right font-bold text-dark">${{ number_format($pagosP?->monto_pago ?? 0, 2, ',', '.') }}</td>
                                 </tr>
                                 @php $totalFilas2++; @endphp
