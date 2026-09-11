@@ -326,17 +326,31 @@ class TesPagosRepository
         $estado = null;
         $pago = TesPagoEntity::find($params->id_pago);
 
-        // Fechas del cronograma de esta boleta, indexadas por fecha, y cuáles ya están ocupadas
-        // por un abono vivo. Se calcula una sola vez, fuera del loop.
+        // Fechas del cronograma de esta boleta. $fechasBoleta queda indexado por
+        // id_fecha_probable (clave real y única); $plan es un índice AUXILIAR por fecha, para el
+        // camino viejo que solo manda la fecha como string.
+        //
+        // ⚠️ `$plan` no sirve como única fuente: dos cuotas del cronograma pueden caer el MISMO
+        // día (pasa en la práctica — ver OPA-4417, cuotas 2 y 3 ambas el 2026-09-18), y un
+        // `pluck()` indexado por fecha colapsa esos duplicados a una sola entrada (la última que
+        // recorra). Antes esta era la ÚNICA forma de resolver la fecha, así que con un cronograma
+        // así el sistema no podía distinguir a cuál de las dos cuotas se refería el usuario, ni
+        // garantizar cuál quedaba libre. Ahora el front manda `id_fecha_probable` explícito
+        // cuando lo sabe (lo eligió de un desplegable ya filtrado a fechas libres, con la fecha
+        // como clave única); `$plan` queda de respaldo para pagos que solo traen la fecha como
+        // texto libre (el circuito viejo: 292 de 302 abonos en Alba están así). (2026-09-11)
         //
         // ⚠️ Los abonos que nacían acá NO guardaban `id_fecha_probable`: quedaban sueltos del
         // cronograma. Por eso no ocupaban ninguna fecha y nada impedía cargar una transferencia
         // en la misma fecha en que ya había un eCheq emitido — el circuito de eCheq sí lo
         // bloquea (`emitirPagoDeFecha`), pero este camino se lo saltaba entero.
         // (2026-09-08, reportado sobre la OPA-4284)
-        $plan = DB::table('tb_tes_fecha_probable_pago')
+        $fechasBoleta = DB::table('tb_tes_fecha_probable_pago')
             ->where('id_pago', $pago->id_pago)
-            ->pluck('id_fecha_probable', 'fecha_probable_pago');
+            ->get(['id_fecha_probable', 'fecha_probable_pago'])
+            ->keyBy('id_fecha_probable');
+
+        $plan = $fechasBoleta->pluck('id_fecha_probable', 'fecha_probable_pago');
 
         $ocupadas = TesPagosParciales::where('id_pago', $pago->id_pago)
             ->whereNotNull('id_fecha_probable')
@@ -345,18 +359,31 @@ class TesPagosRepository
 
         foreach ($params->lista_pagos as $pagos) {
             if (empty($pagos->id_pago_parcial)) {
-                // La fecha elegida se resuelve contra el cronograma. Si no coincide con ninguna
-                // fecha planificada queda en null: es un pago libre del circuito viejo, y así
-                // seguía funcionando antes (292 de 302 abonos en Alba están así).
-                $fechaElegida = $this->soloFecha($pagos->fecha_confirma_pago);
-                $idFecha = $fechaElegida ? ($plan[$fechaElegida] ?? null) : null;
+                // Se prefiere el id EXPLÍCITO que manda el front (elegido de un desplegable con
+                // id como clave, sin ambigüedad). Se valida que pertenezca a esta boleta antes de
+                // confiar en él — no se toma ciego lo que llega del cliente. Si no vino, o no es
+                // de esta boleta, se cae al camino viejo por fecha.
+                $idFechaExplicito = (int) ($pagos->id_fecha_probable ?? 0);
+
+                if ($idFechaExplicito > 0 && $fechasBoleta->has($idFechaExplicito)) {
+                    $idFecha = $idFechaExplicito;
+                } else {
+                    // La fecha elegida se resuelve contra el cronograma. Si no coincide con
+                    // ninguna fecha planificada queda en null: es un pago libre del circuito
+                    // viejo, y así seguía funcionando antes.
+                    $fechaElegida = $this->soloFecha($pagos->fecha_confirma_pago);
+                    $idFecha = $fechaElegida ? ($plan[$fechaElegida] ?? null) : null;
+                }
 
                 if (!is_null($idFecha) && isset($ocupadas[$idFecha])) {
+                    // La fecha para el mensaje sale del CRONOGRAMA por `$idFecha`, no de
+                    // `$fechaElegida`: esa variable solo se define en el camino viejo (por
+                    // fecha) y quedaba indefinida —con warning— cuando el id vino explícito.
                     throw new \Exception(sprintf(
                         'La fecha %s ya tiene un pago cargado en esta orden (abono %s). '
                             . 'Cada fecha del cronograma admite un solo pago: elegí otra fecha, '
                             . 'o dá de baja el pago que ya está.',
-                        $fechaElegida,
+                        $fechasBoleta[$idFecha]->fecha_probable_pago ?? '',
                         $ocupadas[$idFecha]
                     ));
                 }
