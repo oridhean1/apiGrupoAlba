@@ -990,6 +990,164 @@ class TestOrdenPagoRepository
      * anulada quedaría sin forma de generar una nueva (el front la oculta) o, peor, la
      * generación borraría el historial de por qué se rechazó la anterior. (2026-08-13)
      */
+    /**
+     * Genera una OPA desde la pantalla Tesorería › Crear OPA, imputando un monto por factura.
+     *
+     * Es el reemplazo del checkbox + "Generar OPA" del visor de liquidaciones. La diferencia de
+     * fondo con `findByIdFacturaMultiple()` es que acá cada factura entra con **su** monto y no
+     * necesariamente entera, así que:
+     *
+     *   - no fusiona ni borra OPAs existentes (no hace falta: si una factura ya está imputada a
+     *     una orden pendiente, lo que queda libre es el saldo y eso es lo que se ofrece);
+     *   - `monto_aplicado` es NETO de débito. Ver el encabezado de `FacturasOpaRepository`.
+     *
+     * `monto_factura` del detalle viejo se escribe con el MISMO valor que `monto_aplicado` de la
+     * puente. No es casualidad ni redundancia: `recalcularMontoDesdeDetalle()` suma `monto_factura`
+     * para la cabecera y después llama a `sincronizarPuenteDesdeDetalle()`, que pisa
+     * `monto_aplicado` con `monto_factura`. Si se escribieran distinto, la primera operación que
+     * tocara el detalle borraría la imputación parcial y la dejaría en el bruto de la factura.
+     * El invariante es: **detalle.monto_factura == puente.monto_aplicado == lo imputado**. Para
+     * una OPA por la factura entera coincide con `total_neto`, igual que siempre.
+     *
+     * Todo el monto se revalida contra el saldo del servidor: el que viene del front es una
+     * sugerencia. Y las facturas se toman con `lockForUpdate()` ANTES de calcular saldos, si no
+     * dos usuarios imputando a la vez la misma factura pueden pasar los dos la validación.
+     *
+     * @param  object $request  id_prestador?, observaciones?, fecha_emision?, fecha_vencimiento?,
+     *                          fecha_probable_pago?, id_moneda?,
+     *                          facturas: [{id_factura, monto_aplicado}, ...]
+     * @return TesOrdenPagoEntity
+     */
+    public function procesarOpaAgrupada($request)
+    {
+        $saldos = new FacturasOpaRepository();
+
+        $lineas = collect($request->facturas ?? [])
+            ->map(fn($f) => (object) (array) $f)
+            ->filter(fn($f) => !empty($f->id_factura))
+            ->values();
+
+        if ($lineas->isEmpty()) {
+            throw new \Exception('No se recibieron facturas para generar la orden de pago.');
+        }
+
+        $ids = $lineas->pluck('id_factura');
+        if ($ids->unique()->count() !== $ids->count()) {
+            throw new \Exception('Hay una factura repetida en la selección.');
+        }
+
+        // Bloqueo ANTES de leer saldos: con la fila tomada, el saldo que se calcula abajo no puede
+        // cambiar por debajo hasta el commit.
+        $facturas = FacturacionDatosEntity::whereIn('id_factura', $ids)
+            ->lockForUpdate()
+            ->get()
+            ->keyBy('id_factura');
+
+        $faltantes = $ids->diff($facturas->keys());
+        if ($faltantes->isNotEmpty()) {
+            throw new \Exception('No se encontró la factura ' . $faltantes->implode(', ') . '.');
+        }
+
+        // Solo prestadores, y todas del mismo. El front ya lo valida, pero quien pegue al endpoint
+        // directo se lo saltea: sin esto se podían mezclar dos prestadores en una OPA y el
+        // beneficiario quedaba mal asignado para uno de los dos. (mismo criterio que
+        // findByIdFacturaMultiple, 2026-08-13)
+        $beneficiarios = $facturas->pluck('id_prestador')->unique()->values();
+
+        if ($beneficiarios->count() > 1) {
+            throw new \Exception(
+                'No se puede generar: las facturas seleccionadas pertenecen a distintos prestadores.'
+            );
+        }
+
+        $idPrestador = $beneficiarios->first();
+        if (empty($idPrestador)) {
+            throw new \Exception('Las facturas seleccionadas no tienen prestador asignado.');
+        }
+
+        $montoTotal = 0.0;
+        $imputaciones = [];
+
+        foreach ($lineas as $linea) {
+            $factura = $facturas[$linea->id_factura];
+
+            if ((int) $factura->estado !== FacturasOpaRepository::ESTADO_FACTURA_VALORIZACION_FINAL) {
+                throw new \Exception(
+                    "La factura {$factura->numero} no está en Valorización Final, no se le puede generar una orden de pago."
+                );
+            }
+
+            $monto = round((float) ($linea->monto_aplicado ?? 0), 2);
+            $saldo = $saldos->saldoImputableFactura($factura);
+
+            if ($monto <= 0) {
+                throw new \Exception("El monto a imputar a la factura {$factura->numero} tiene que ser mayor a 0.");
+            }
+
+            // Tolerancia de un centavo: el front redondea a 2 decimales y no puede quedar
+            // rebotando por un error de coma flotante cuando pide exactamente el saldo entero.
+            if ($monto > $saldo + 0.01) {
+                throw new \Exception(
+                    "El monto imputado a la factura {$factura->numero} ($" . number_format($monto, 2, ',', '.')
+                    . ") supera su saldo disponible ($" . number_format($saldo, 2, ',', '.') . ")."
+                );
+            }
+
+            $monto = min($monto, $saldo);
+            $montoTotal += $monto;
+            $imputaciones[$factura->id_factura] = $monto;
+        }
+
+        $esAgrupada = count($imputaciones) > 1;
+        $primera = $facturas->first();
+
+        $opa = TesOrdenPagoEntity::create([
+            'id_proveedor' => null,
+            'id_prestador' => $idPrestador,
+            'monto_orden_pago' => round($montoTotal, 2),
+            'id_moneda' => $request->id_moneda ?? 1,
+            // `?? null` antes del `?:`: el `?:` solo NO emite warning cuando el operando existe.
+            // Con un Request da igual (devuelve null para lo que no vino), pero con un stdClass
+            // —como lo llaman los tests, o cualquier llamador interno— tira
+            // "Undefined property" por cada fecha opcional que no se mandó.
+            'fecha_emision' => ($request->fecha_emision ?? null) ?: ($primera->fecha_comprobante ?? $this->fechaActual),
+            'fecha_vencimiento' => ($request->fecha_vencimiento ?? null) ?: ($primera->fecha_vencimiento ?? null),
+            'fecha_probable_pago' => ($request->fecha_probable_pago ?? null) ?: null,
+            'id_estado_orden_pago' => self::ESTADO_OPA_PENDIENTE,
+            'monto_anticipado' => 0,
+            'observaciones' => $request->observaciones ?? '',
+            'cod_usuario' => $this->user->cod_usuario,
+            'fecha_genera' => $this->fechaActual,
+            // Sin esto la columna toma su DEFAULT, que es 'PROVEEDOR': la OPA nacía etiquetada al
+            // revés, el beneficiario salía vacío en los comprobantes y el agrupado se rompía
+            // porque la clave del beneficiario se arma con este campo. 129 OPAs quedaron así
+            // antes de detectarlo. (2026-09-04)
+            'tipo_factura' => 'PRESTADOR',
+            // Una OPA de una sola factura conserva la referencia en la cabecera; la agrupada la
+            // deja en NULL y el vínculo vive en el detalle/puente (ver findByOpaVigenteFactura).
+            'id_factura' => $esAgrupada ? null : array_key_first($imputaciones),
+        ]);
+
+        foreach ($imputaciones as $idFactura => $monto) {
+            TesOrdenPagoDetalleEntity::create([
+                'id_orden_pago' => $opa->id_orden_pago,
+                'id_factura' => $idFactura,
+                'monto_factura' => $monto,
+                'tipo_factura' => 'PRESTADOR',
+                'factura_unida' => $esAgrupada ? 1 : 0,
+            ]);
+        }
+
+        // Deja la puente alineada con el detalle y recalcula el estado derivado. La cabecera se
+        // recalcula de paso desde el detalle, así que el monto de arriba es solo el valor inicial.
+        $this->recalcularMontoDesdeDetalle($opa->id_orden_pago);
+
+        // num_orden_pago lo asigna la base por trigger: sin refresh vuelve null al front.
+        $opa->refresh();
+
+        return $opa;
+    }
+
     public function findByIdFacturaMultiple($idFacturas)
     {
         $idFacturas = collect($idFacturas)->filter()->unique()->values();

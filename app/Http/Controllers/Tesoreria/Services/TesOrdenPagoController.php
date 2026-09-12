@@ -7,6 +7,7 @@ use App\Http\Controllers\Tesoreria\Repository\TesPagosRepository;
 use App\Http\Controllers\Tesoreria\Repository\TesAnticipoRepository;
 use App\Http\Controllers\Tesoreria\Repository\TesImputacionFifoRepository;
 use App\Http\Controllers\Tesoreria\Repository\TesCuentaCorrienteRepository;
+use App\Http\Controllers\Tesoreria\Repository\FacturasOpaRepository;
 use App\Http\Controllers\Tesoreria\Repository\TestOrdenPagoRepository;
 use App\Models\Tesoreria\TesOrdenPagoEntity;
 use Carbon\Carbon;
@@ -32,6 +33,58 @@ class TesOrdenPagoController extends Controller
         $data = [];
         $data = $opa->getFiltroDinamico($request);
         return response()->json($data);
+    }
+
+    /**
+     * GET /v1/tesoreria/facturas-para-opa
+     *
+     * Facturas de prestador en Valorización Final con saldo para imputar. Es el listado de
+     * Tesorería › Crear OPA. Devuelve `{data, total}` porque pagina del lado del servidor.
+     */
+    public function getFacturasParaOpa(Request $request, FacturasOpaRepository $repo)
+    {
+        try {
+            return response()->json($repo->listarFacturasParaOpa($request, $request->id_orden_pago));
+        } catch (\Throwable $th) {
+            return response()->json(['message' => $th->getMessage()], 500);
+        }
+    }
+
+    /**
+     * POST /v1/tesoreria/generar-opa-agrupada
+     * Body: { facturas: [{ id_factura, monto_aplicado }], observaciones?, fecha_emision?, ... }
+     *
+     * Genera la orden imputando un monto por factura. Reemplaza al botón "Generar OPA" del visor
+     * de liquidaciones.
+     *
+     * No comparte endpoint con `procesar-opa`: ese tiene otro contrato (en edición itera
+     * `fechaprobablepagos` y llama a `findByUpdatePagoPorOpa`), y ramificar por la forma del
+     * payload pondría en riesgo la pantalla de OPA que ya lo consume.
+     *
+     * 422 y no 500 para los errores de validación: son cosas que el usuario puede corregir
+     * (un monto que se pasa del saldo, facturas de dos prestadores), no fallas del servidor.
+     */
+    public function getGenerarOpaAgrupada(Request $request, TestOrdenPagoRepository $opa)
+    {
+        try {
+            DB::beginTransaction();
+
+            $generada = $opa->procesarOpaAgrupada($request);
+
+            DB::commit();
+
+            $cantidad = count((array) $request->facturas);
+            $detalle = $cantidad > 1 ? "con {$cantidad} facturas" : 'para la factura seleccionada';
+
+            return response()->json([
+                'message' => "Se generó la orden de pago {$generada->num_orden_pago} {$detalle}.",
+                'id_orden_pago' => $generada->id_orden_pago,
+                'num_orden_pago' => $generada->num_orden_pago,
+            ]);
+        } catch (\Throwable $th) {
+            DB::rollBack();
+            return response()->json(['message' => $th->getMessage()], 422);
+        }
     }
 
     public function getProcesar(Request $request, TestOrdenPagoRepository $opa, TesPagosRepository $pagosRepo)

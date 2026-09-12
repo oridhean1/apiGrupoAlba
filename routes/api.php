@@ -1190,6 +1190,8 @@ Route::group(
         Route::post('procesar-cuenta-bancaria', [App\Http\Controllers\Tesoreria\Services\TesCuentasController::class, 'getProcesarCuenta']);
         Route::post('bloquear-cuenta-bancaria', [App\Http\Controllers\Tesoreria\Services\TesCuentasBloqueoController::class, 'getBloquear']);
         Route::post('procesar-opa', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getProcesar']);
+        Route::get('facturas-para-opa', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getFacturasParaOpa']);  // Facturas en Valorizacion Final con saldo, para Crear OPA
+        Route::post('generar-opa-agrupada', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getGenerarOpaAgrupada']);  // Genera la OPA imputando un monto por factura
         Route::get('cuenta-corriente-beneficiarios', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getBeneficiariosCuentaCorriente']);  // Buscador de beneficiarios
         Route::get('cuenta-corriente', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getCuentaCorriente']);  // Cuenta corriente del prestador/proveedor
         Route::get('anticipos-facturas-aplicables', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getFacturasAplicables']);  // Facturas candidatas a recibir anticipo
