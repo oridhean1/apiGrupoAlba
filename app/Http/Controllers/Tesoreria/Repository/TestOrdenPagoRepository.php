@@ -587,22 +587,29 @@ class TestOrdenPagoRepository
      * bloqueadas 1.020 OPAs en OSV y 69 en Alba sin motivo: no se podían editar, ni gestionar
      * sus facturas, ni anular.
      *
-     * La señal de "se pagó" es el estado PAGADO, que en las dos bases coincide 100% con tener
-     * `fecha_confirma_pago` (249/249 en Alba, 103/103 en OSV). Se contemplan las dos por las
-     * dudas: hay 2 pagos en Alba con fecha de confirmación pero estado PENDIENTE, y ante la duda
-     * conviene bloquear de más, no de menos.
+     * ⚠️ **Se mide por lo COBRADO, no por un campo de la boleta** (corregido 2026-09-11).
      *
-     * Un pago RECHAZADO nunca bloquea, aunque tenga fecha de confirmación: se revirtió.
+     * Antes alcanzaba con que la BOLETA tuviera `fecha_confirma_pago` o estado PAGADO. El
+     * problema: ese campo de la boleta no prueba que haya salido plata — se completa al confirmar
+     * la orden, cuando recién se arma el cronograma. Resultado: órdenes EN PROCESO sin un peso
+     * cobrado rebotaban con *"la orden tiene pagos confirmados"*, un mensaje que además no dice
+     * qué hacer. Reportado el 2026-09-11 al intentar "Anular y reemitir" una orden en proceso.
+     *
+     * `montoPagadoOpa()` ya sabe distinguir los dos circuitos y es la fuente de verdad del estado
+     * derivado: si la boleta tiene ABONOS, mandan ellos (solo los que tienen fecha de
+     * confirmación); si no tiene, vale la cabecera (el circuito viejo registraba el pago ahí, sin
+     * desglose). Atar la guarda a esa misma función es lo que evita que la orden se bloquee por
+     * una razón y se muestre pagada por otra.
+     *
+     * Un eCheq EMITIDO y todavía no acreditado no cuenta acá —no se cobró—, pero igual impide
+     * anular: lo frena la guarda de instrumentos emitidos de `motivoQueImpideAnular()`, con un
+     * mensaje que sí explica el paso a seguir (rechazarlo o anularlo primero).
+     *
+     * Un pago RECHAZADO nunca bloquea: se revirtió.
      */
     public function tienePagosConfirmados($idOpa): bool
     {
-        return TesPagoEntity::where('id_orden_pago', $idOpa)
-            ->where('id_estado_orden_pago', '!=', self::ESTADO_OPA_RECHAZADO)
-            ->where(function ($q) {
-                $q->where('id_estado_orden_pago', self::ESTADO_OPA_PAGADO)
-                    ->orWhereNotNull('fecha_confirma_pago');
-            })
-            ->exists();
+        return $this->montoPagadoOpa($idOpa) > 0.01;
     }
 
     /**
