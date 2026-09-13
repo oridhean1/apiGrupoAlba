@@ -248,7 +248,24 @@ class PeriodosContablesRepository
 
     public function findByPeriodoContableActivoNow($idRazon = null)
     {
-        $fecha = $this->fechaActual->toDateString();
+        return $this->findByPeriodoContableEnFecha($this->fechaActual->toDateString(), $idRazon);
+    }
+
+    /**
+     * Período mensual activo que contiene UNA FECHA DADA (no necesariamente hoy).
+     *
+     * Lo necesita el asiento de débito de un instrumento diferido: un eCheq emitido en septiembre
+     * y acreditado en octubre pertenece al período de **octubre**. Resolver el período por "hoy"
+     * lo metería en el mes equivocado, y el error solo se vería al cerrar el período.
+     * (2026-09-12)
+     *
+     * `findByPeriodoContableActivoNow()` es este mismo método con la fecha de hoy — una sola
+     * implementación, para que las dos no puedan divergir.
+     */
+    public function findByPeriodoContableEnFecha($fecha, $idRazon = null)
+    {
+        $fecha = \Illuminate\Support\Carbon::parse($fecha)->toDateString();
+
         $query = PeriodosContablesEntity::where('id_tipo_periodo', 1)
             ->whereDate('periodo_inicio', '<=', $fecha)
             ->whereDate('periodo_fin', '>=', $fecha);

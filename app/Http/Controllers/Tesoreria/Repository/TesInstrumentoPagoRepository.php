@@ -57,6 +57,7 @@ class TesInstrumentoPagoRepository
      * `tb_tes_formas_pago`: 7 = eCheq. Verificado en las DOS bases el 2026-09-03 — los catálogos
      * de formas de pago y de estado de instrumento coinciden id por id entre Alba y OSV.
      */
+    const FORMA_PAGO_CHEQUE = 2;
     const FORMA_PAGO_ECHEQ = 7;
 
     private $user;
@@ -195,32 +196,7 @@ class TesInstrumentoPagoRepository
 
             $opaRepo = new TestOrdenPagoRepository();
 
-            // Lo ya emitido sobre esta orden, para saber cuánto queda. Los abonos RECHAZADOS y
-            // ANULADOS no cuentan: esa plata no salió (o volvió), así que no puede seguir ocupando
-            // lugar en el tope. Sin eso, rechazar un eCheq dejaba la orden imposible de repagar.
-            $yaEmitido = $this->emitidoVivoDeOpa($opa->id_orden_pago);
-
-            // No se puede emitir por encima de lo que realmente hay que pagarle al beneficiario.
-            //
-            // El tope es el monto PAGABLE (lo imputado menos el débito de liquidación), no el
-            // `monto_orden_pago`, que arrastra el bruto de la factura. Sin este freno se podía
-            // cargar y confirmar abonos por el bruto: el caso que lo destapó tenía $1.139.311,04
-            // en abonos sobre una orden cuyo neto real era $78.960 — $1.060.351,04 de sobrepago,
-            // y lo único que avisaba era un saldo en rojo en la grilla, que no bloquea nada.
-            // (2026-09-05, ver docs/circuito-pagos/revisar-debito-no-descontado.md)
-            $tope = $this->topeDeOpa($opa->id_orden_pago, $opaRepo);
-
-            if (self::aCentavos($yaEmitido + $monto) > self::aCentavos($tope)) {
-                $disponible = max(0, $tope - $yaEmitido);
-
-                throw new \Exception(sprintf(
-                    'El pago se pasa de lo que hay que pagar en esta orden. '
-                        . 'A pagar: $%s. Ya emitido: $%s. Disponible: $%s.',
-                    number_format($tope, 2, ',', '.'),
-                    number_format($yaEmitido, 2, ',', '.'),
-                    number_format($disponible, 2, ',', '.')
-                ));
-            }
+            $limites = $this->validarTopeDeOpa($opa->id_orden_pago, $monto, null, $opaRepo);
 
             // La cuenta de origen tiene que ser de la MISMA razón social que la orden.
             //
@@ -251,7 +227,7 @@ class TesInstrumentoPagoRepository
                 // la factura, así que al pagar el neto correcto quedaba un "restante" igual al
                 // débito. Es el número que el modal de Confirmar Pago muestra como "Monto
                 // Restante Actual", y decía $576 sobre una orden ya saldada. (2026-09-06)
-                'monto_restante'        => max(0, $tope - ($yaEmitido + $monto)),
+                'monto_restante'        => $limites['restante'],
                 'id_usuario'            => $this->user->cod_usuario ?? null,
                 // El eCheq espera que el banco le asigne número; una transferencia no.
                 'id_estado_instrumento' => $esEcheq ? self::PENDIENTE_EMISION : self::EMITIDO,
@@ -454,10 +430,108 @@ class TesInstrumentoPagoRepository
             $abono->fecha_confirma_pago   = $fechaAcreditacion;
             $abono->save();
 
+            // ═══ Acá es donde la plata sale de verdad ═══
+            //
+            // Al emitirlo, el instrumento solo generó un PASIVO (ver `crearAsientoPago`): se
+            // entregó el documento pero el banco no había debitado nada. Recién ahora se cancela
+            // ese pasivo contra el banco, y recién ahora se descuenta el saldo de la cuenta. Así el
+            // saldo del sistema coincide con el extracto, que es lo que necesita la conciliación.
+            // (2026-09-12, decidido con el usuario)
+            $this->registrarDebitoBancarioDelInstrumento($abono, $fechaAcreditacion);
+
             $opaRepo->recalcularEstadoOpa($this->opaDeAbono($abono));
 
             return $abono;
         });
+    }
+
+    /**
+     * Segundo momento del instrumento diferido: asiento de débito + salida real del saldo.
+     *
+     * Se separa de `marcarAcreditado()` porque son dos cosas distintas: aquella decide *si* el
+     * instrumento se acredita (guardas de estado), esta registra *las consecuencias* de que se
+     * haya acreditado.
+     *
+     * **Si falta la configuración contable, tira.** Un instrumento acreditado sin su asiento deja
+     * el pasivo abierto para siempre y el saldo del sistema por encima del real — es peor que no
+     * poder acreditarlo. Como todo corre dentro de la transacción de `marcarAcreditado`, la
+     * acreditación se revierte entera.
+     */
+    private function registrarDebitoBancarioDelInstrumento(TesPagosParciales $abono, $fechaAcreditacion): void
+    {
+        // ⚠️ Solo se debita lo que dejó un PASIVO abierto al emitirse.
+        //
+        // Un instrumento anterior al 2026-09-12 se asentó con el viejo criterio: su HABER ya fue
+        // contra el banco y su saldo ya se retiró al confirmar el pago. Para esos no hay pasivo
+        // que cancelar, y generarles el asiento 2 acreditaría el banco DOS VECES por la misma
+        // plata, además de retirar el saldo dos veces.
+        //
+        // El historial es el que sabe cuáles son: solo los emitidos por el circuito nuevo dejaron
+        // un evento EMISION con su línea del asiento. Es también lo que hace que no haga falta
+        // migrar nada — los 4 eCheq ya emitidos de Alba siguen su curso viejo y se pueden
+        // acreditar igual, sin depender de que Contaduría cargue la cuenta de diferidos.
+        $tienePasivoAbierto = \App\Models\Contabilidad\AsientosPagoHistorialEntity::query()
+            ->where('id_pago_parcial', $abono->id_pago_parcial)
+            ->where('tipo_evento', 'EMISION')
+            ->exists();
+
+        if (!$tienePasivoAbierto) {
+            return;
+        }
+
+        $boleta = TesPagoEntity::find($abono->id_pago);
+        $opa = TesOrdenPagoEntity::find($boleta->id_orden_pago);
+
+        $cuentasRepo = new TesCuentasBancariasRepository();
+        $asientoRepo = new \App\Http\Controllers\Contabilidad\Repository\AsientoContableRepository();
+        $periodosRepo = new \App\Http\Controllers\Contabilidad\Repository\PeriodosContablesRepository();
+        $historialRepo = new \App\Http\Controllers\Contabilidad\Repository\AsientosPagoHistorialRepository($asientoRepo);
+
+        $opaRepo = new TestOrdenPagoRepository();
+        $razones = $opaRepo->razonesSocialesDeOpa($opa->id_orden_pago);
+        $idRazon = $razones[0] ?? null;
+
+        // ⚠️ El período se resuelve para la FECHA DE ACREDITACIÓN, no para hoy: un eCheq emitido
+        // en septiembre y acreditado en octubre pertenece al período de octubre.
+        $periodo = $periodosRepo->findByPeriodoContableEnFecha($fechaAcreditacion, $idRazon);
+
+        if (is_null($periodo)) {
+            throw new \Exception(
+                'No hay un período contable activo para la fecha de acreditación ('
+                    . $fechaAcreditacion . '). Creá o activá ese período antes de acreditar.'
+            );
+        }
+
+        $beneficiario = $opa->tipo_factura === 'PROVEEDOR' ? $opa->proveedor : $opa->prestador;
+
+        $asiento = $asientoRepo->crearAsientoDebitoInstrumento($abono, $fechaAcreditacion, [
+            'id_pago'     => $abono->id_pago,
+            'id_razon'    => $idRazon,
+            'nombre'      => $beneficiario->razon_social ?? '',
+            'numero_pago' => 'PAGO-' . ($boleta->num_pago ?? ''),
+        ], $periodo->id_periodo_contable);
+
+        $historialRepo->guardarHistorial(
+            $abono->id_pago,
+            $asiento->id_asiento_contable,
+            'DEBITO',
+            false,
+            null,
+            'Débito bancario del instrumento al acreditarse',
+            $abono->id_pago_parcial,
+            $asiento->lineaDiferidos ?? null
+        );
+
+        // El retiro del saldo va junto al asiento, por el mismo motivo: la plata sale ahora.
+        $cuentasRepo->findByRetiroCuenta($abono->id_cuenta_bancaria, (float) $abono->monto_pago);
+        $cuentasRepo->findByRegistrarMovimiento(
+            $abono->id_cuenta_bancaria,
+            (float) $abono->monto_pago,
+            'EGRESO',
+            $abono->id_pago,
+            null,
+            'OPA'
+        );
     }
 
     /**
@@ -480,16 +554,86 @@ class TesInstrumentoPagoRepository
                 throw new \Exception('Solo se puede rechazar un eCheq que haya sido emitido.');
             }
 
+            $estabaAcreditado = (int) $abono->id_estado_instrumento === self::ACREDITADO;
+
             $abono->id_estado_instrumento = self::RECHAZADO;
             $abono->motivo_rechazo        = $motivo;
             $abono->fecha_rechazo         = $this->fechaActual;
             $abono->fecha_confirma_pago   = null;
             $abono->save();
 
+            $this->revertirContabilidadDelInstrumento($abono, $motivo, $estabaAcreditado);
+
             $opaRepo->recalcularEstadoOpa($this->opaDeAbono($abono));
 
             return $abono;
         });
+    }
+
+    /**
+     * Deshace el rastro contable de un instrumento rechazado.
+     *
+     * El banco lo devolvió: esa plata no se pagó, así que la deuda con el beneficiario vuelve a
+     * quedar viva y el pasivo (o el débito, si ya se había acreditado) tiene que revertirse.
+     *
+     * **Se revierte LÍNEA POR LÍNEA, no el asiento entero.** El asiento de emisión es compartido:
+     * un pago con dos eCheq y una transferencia tiene una línea por cada uno. Usar el contraasiento
+     * de asiento completo (`AsientosPagoHistorialRepository::generarContraasiento`) revertiría
+     * también los otros dos medios de pago, que no tienen nada que ver con este rechazo. Por eso el
+     * historial guarda `id_asiento_contable_detalle` desde 2026_09_12_100000.
+     *
+     * Un instrumento del circuito viejo (sin eventos en el historial) no tiene nada que revertir
+     * acá: su asiento fue a nivel boleta y se maneja con la anulación del pago.
+     */
+    private function revertirContabilidadDelInstrumento(TesPagosParciales $abono, ?string $motivo, bool $estabaAcreditado): void
+    {
+        $eventos = \App\Models\Contabilidad\AsientosPagoHistorialEntity::query()
+            ->where('id_pago_parcial', $abono->id_pago_parcial)
+            ->where('es_contraasiento', false)
+            ->whereIn('tipo_evento', ['EMISION', 'DEBITO'])
+            ->get();
+
+        if ($eventos->isEmpty()) {
+            return;
+        }
+
+        $asientoRepo = new \App\Http\Controllers\Contabilidad\Repository\AsientoContableRepository();
+        $historialRepo = new \App\Http\Controllers\Contabilidad\Repository\AsientosPagoHistorialRepository($asientoRepo);
+
+        $razon = trim('Rechazo del instrumento. ' . ($motivo ?? ''));
+
+        foreach ($eventos as $evento) {
+            if (is_null($evento->id_asiento_contable_detalle)) {
+                continue;
+            }
+
+            $contra = $asientoRepo->contraasientoDeLinea($evento->id_asiento_contable_detalle, $razon);
+
+            $historialRepo->guardarHistorial(
+                $abono->id_pago,
+                $contra->id_asiento_contable,
+                'CONTRAASIENTO',
+                true,
+                $evento->id_asiento_contable,
+                $razon,
+                $abono->id_pago_parcial
+            );
+        }
+
+        // Si la plata ya había salido del banco (estaba acreditado), vuelve a la cuenta: el banco
+        // devolvió el instrumento. Si estaba solo EMITIDO, nunca salió y no hay nada que reponer.
+        if ($estabaAcreditado && !is_null($abono->id_cuenta_bancaria)) {
+            $cuentasRepo = new TesCuentasBancariasRepository();
+            $cuentasRepo->findByDepositoCuenta($abono->id_cuenta_bancaria, (float) $abono->monto_pago);
+            $cuentasRepo->findByRegistrarMovimiento(
+                $abono->id_cuenta_bancaria,
+                (float) $abono->monto_pago,
+                'INGRESO',
+                $abono->id_pago,
+                null,
+                'OPA'
+            );
+        }
     }
 
     private function opaDeAbono(TesPagosParciales $abono)
@@ -547,23 +691,10 @@ class TesInstrumentoPagoRepository
 
                 // El mismo tope que al emitir, pero sin contarse a sí mismo: si no, editar un
                 // abono de $100 a $101 se rechazaría por "ya emitido $100".
-                $tope = $this->topeDeOpa($idOpa, $opaRepo);
-                $yaEmitido = $this->emitidoVivoDeOpa($idOpa, $abono->id_pago_parcial);
-
-                if (self::aCentavos($yaEmitido + $monto) > self::aCentavos($tope)) {
-                    $disponible = max(0, $tope - $yaEmitido);
-
-                    throw new \Exception(sprintf(
-                        'El pago se pasa de lo que hay que pagar en esta orden. '
-                            . 'A pagar: $%s. Ya emitido: $%s. Disponible: $%s.',
-                        number_format($tope, 2, ',', '.'),
-                        number_format($yaEmitido, 2, ',', '.'),
-                        number_format($disponible, 2, ',', '.')
-                    ));
-                }
+                $limites = $this->validarTopeDeOpa($idOpa, $monto, $abono->id_pago_parcial, $opaRepo);
 
                 $abono->monto_pago     = $monto;
-                $abono->monto_restante = max(0, $tope - ($yaEmitido + $monto));
+                $abono->monto_restante = $limites['restante'];
             }
 
             $abono->save();
@@ -623,7 +754,7 @@ class TesInstrumentoPagoRepository
      *
      * Un ANTICIPO no tiene facturas imputadas, así que no tiene razón social: ahí no se valida.
      */
-    private function validarCuentaDeRazonSocial($idCuenta, $idOpa, TestOrdenPagoRepository $opaRepo): void
+    public function validarCuentaDeRazonSocial($idCuenta, $idOpa, TestOrdenPagoRepository $opaRepo): void
     {
         if (is_null($idCuenta)) {
             return;
@@ -648,6 +779,92 @@ class TesInstrumentoPagoRepository
     }
 
     /** Lo máximo que se puede pagar de una orden: lo imputado menos el débito de liquidación. */
+    /**
+     * ¿Esta forma de pago crea un INSTRUMENTO DIFERIDO?
+     *
+     * Cheque y eCheq sí: se entrega el documento y el banco lo debita después, así que entre la
+     * emisión y el débito la plata todavía está en la cuenta. Contablemente eso es un **pasivo**,
+     * no una salida de fondos — de ahí que el asiento se parta en dos (emisión contra la cuenta
+     * puente de diferidos, débito real contra el banco).
+     *
+     * Transferencia, depósito, efectivo y tarjeta salen en el momento: un solo asiento al banco.
+     *
+     * En el proyecto de referencia (ospf) el disparador es el TIPO DE CHEQUERA. Acá no hay
+     * chequeras, así que se decide por forma de pago — confirmado con el usuario el 2026-09-12.
+     */
+    public static function esFormaDiferida($idFormaPago): bool
+    {
+        return in_array((int) $idFormaPago, [self::FORMA_PAGO_CHEQUE, self::FORMA_PAGO_ECHEQ], true);
+    }
+
+    /**
+     * Estado con el que nace un instrumento según su forma de pago.
+     *
+     * El eCheq queda PENDIENTE_EMISION porque el **número lo asigna el banco** y todavía no se
+     * conoce; se carga después en la pestaña *Sin número*. El cheque físico nace EMITIDO: el
+     * número lo escribe quien lo emite y ya se sabe en el momento.
+     *
+     * Devuelve null para las formas que no son instrumentos — esos abonos no llevan
+     * `id_estado_instrumento` y siguen el camino de siempre.
+     */
+    public static function estadoInicialDeInstrumento($idFormaPago): ?int
+    {
+        if (!self::esFormaDiferida($idFormaPago)) {
+            return null;
+        }
+
+        return (int) $idFormaPago === self::FORMA_PAGO_ECHEQ
+            ? self::PENDIENTE_EMISION
+            : self::EMITIDO;
+    }
+
+    /**
+     * Freno de sobrepago: no se puede cargar en una orden más de lo que hay que pagarle al
+     * beneficiario. Tira si el monto se pasa; si entra, devuelve los tres números del cálculo.
+     *
+     * El tope es el monto PAGABLE (lo imputado menos el débito de liquidación), **no**
+     * `monto_orden_pago`, que arrastra el bruto de la factura. Sin este freno se podían cargar y
+     * confirmar abonos por el bruto: el caso que lo destapó tenía $1.139.311,04 en abonos sobre
+     * una orden cuyo neto real era $78.960 — $1.060.351,04 de sobrepago, y lo único que avisaba
+     * era un saldo en rojo en la grilla, que no bloquea nada.
+     * (2026-09-05, ver docs/circuito-pagos/revisar-debito-no-descontado.md)
+     *
+     * Los abonos RECHAZADOS y ANULADOS no ocupan lugar en el tope: esa plata no salió, o volvió.
+     * Sin esa exclusión, rechazar un eCheq dejaba la orden imposible de repagar.
+     *
+     * Está acá y es público a propósito: **lo usan los dos caminos que crean abonos** —emitir
+     * desde el instrumento y confirmar el pago desde el modal—. Cuando vivía solo en
+     * `emitirPagoDeFecha`, el modal no lo aplicaba y quedaba una puerta abierta al mismo
+     * sobrepago que esta validación vino a cerrar. (2026-09-12)
+     *
+     * @param  int|null $idAbonoExcluir  Abono que se está editando: no puede contarse a sí mismo,
+     *                                   si no pasar de $100 a $101 se rechaza por "ya emitido $100".
+     * @return array{tope: float, ya_emitido: float, restante: float}
+     */
+    public function validarTopeDeOpa($idOpa, float $monto, $idAbonoExcluir, TestOrdenPagoRepository $opaRepo): array
+    {
+        $tope = $this->topeDeOpa($idOpa, $opaRepo);
+        $yaEmitido = $this->emitidoVivoDeOpa($idOpa, $idAbonoExcluir);
+
+        if (self::aCentavos($yaEmitido + $monto) > self::aCentavos($tope)) {
+            $disponible = max(0, $tope - $yaEmitido);
+
+            throw new \Exception(sprintf(
+                'El pago se pasa de lo que hay que pagar en esta orden. '
+                    . 'A pagar: $%s. Ya emitido: $%s. Disponible: $%s.',
+                number_format($tope, 2, ',', '.'),
+                number_format($yaEmitido, 2, ',', '.'),
+                number_format($disponible, 2, ',', '.')
+            ));
+        }
+
+        return [
+            'tope'       => $tope,
+            'ya_emitido' => $yaEmitido,
+            'restante'   => max(0, $tope - ($yaEmitido + $monto)),
+        ];
+    }
+
     private function topeDeOpa($idOpa, TestOrdenPagoRepository $opaRepo): float
     {
         $tope = $opaRepo->montoPagableOpa($idOpa);

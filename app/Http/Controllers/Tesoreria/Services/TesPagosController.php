@@ -258,7 +258,18 @@ class TesPagosController extends Controller
             // Los abonos sin cuenta propia (emitidos antes del cambio) caen a la cuenta que vino
             // en el request, que es el comportamiento viejo. Si no hay ninguna de las dos, no se
             // mueve saldo: no se puede debitar una cuenta que no se sabe cuál es.
-            $montosPorCuenta = [];
+            // ⚠️ Un cheque/eCheq NO mueve el saldo acá.
+            //
+            // Emitir el instrumento no saca plata del banco: eso pasa cuando el banco lo debita,
+            // o sea al acreditarlo. El retiro y el movimiento de esos abonos los hace
+            // `TesInstrumentoPagoRepository::marcarAcreditado()`, junto con su asiento. Así el
+            // saldo del sistema coincide con el extracto, que es lo que necesita la conciliación.
+            // (2026-09-12, decidido con el usuario)
+            //
+            // Igual entran en el DESGLOSE del asiento: ahí no se los ignora, se los manda contra la
+            // cuenta de pasivo en vez de contra el banco.
+            $montosPorCuenta = [];   // solo lo que sale YA: mueve saldo
+            $desgloseAsiento = [];   // todo, marcando qué porción es diferida
 
             foreach ($pago->findByPagosParcialesVivos($params->id_pago) as $abono) {
                 $idCuentaAbono = $abono->id_cuenta_bancaria ?: $params->id_cuenta_bancaria;
@@ -275,13 +286,30 @@ class TesPagosController extends Controller
                     ], 422);
                 }
 
-                $montosPorCuenta[$idCuentaAbono] =
-                    ($montosPorCuenta[$idCuentaAbono] ?? 0) + (float) $abono->monto_pago;
+                $esDiferido = !is_null($abono->id_estado_instrumento);
+
+                $desgloseAsiento[] = [
+                    'id_cuenta_bancaria' => $idCuentaAbono,
+                    'monto'              => (float) $abono->monto_pago,
+                    'diferido'           => $esDiferido,
+                    'id_pago_parcial'    => $abono->id_pago_parcial,
+                ];
+
+                if (!$esDiferido) {
+                    $montosPorCuenta[$idCuentaAbono] =
+                        ($montosPorCuenta[$idCuentaAbono] ?? 0) + (float) $abono->monto_pago;
+                }
             }
 
             // Un anticipo no tiene abonos: ahí se conserva el retiro por el total.
-            if (empty($montosPorCuenta) && !empty($params->id_cuenta_bancaria)) {
+            if (empty($desgloseAsiento) && !empty($params->id_cuenta_bancaria)) {
                 $montosPorCuenta[$params->id_cuenta_bancaria] = $monto_total;
+                $desgloseAsiento[] = [
+                    'id_cuenta_bancaria' => $params->id_cuenta_bancaria,
+                    'monto'              => (float) $monto_total,
+                    'diferido'           => false,
+                    'id_pago_parcial'    => null,
+                ];
             }
 
             foreach ($montosPorCuenta as $idCuentaBancaria => $montoCuenta) {
@@ -332,10 +360,10 @@ class TesPagosController extends Controller
                         // asignada" aunque la cuenta si la tuviera. Se toma la del pago real.
                         'id_cuenta_bancaria' => $params->id_cuenta_bancaria
                             ?: (array_key_first($montosPorCuenta) ?? $pagoDb->id_cuenta_bancaria),
-                        // Desglose por cuenta: el HABER se parte en una linea por cada cuenta de
-                        // la que efectivamente salio plata. Con una sola cuenta da exactamente lo
-                        // mismo que antes; con dos, antes acreditaba TODO a una sola.
-                        'cuentas'            => $montosPorCuenta,
+                        // Desglose del HABER: una linea por cada porcion del pago, marcando cual
+                        // es diferida. Las directas van contra la cuenta banco; las de cheque/eCheq
+                        // contra la cuenta de pasivo, porque esa plata todavia no salio.
+                        'cuentas'            => $desgloseAsiento,
                         'monto_total'        => $monto_total,
                     ];
 
@@ -349,6 +377,22 @@ class TesPagosController extends Controller
                         null,
                         'Asiento contable creado automáticamente al confirmar el pago'
                     );
+
+                    // Y una fila por instrumento, con SU linea del asiento. Es lo que permite
+                    // revertir un solo eCheq cuando el banco lo rechaza, sin tocar las lineas de
+                    // los otros medios de pago del mismo asiento. (2026-09-12)
+                    foreach (($asiento->lineasDeInstrumento ?? []) as $idAbono => $idDetalle) {
+                        $historialPagoRepository->guardarHistorial(
+                            $pagoDb->id_pago,
+                            $asiento->id_asiento_contable,
+                            'EMISION',
+                            false,
+                            null,
+                            'Pasivo por instrumento diferido, pendiente de débito bancario',
+                            $idAbono,
+                            $idDetalle
+                        );
+                    }
 
                 } catch (\Exception $e) {
                     DB::rollBack();

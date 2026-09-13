@@ -593,23 +593,47 @@ class AsientoContableRepository
         // banco: la contabilidad decia que salieron $300 del Macro cuando en realidad salieron
         // $100 del Macro y $200 del BBVA. Con una sola cuenta -el caso habitual- esto produce
         // exactamente el mismo asiento que antes. (2026-09-09)
-        $desglose = $datosPago['cuentas'] ?? [];
+        // ═══ Un cheque/eCheq emitido NO es salida de fondos: es un PASIVO ═══
+        //
+        // Al emitirlo se entrega el documento, pero la plata sigue en la cuenta hasta que el banco
+        // lo debita. Acreditar el HABER contra el banco el día de la emisión afirma que salió
+        // plata que no salió. Esa porción va contra la cuenta puente de eCheq diferidos, y el
+        // banco recién se toca en `crearAsientoDebitoInstrumento()`, al acreditar.
+        //
+        // Es el circuito que ospf documentó en su plan de cheques diferidos, y la razón por la que
+        // `tb_cont_banco_cuenta_contable` tiene la columna `tipo`. (2026-09-12)
+        $desglose = $this->normalizarDesglose($datosPago, $montoTotal);
+        $lineasDeInstrumento = [];
 
-        if (empty($desglose)) {
-            $desglose = [$datosPago['id_cuenta_bancaria'] => $montoTotal];
-        }
+        foreach ($desglose as $fila) {
+            $idCuenta = $fila['id_cuenta_bancaria'];
+            $esDiferido = !empty($fila['diferido']);
 
-        foreach ($desglose as $idCuenta => $montoCuenta) {
-            $cuentaDelHaber = $this->obtenerCuentaContableByCuentaBancaria($idCuenta);
+            if ($esDiferido) {
+                $cuentaDelHaber = $this->obtenerCuentaContableEcheqDiferido($idCuenta);
 
-            if (!$cuentaDelHaber) {
-                throw new Exception(
-                    "La cuenta bancaria seleccionada no tiene una cuenta contable asignada. "
-                        . "Por favor contacte con Contabilidad."
-                );
+                // Se corta en vez de caer a la cuenta banco. Ese fallback silencioso reintroduce
+                // exactamente el bug que este circuito viene a corregir. Mismo criterio que ospf.
+                if (!$cuentaDelHaber) {
+                    throw new Exception(
+                        'El pago incluye un cheque/eCheq, pero la cuenta bancaria de origen no tiene '
+                            . 'mapeada una cuenta contable de eCheq diferidos. Cargala en Contabilidad '
+                            . 'antes de confirmar: sin esa cuenta el asiento debitaría el banco por '
+                            . 'plata que todavía no salió.'
+                    );
+                }
+            } else {
+                $cuentaDelHaber = $this->obtenerCuentaContableByCuentaBancaria($idCuenta);
+
+                if (!$cuentaDelHaber) {
+                    throw new Exception(
+                        "La cuenta bancaria seleccionada no tiene una cuenta contable asignada. "
+                            . "Por favor contacte con Contabilidad."
+                    );
+                }
             }
 
-            $this->findByCrearDetalleAsiento([
+            $detalle = $this->findByCrearDetalleAsiento([
                 'id_asiento_contable'               => $asiento->id_asiento_contable,
                 'cod_proveedor'                     => null,
                 'cod_prestador'                     => null,
@@ -620,13 +644,279 @@ class AsientoContableRepository
                 'id_cuenta_bancaria_cuenta_contable'=> $cuentaDelHaber->id_cuenta_bancaria_cuenta_contable ?? null,
                 'id_retencion_cuenta_contable'      => null,
                 'monto_debe'                        => 0,
-                'monto_haber'                       => round((float) $montoCuenta, 2),
-                'observaciones'                     => 'Salida de fondos - Cuenta: ' . $idCuenta,
+                'monto_haber'                       => round((float) $fila['monto'], 2),
+                'observaciones'                     => $esDiferido
+                    ? 'Pasivo por instrumento diferido - ' . $this->etiquetaDeCuenta($idCuenta)
+                    : 'Salida de fondos - ' . $this->etiquetaDeCuenta($idCuenta),
                 'id_detalle_plan'                   => $cuentaDelHaber->id_detalle_plan,
             ]);
+
+            // La LÍNEA de cada instrumento vuelve al llamador para que la guarde en el historial.
+            // Sin ella, rechazar un eCheq obliga a revertir el asiento entero y se lleva puestos
+            // los otros medios de pago del mismo pago.
+            if ($esDiferido && !empty($fila['id_pago_parcial'])) {
+                $lineasDeInstrumento[$fila['id_pago_parcial']] = $detalle->id_asiento_contable_detalle ?? null;
+            }
         }
 
+        $asiento->lineasDeInstrumento = $lineasDeInstrumento;
+
         return $asiento;
+    }
+
+    /**
+     * Asiento 2 del circuito de instrumentos diferidos: el impacto REAL en el banco, cuando el
+     * cheque/eCheq se acredita.
+     *
+     *     DEBE   eCheq diferidos   ← cancela el pasivo que dejó el asiento de emisión
+     *     HABER  Banco             ← recién acá sale la plata
+     *
+     * ⚠️ **La fecha del asiento es la de acreditación, no la de hoy.** Un eCheq emitido en
+     * septiembre y acreditado en octubre pertenece al período de octubre; tomarlo de "hoy" lo
+     * metería en el período equivocado. Por eso el período contable lo resuelve el llamador para
+     * ESA fecha y se pasa ya resuelto.
+     *
+     * Los dos asientos se cancelan entre sí sobre la cuenta de diferidos: si al final del circuito
+     * la cuenta no queda en cero por ese instrumento, algo falta.
+     *
+     * @param object $abono           Fila de `tb_tes_pago_parcial` (el instrumento).
+     * @param string $fechaAcreditacion
+     * @param array  $datos           id_razon, cuit, nombre, numero_pago, id_pago.
+     */
+    public function crearAsientoDebitoInstrumento($abono, string $fechaAcreditacion, array $datos, $idPeriodoContable)
+    {
+        $idCuenta = $abono->id_cuenta_bancaria;
+
+        $cuentaDiferidos = $this->obtenerCuentaContableEcheqDiferido($idCuenta);
+
+        if (!$cuentaDiferidos) {
+            throw new Exception(
+                'La cuenta bancaria de este instrumento no tiene mapeada una cuenta contable de '
+                    . 'eCheq diferidos, así que no se puede registrar el débito. Cargala en Contabilidad.'
+            );
+        }
+
+        $cuentaBanco = $this->obtenerCuentaContableByCuentaBancaria($idCuenta);
+
+        if (!$cuentaBanco) {
+            throw new Exception(
+                'La cuenta bancaria de este instrumento no tiene mapeada su cuenta contable de banco.'
+            );
+        }
+
+        $monto = round((float) $abono->monto_pago, 2);
+
+        $numero = $abono->numero_echeq ?: ($abono->num_cheque ?: ('abono ' . $abono->id_pago_parcial));
+
+        $leyenda = 'DEBITO INSTRUMENTO N° ' . $numero
+            . ' - ' . ($datos['nombre'] ?? '')
+            . ' - Fecha acreditación: ' . Carbon::parse($fechaAcreditacion)->format('d/m/Y');
+
+        $asiento = $this->findByCrearAsiento(
+            1,
+            'DEBITO_INSTRUMENTO',
+            $leyenda,
+            $this->obtenerSiguienteNumeroAsiento(),
+            $idPeriodoContable,
+            $datos['id_pago'] ?? null,
+            'ACTIVO',
+            $datos['id_razon'] ?? null
+        );
+
+        $lineaDiferidos = $this->findByCrearDetalleAsiento([
+            'id_asiento_contable'                => $asiento->id_asiento_contable,
+            'id_cuenta_bancaria_cuenta_contable' => $cuentaDiferidos->id_cuenta_bancaria_cuenta_contable ?? null,
+            'monto_debe'                         => $monto,
+            'monto_haber'                        => 0,
+            'observaciones'                      => 'Cancelación pasivo por instrumento - N° ' . $numero,
+            'id_detalle_plan'                    => $cuentaDiferidos->id_detalle_plan,
+        ]);
+
+        $this->findByCrearDetalleAsiento([
+            'id_asiento_contable'                => $asiento->id_asiento_contable,
+            'id_cuenta_bancaria_cuenta_contable' => $cuentaBanco->id_cuenta_bancaria_cuenta_contable ?? null,
+            'monto_debe'                         => 0,
+            'monto_haber'                        => $monto,
+            'observaciones'                      => 'Salida de fondos - ' . $this->etiquetaDeCuenta($idCuenta),
+            'id_detalle_plan'                    => $cuentaBanco->id_detalle_plan,
+        ]);
+
+        // La linea del pasivo vuelve al llamador para el historial: es la que hay que revertir si
+        // despues el banco rechaza el instrumento.
+        $asiento->lineaDiferidos = $lineaDiferidos->id_asiento_contable_detalle ?? null;
+
+        return $asiento;
+    }
+
+    /**
+     * Contraasiento **PARCIAL**: revierte UNA sola línea de un asiento, no el asiento entero.
+     *
+     * ⚠️ Existe porque `AsientosPagoHistorialRepository::generarContraasiento()` revierte **todas**
+     * las líneas y además anula el asiento original. Eso está bien para anular un pago completo,
+     * pero es destructivo para rechazar un instrumento: un pago con dos eCheq y una transferencia
+     * comparte un único asiento con una línea por cada medio; revertirlo entero se lleva puestos
+     * los otros dos, que no tienen nada que ver. Es un bug real que ospf ya se comió y documentó.
+     *
+     * Genera un asiento nuevo con dos líneas que se anulan contra el original:
+     *
+     *     DEBE   la cuenta que la línea original había acreditado (eCheq diferidos)
+     *     HABER  la contrapartida del DEBE original (el acreedor)  → la deuda vuelve a quedar viva
+     *
+     * El asiento original **no se anula**: sigue siendo cierto que ese pago se registró. Lo que se
+     * agrega es su reverso puntual.
+     *
+     * @param int $idAsientoDetalle Línea a revertir (la del instrumento, guardada en el historial).
+     */
+    public function contraasientoDeLinea($idAsientoDetalle, string $motivo, $idRazon = null)
+    {
+        $linea = DetalleAsientosContablesEntity::find($idAsientoDetalle);
+
+        if (!$linea) {
+            throw new Exception("No se encontró la línea de asiento {$idAsientoDetalle}.");
+        }
+
+        $original = AsientosContablesEntity::find($linea->id_asiento_contable);
+
+        if (!$original) {
+            throw new Exception('No se encontró el asiento contable de esa línea.');
+        }
+
+        $eraHaber = (float) $linea->monto_haber > 0;
+        $monto = (float) ($eraHaber ? $linea->monto_haber : $linea->monto_debe);
+
+        // La contrapartida es una línea del LADO OPUESTO del mismo asiento. Sirve para los dos
+        // casos del circuito sin ramificar:
+        //
+        //   - Asiento de emisión: la línea a revertir es el HABER del instrumento (diferidos), y
+        //     su contrapartida es el DEBE del acreedor → la deuda vuelve a quedar pendiente.
+        //   - Asiento de débito: la línea es el DEBE de diferidos, y su contrapartida es el HABER
+        //     del banco → la plata vuelve a la cuenta.
+        $contrapartida = DetalleAsientosContablesEntity::where('id_asiento_contable', $original->id_asiento_contable)
+            ->where($eraHaber ? 'monto_debe' : 'monto_haber', '>', 0)
+            ->first();
+
+        if (!$contrapartida) {
+            throw new Exception('El asiento original no tiene una línea del lado opuesto para contrapartida.');
+        }
+
+        $contra = $this->findByCrearAsiento(
+            $original->id_tipo_asiento,
+            'CONTRAASIENTO_INSTRUMENTO',
+            'CONTRAASIENTO PARCIAL - ' . $original->asiento_leyenda . ' - ' . $motivo,
+            $this->obtenerSiguienteNumeroAsiento(),
+            $original->id_periodo_contable,
+            $original->numero,
+            'ACTIVO',
+            $idRazon ?? $original->id_razon
+        );
+
+        // La línea original, al revés.
+        $this->findByCrearDetalleAsiento([
+            'id_asiento_contable'                => $contra->id_asiento_contable,
+            'id_cuenta_bancaria_cuenta_contable' => $linea->id_cuenta_bancaria_cuenta_contable,
+            'monto_debe'                         => $eraHaber ? $monto : 0,
+            'monto_haber'                        => $eraHaber ? 0 : $monto,
+            'observaciones'                      => 'CONTRAASIENTO PARCIAL - ' . $linea->observaciones,
+            'id_detalle_plan'                    => $linea->id_detalle_plan,
+        ]);
+
+        // Y su contrapartida, también al revés.
+        $this->findByCrearDetalleAsiento([
+            'id_asiento_contable'                => $contra->id_asiento_contable,
+            'cod_proveedor'                      => $contrapartida->cod_proveedor,
+            'cod_prestador'                      => $contrapartida->cod_prestador,
+            'id_proveedor_cuenta_contable'       => $contrapartida->id_proveedor_cuenta_contable,
+            'id_tipo_prestador_cuenta_contable'  => $contrapartida->id_tipo_prestador_cuenta_contable,
+            'id_cuenta_bancaria_cuenta_contable' => $contrapartida->id_cuenta_bancaria_cuenta_contable,
+            'monto_debe'                         => $eraHaber ? 0 : $monto,
+            'monto_haber'                        => $eraHaber ? $monto : 0,
+            'observaciones'                      => $eraHaber
+                ? 'CONTRAASIENTO PARCIAL - vuelve a quedar pendiente de pago'
+                : 'CONTRAASIENTO PARCIAL - reversa de la salida de fondos',
+            'id_detalle_plan'                    => $contrapartida->id_detalle_plan,
+        ]);
+
+        return $contra;
+    }
+
+    /** Cache por request: un asiento puede tener varias líneas de la misma cuenta. */
+    private array $etiquetasDeCuenta = [];
+
+    /**
+     * Nombre de la cuenta y su banco, para las observaciones del asiento.
+     *
+     * Antes se escribía el id crudo —"Salida de fondos - Cuenta: 7"—, que no le dice nada a quien
+     * lee el libro mayor y obliga a ir a buscar qué cuenta es el 7. Ahora sale
+     * "Salida de fondos - Banco Macro (BANCO MACRO)".
+     *
+     * Si la cuenta no existe o no tiene banco cargado, degrada de a poco en vez de romper: primero
+     * el nombre sin banco, y como último recurso el id. Una observación es texto para humanos —
+     * nunca puede hacer fallar un asiento.
+     */
+    private function etiquetaDeCuenta($idCuenta): string
+    {
+        if (array_key_exists($idCuenta, $this->etiquetasDeCuenta)) {
+            return $this->etiquetasDeCuenta[$idCuenta];
+        }
+
+        $cuenta = TesCuentasBancariasEntity::with('entidadBancaria')->find($idCuenta);
+
+        if (!$cuenta) {
+            return $this->etiquetasDeCuenta[$idCuenta] = 'Cuenta ' . $idCuenta;
+        }
+
+        $nombre = trim((string) $cuenta->nombre_cuenta) ?: ('Cuenta ' . $idCuenta);
+        $banco = trim((string) ($cuenta->entidadBancaria->descripcion_banco ?? ''));
+
+        return $this->etiquetasDeCuenta[$idCuenta] = $banco === ''
+            ? $nombre
+            : $nombre . ' (' . $banco . ')';
+    }
+
+    /**
+     * Lleva el desglose del HABER a una forma única: lista de filas
+     * `['id_cuenta_bancaria', 'monto', 'diferido', 'id_pago_parcial']`.
+     *
+     * Acepta las dos formas por compatibilidad. La vieja —`[id_cuenta => monto]`— la siguen
+     * mandando los flujos sin instrumentos; ahí todo es salida directa al banco, que es el
+     * comportamiento de siempre.
+     */
+    private function normalizarDesglose(array $datosPago, float $montoTotal): array
+    {
+        $desglose = $datosPago['cuentas'] ?? [];
+
+        if (empty($desglose)) {
+            return [[
+                'id_cuenta_bancaria' => $datosPago['id_cuenta_bancaria'],
+                'monto'              => $montoTotal,
+                'diferido'           => false,
+                'id_pago_parcial'    => null,
+            ]];
+        }
+
+        $filas = [];
+
+        foreach ($desglose as $clave => $valor) {
+            if (is_array($valor)) {
+                $filas[] = [
+                    'id_cuenta_bancaria' => $valor['id_cuenta_bancaria'] ?? $clave,
+                    'monto'              => (float) ($valor['monto'] ?? 0),
+                    'diferido'           => !empty($valor['diferido']),
+                    'id_pago_parcial'    => $valor['id_pago_parcial'] ?? null,
+                ];
+                continue;
+            }
+
+            // Forma vieja: la clave es la cuenta y el valor el monto.
+            $filas[] = [
+                'id_cuenta_bancaria' => $clave,
+                'monto'              => (float) $valor,
+                'diferido'           => false,
+                'id_pago_parcial'    => null,
+            ];
+        }
+
+        return $filas;
     }
 
 

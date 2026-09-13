@@ -16,7 +16,12 @@ class AsientosPagoHistorialEntity extends Model
 
     protected $fillable = [
         'id_pago',
+        // El evento puede referirse a UN ABONO y a UNA LINEA del asiento, no solo a la boleta:
+        // sin esto Eloquent los descartaba en silencio y el circuito de eCheq no podia saber que
+        // linea revertir al rechazar un instrumento. (2026-09-12)
+        'id_pago_parcial',
         'id_asiento_contable',
+        'id_asiento_contable_detalle',
         'tipo_evento',
         'es_contraasiento',
         'id_asiento_origen',

@@ -31,17 +31,29 @@ class AsientosPagoHistorialRepository
             ->first();
     }
 
-    public function guardarHistorial($idPago, $idAsientoContable, $tipoEvento, $esContraasiento = false, $idAsientoOrigen = null, $observacion = null)
+    /**
+     * @param int|null $idPagoParcial   Abono (instrumento) al que pertenece el evento, si aplica.
+     * @param int|null $idAsientoDetalle Línea puntual del asiento, para poder revertir SOLO esa.
+     *
+     * Los dos últimos parámetros existen para el circuito de eCheq (2026-09-12). Un pago puede
+     * tener varios instrumentos y cada uno su propia línea en el mismo asiento; sin saber cuál es
+     * la línea, rechazar un eCheq obligaba a revertir el asiento completo y se llevaba puestos los
+     * otros medios de pago. Quedan opcionales: los eventos a nivel boleta (ALTA, ANULACION) los
+     * dejan en null, como siempre.
+     */
+    public function guardarHistorial($idPago, $idAsientoContable, $tipoEvento, $esContraasiento = false, $idAsientoOrigen = null, $observacion = null, $idPagoParcial = null, $idAsientoDetalle = null)
     {
         return AsientosPagoHistorialEntity::create([
-            'id_pago'             => $idPago,
-            'id_asiento_contable' => $idAsientoContable,
-            'tipo_evento'         => $tipoEvento,
-            'es_contraasiento'    => $esContraasiento,
-            'id_asiento_origen'   => $idAsientoOrigen,
-            'observacion'         => $observacion,
-            'cod_usuario'         => $this->user->cod_usuario,
-            'fecha_registra'      => $this->fechaActual
+            'id_pago'                     => $idPago,
+            'id_pago_parcial'             => $idPagoParcial,
+            'id_asiento_contable'         => $idAsientoContable,
+            'id_asiento_contable_detalle' => $idAsientoDetalle,
+            'tipo_evento'                 => $tipoEvento,
+            'es_contraasiento'            => $esContraasiento,
+            'id_asiento_origen'           => $idAsientoOrigen,
+            'observacion'                 => $observacion,
+            'cod_usuario'                 => $this->user->cod_usuario,
+            'fecha_registra'              => $this->fechaActual
         ]);
     }
 

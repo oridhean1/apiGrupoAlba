@@ -326,6 +326,11 @@ class TesPagosRepository
         $estado = null;
         $pago = TesPagoEntity::find($params->id_pago);
 
+        // Las guardas del instrumento (tope de sobrepago, razón social de la cuenta) viven en su
+        // repositorio y se comparten: los dos caminos que crean abonos tienen que validar igual.
+        $instrumentos = new TesInstrumentoPagoRepository();
+        $opaRepo = new TestOrdenPagoRepository();
+
         // Fechas del cronograma de esta boleta. $fechasBoleta queda indexado por
         // id_fecha_probable (clave real y única); $plan es un índice AUXILIAR por fecha, para el
         // camino viejo que solo manda la fecha como string.
@@ -395,19 +400,62 @@ class TesPagosRepository
                 // 2026_09_06_100000; este camino no lo usaba.
                 $idCuentaFila = $this->cuentaDeLaFila($pagos) ?? $this->cuentaDeLaFila($params);
 
+                // Freno de sobrepago. Vive en TesInstrumentoPagoRepository y lo comparten los dos
+                // caminos que crean abonos: hasta el 2026-09-12 solo lo aplicaba `emitirPagoDeFecha`
+                // y este quedaba con la puerta abierta al mismo sobrepago que esa validación cerró.
+                $limites = $instrumentos->validarTopeDeOpa(
+                    $pago->id_orden_pago,
+                    (float) $pagos->monto_pago,
+                    null,
+                    $opaRepo
+                );
+
+                // ═══ El pago con cheque/eCheq nace como INSTRUMENTO ═══
+                //
+                // Desde el 2026-09-12 el eCheq se emite acá y no en una pestaña aparte: la pantalla
+                // de emisión pedía exactamente estos mismos tres datos (monto, forma de pago y
+                // cuenta de origen), así que eran dos pantallas para un solo acto.
+                $estadoInstrumento = TesInstrumentoPagoRepository::estadoInicialDeInstrumento(
+                    $pagos->id_forma_pago
+                );
+                $esDiferido = !is_null($estadoInstrumento);
+
+                if ($esDiferido) {
+                    // La cuenta de origen tiene que ser de la razón social de la orden. Si el pago
+                    // debita una cuenta de una razón y el asiento imputa la deuda en el plan de
+                    // otra, quedan dos contabilidades descuadradas entre sí.
+                    $instrumentos->validarCuentaDeRazonSocial(
+                        $idCuentaFila,
+                        $pago->id_orden_pago,
+                        $opaRepo
+                    );
+                }
+
                 $nuevo = TesPagosParciales::create([
                     'fecha_registra' => $this->fechaActual,
-                    'fecha_confirma_pago' => $pagos->fecha_confirma_pago,
+                    // ⚠️ Un instrumento NO nace cobrado: se entregó el documento, pero el banco
+                    // todavía no lo debitó. `montoPagadoOpa()` cuenta por esta fecha, así que
+                    // setearla acá haría que la orden figure PAGADA con plata que no salió. Se
+                    // completa al acreditar (`marcarAcreditado`), que es cuando el banco debita.
+                    'fecha_confirma_pago' => $esDiferido ? null : $pagos->fecha_confirma_pago,
                     'id_forma_pago' => $pagos->id_forma_pago,
                     'monto_pago' => $pagos->monto_pago,
                     'monto_opa' => $pagos->monto_opa,
                     'num_cheque' => $pagos->num_cheque,
                     'id_usuario' => $this->user->cod_usuario,
                     'id_pago' => $pago->id_pago,
-                    'monto_restante' => $pagos->monto_restante,
+                    // El restante sale del cálculo del tope, no del front: es el mismo número
+                    // contra el que se acaba de validar.
+                    'monto_restante' => $limites['restante'],
                     'id_fecha_probable' => $idFecha,
                     'id_cuenta_bancaria' => $idCuentaFila,
                     'id_banco_emisor' => $this->bancoDeCuenta($idCuentaFila),
+                    'id_estado_instrumento' => $estadoInstrumento,
+                    // Fecha de emisión = la cuota del cronograma que este pago cubre. El número
+                    // del eCheq no se carga acá: lo asigna el banco y entra por *Sin número*.
+                    'fecha_emision_echeq' => $esDiferido && !is_null($idFecha)
+                        ? ($fechasBoleta[$idFecha]->fecha_probable_pago ?? null)
+                        : null,
                     // Este abono nace dentro de un pago confirmado.
                     'fecha_confirmado_en_pago' => $this->fechaActual,
                 ]);
@@ -436,7 +484,22 @@ class TesPagosRepository
                 $esInstrumento = !is_null($query->id_estado_instrumento);
 
                 $query->fecha_registra=$this->fechaActual;
-                $query->fecha_confirma_pago=$pagos->fecha_confirma_pago;
+
+                // ⚠️ A un INSTRUMENTO no se le toca la fecha de confirmación desde acá.
+                //
+                // `montoPagadoOpa()` cuenta como cobrado todo abono con `fecha_confirma_pago`, sin
+                // mirar el estado del instrumento. Setearla al confirmar el pago hacía que un eCheq
+                // apenas emitido —con la plata todavía en la cuenta— contara como cobrado y la orden
+                // pasara a PAGADO. Quedaron 5 abonos así en Alba (0 en OSV).
+                //
+                // La fecha del instrumento la pone `marcarAcreditado()`, que es el momento en que el
+                // banco efectivamente debita. Es además lo que `emitirPagoDeFecha` ya documentaba
+                // ("no nace confirmado: se confirma cuando el banco acredita") y este camino
+                // contradecía en silencio. (2026-09-12)
+                if (!$esInstrumento) {
+                    $query->fecha_confirma_pago=$pagos->fecha_confirma_pago;
+                }
+
                 $query->monto_opa=$pagos->monto_opa;
                 $query->id_usuario=$this->user->cod_usuario;
                 $query->id_pago=$pagos->id_pago;
