@@ -100,7 +100,7 @@
         <div class="contenedor">
             <div class="img">
                 @php
-                    $razonSocial = strtoupper(env('EMPRESA_RAZON_SOCIAL', ''));
+                    $razonSocial = strtoupper(config('app.empresa_razon_social'));
                     $isOsv = str_contains($razonSocial, 'VAREADORES') || str_contains($razonSocial, 'OSV');
                 @endphp
                 @if ($isOsv)
