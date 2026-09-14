@@ -486,6 +486,19 @@ class TestOrdenPagoRepository
         return TesOrdenPagoEntity::find($idOpa);
     }
 
+    /**
+     * Tipo de beneficiario (PRESTADOR/PROVEEDOR) de una OPA, tomado del DETALLE. (T-00000830)
+     *
+     * No usar la cabecera: la columna tiene DEFAULT 'PROVEEDOR' y las OPAs agrupadas se creaban
+     * sin cargarla, así que el pago generado desde ellas caía en Pagos Proveedores aunque la OPA
+     * fuera de un prestador. Se cae a la cabecera solo si la OPA quedó sin detalle.
+     */
+    public function findByTipoFacturaOpa($idOpa)
+    {
+        return TesOrdenPagoDetalleEntity::where('id_orden_pago', $idOpa)->value('tipo_factura')
+            ?? TesOrdenPagoEntity::where('id_orden_pago', $idOpa)->value('tipo_factura');
+    }
+
     public function findByIdFacturaEnProcesoOrPendiente($factura, $montoFactura)
     {
         // $idEstados = is_array([1, 4]);
@@ -636,11 +649,17 @@ class TestOrdenPagoRepository
         // ->all() + collect(): Eloquent\Collection::merge() asume que fusiona modelos (usa
         // getKey() en cada item) y explota si le pasás strings, aunque map() ya los haya
         // convertido — hay que salir a una Collection plana antes de mezclar.
+        //
+        // El tipo de las OPAs existentes sale de su DETALLE, no de la cabecera: las agrupadas
+        // viejas quedaron con la cabecera en 'PROVEEDOR' por el DEFAULT de la columna y
+        // volver a agruparlas daba "distintos proveedores/prestadores" en falso. (T-00000830)
+        $tipoPorOpa = $detalleExistente->groupBy('id_orden_pago')->map(fn($g) => $g->first()->tipo_factura);
         $opasExistentesTodas = TesOrdenPagoEntity::whereIn('id_orden_pago', $idOrdenesExistentes)->get();
         $beneficiarios = collect(
-            $opasExistentesTodas->map(function ($o) {
-                $id = $o->tipo_factura === 'PROVEEDOR' ? $o->id_proveedor : $o->id_prestador;
-                return $o->tipo_factura . ':' . $id;
+            $opasExistentesTodas->map(function ($o) use ($tipoPorOpa) {
+                $tipo = $tipoPorOpa[$o->id_orden_pago] ?? $o->tipo_factura;
+                $id = $tipo === 'PROVEEDOR' ? $o->id_proveedor : $o->id_prestador;
+                return $tipo . ':' . $id;
             })->all()
         )->merge(
             $facturasDb->map(function ($f) {
@@ -667,6 +686,15 @@ class TestOrdenPagoRepository
 
         $esAgrupada = $idFacturas->count() > 1;
 
+        // Tipo de beneficiario de la cabecera, tomado del detalle (arriba ya se validó que todas
+        // las facturas son del mismo beneficiario). Si no se carga explícito, la columna cae en su
+        // DEFAULT 'PROVEEDOR' y el pago generado después aparece en Pagos Proveedores aunque la
+        // OPA sea de un prestador. (T-00000830)
+        $detalleRef = $detalleExistente->first();
+        $tipoFactura = $detalleRef
+            ? $detalleRef->tipo_factura
+            : ($facturasDb->first()->id_tipo_factura == 16 ? 'PROVEEDOR' : 'PRESTADOR');
+
         // El total sale del DETALLE (existente + a crear), nunca de sumar cabeceras: si alguna
         // venía con el monto desincronizado, sumarlas propagaba el error. (2026-08-11)
         $totalMonto = (float) $detalleExistente->sum('monto_factura')
@@ -688,6 +716,7 @@ class TestOrdenPagoRepository
             // Una OPA de una sola factura conserva la referencia en la cabecera; la agrupada la
             // deja en NULL y la relación vive solo en el detalle (ver findByOpaVigenteFactura).
             'id_factura' => $esAgrupada ? null : $idFacturas->first(),
+            'tipo_factura' => $tipoFactura,
         ]);
 
         // Detalle heredado de las OPAs que se fusionan

@@ -64,6 +64,11 @@ class TesPagosController extends Controller
                     DB::rollBack();
                     return response()->json(['message' => 'La OPA se encuentra bloqueado.'], 409);
                 }
+                //@EL TIPO (PRESTADOR/PROVEEDOR) SALE DEL DETALLE DE LA OPA, NO DEL FRONT: el envío
+                // masivo mandaba el de la cabecera, que en las agrupadas quedaba en 'PROVEEDOR'
+                // por DEFAULT y el pago terminaba en Pagos Proveedores. (T-00000830)
+                $param['tipo_factura'] = $opa->findByTipoFacturaOpa($param['id_orden_pago'])
+                    ?? ($param['tipo_factura'] ?? null);
                 //@GENERAMOS EL PAGO
                 $boletaPago = $pago->findByCrearPago($param);
                 //@ASIGNAMOS CODDIGO BARRAS
@@ -191,7 +196,8 @@ class TesPagosController extends Controller
                         $dataOpa->monto_orden_pago,
                         '1',
                         $params->fecha_confirma_pago,
-                        $params->tipo_factura
+                        // Mismo criterio que getCrearPago: el tipo sale del detalle de la OPA. (T-00000830)
+                        $opa->findByTipoFacturaOpa($params->id_orden_pago) ?? $params->tipo_factura
                     ));
                     //@ASIGNAMOS CODDIGO BARRAS
                     $codigoVerificado = $generadorCodigos->getGenerarCodigoUnico($boletaPago->id_pago);
