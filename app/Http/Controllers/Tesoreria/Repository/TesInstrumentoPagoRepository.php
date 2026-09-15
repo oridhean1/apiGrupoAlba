@@ -278,7 +278,7 @@ class TesInstrumentoPagoRepository
             throw new \Exception("No se encontró el abono {$idAbono}.");
         }
 
-        if (!in_array((int) $abono->id_estado_instrumento, [self::BORRADOR, self::PENDIENTE_EMISION], true)) {
+        if (!in_array((int) $abono->id_estado_instrumento, $this->estadosEditables(), true)) {
             throw new \Exception(
                 'Solo se puede cargar el número de un pago que todavía no fue emitido.'
             );
@@ -294,6 +294,12 @@ class TesInstrumentoPagoRepository
         // `num_cheque` se mantiene en sincronía: es la columna que leen las pantallas viejas
         // y el comprobante de pago que ya existe.
         $abono->num_cheque = $abono->numero_echeq;
+
+        // Este es el momento en que el número PROVISORIO se reemplaza por el del banco. Es el
+        // único camino que limpia la marca, y por eso no reasienta nada: el número no aparece en
+        // ninguna línea contable, así que cambiarlo no invalida el asiento. (2026-09-15)
+        $abono->numero_provisorio = false;
+
         $abono->save();
 
         return $abono;
@@ -316,18 +322,26 @@ class TesInstrumentoPagoRepository
             throw new \Exception("No se encontró el abono {$idAbono}.");
         }
 
-        if (!in_array((int) $abono->id_estado_instrumento, [self::BORRADOR, self::PENDIENTE_EMISION], true)) {
-            throw new \Exception('Solo se puede cambiar la forma de pago de un pago que todavía no fue emitido.');
-        }
+        $this->exigirEditable($abono, 'cambiar la forma de pago');
+
+        $formaAnterior = (int) $abono->id_forma_pago;
 
         $abono->id_forma_pago = $idFormaPago;
 
         if ((int) $idFormaPago !== self::FORMA_PAGO_ECHEQ) {
             $abono->numero_echeq = null;
             $abono->num_cheque = null;
+            $abono->numero_provisorio = false;
         }
 
         $abono->save();
+
+        // La forma de pago decide contra qué cuenta va el HABER: banco si la plata sale ya,
+        // eCheq diferidos si es un instrumento. Cambiarla invalida el asiento anterior, así que
+        // hay que contraasentar y volver a asentar por el criterio nuevo.
+        if ($formaAnterior !== (int) $idFormaPago) {
+            $this->reasentarInstrumento($abono, 'Cambio de forma de pago');
+        }
 
         return $abono;
     }
@@ -423,6 +437,27 @@ class TesInstrumentoPagoRepository
                         . 'Andá a Pagos, agregalo al pago de esta orden y confirmalo: ahí se '
                         . 'valida que los montos cubran la orden, se genera el asiento contable y '
                         . 'se descuenta el saldo de la cuenta. Después volvé a acreditarlo.'
+                );
+            }
+
+            // No se acredita un eCheq que todavía tiene el número PROVISORIO.
+            //
+            // Acreditar afirma que el banco debitó el documento. El banco no pudo debitar algo cuyo
+            // número real nunca existió en el sistema: ese `PROV-xxx` lo inventamos nosotros para
+            // no frenar la carga del pago. Además la conciliación bancaria nunca va a poder
+            // matchear ese abono contra el extracto, porque el número que figura no es el que usó
+            // el banco.
+            //
+            // Esta guarda existía de rebote hasta el 2026-09-15: la pantalla *Sin número* no
+            // dejaba emitir sin el número del banco, y sin emitir no se podía acreditar. Al mover
+            // el número al pago y permitir el provisorio, esa protección se perdió — reportado
+            // sobre un eCheq que se acreditó con `PROV-3386`. Ahora es explícita.
+            if (self::tieneNumeroProvisorio($abono)) {
+                throw new \Exception(
+                    'Este eCheq todavía tiene un número provisorio (' . $abono->numero_echeq . '), '
+                        . 'así que no se puede acreditar: el banco no pudo haber debitado un '
+                        . 'documento con ese número. Cargá el número real en el pago de esta orden '
+                        . 'y después acreditalo.'
                 );
             }
 
@@ -663,13 +698,18 @@ class TesInstrumentoPagoRepository
                 throw new \Exception("No se encontró el abono {$idAbono}.");
             }
 
-            // El límite es "todavía no salió". Un EMITIDO ya tiene número del banco y un
-            // ACREDITADO ya movió plata: esos van por rechazo, no por edición.
-            if (!in_array((int) $abono->id_estado_instrumento, [self::BORRADOR, self::PENDIENTE_EMISION], true)) {
-                throw new \Exception('Solo se puede editar un pago que todavía no fue emitido.');
-            }
+            // El límite es "lo que el banco todavía no resolvió". Un EMITIDO se puede corregir —el
+            // documento puede no haber salido aún—; un ACREDITADO o un RECHAZADO ya movieron plata
+            // y van por otro camino. (2026-09-15)
+            $this->exigirEditable($abono, 'editar este pago');
 
             $idOpa = $this->opaDeAbono($abono);
+
+            // Solo el monto y la cuenta cambian lo que dice el asiento. Corregirle el número de
+            // eCheq no: ese dato no aparece en ninguna línea contable, así que no hay nada que
+            // reasentar y sería ruido generar un contraasiento por un cambio de texto.
+            $tocaLaContabilidad = array_key_exists('id_cuenta_bancaria', $datos)
+                || (array_key_exists('monto', $datos) && !is_null($datos['monto']));
 
             if (array_key_exists('id_cuenta_bancaria', $datos)) {
                 $idCuenta = $datos['id_cuenta_bancaria'];
@@ -699,6 +739,13 @@ class TesInstrumentoPagoRepository
 
             $abono->save();
 
+            // Si el instrumento ya estaba asentado, el asiento tiene que reflejar el valor nuevo:
+            // contraasiento de la linea vieja + asiento por el corregido. Solo si cambio algo que
+            // la contabilidad ve — el monto o la cuenta.
+            if ($tocaLaContabilidad) {
+                $this->reasentarInstrumento($abono, 'Correccion del pago');
+            }
+
             $opaRepo->recalcularEstadoOpa($idOpa);
 
             return $abono;
@@ -726,18 +773,25 @@ class TesInstrumentoPagoRepository
                 throw new \Exception("No se encontró el abono {$idAbono}.");
             }
 
-            if (!in_array((int) $abono->id_estado_instrumento, [self::BORRADOR, self::PENDIENTE_EMISION], true)) {
-                throw new \Exception(
-                    'Solo se puede anular un pago que todavía no fue emitido. '
-                        . 'Un eCheq ya emitido se da de baja por rechazo.'
-                );
-            }
+            $this->exigirEditable($abono, 'anular este pago');
 
             $abono->id_estado_instrumento = self::ANULADO;
             $abono->motivo_rechazo        = $motivo;
             $abono->fecha_rechazo         = $this->fechaActual;
             $abono->fecha_confirma_pago   = null;
             $abono->save();
+
+            // Desde que se puede anular un EMITIDO (2026-09-15), el abono puede venir ya asentado:
+            // si se lo da de baja sin revertir, el pasivo de ese instrumento queda abierto para
+            // siempre contra una orden que no lo debe. Mismo tratamiento que el rechazo.
+            //
+            // `false` en el último parámetro porque un ACREDITADO nunca llega hasta acá —lo frena
+            // `exigirEditable()`—, así que la plata no salió y no hay saldo que reponer.
+            $this->revertirContabilidadDelInstrumento(
+                $abono,
+                trim('Anulación del pago. ' . ($motivo ?? '')),
+                false
+            );
 
             $opaRepo->recalcularEstadoOpa($this->opaDeAbono($abono));
 
@@ -816,6 +870,223 @@ class TesInstrumentoPagoRepository
         return (int) $idFormaPago === self::FORMA_PAGO_ECHEQ
             ? self::PENDIENTE_EMISION
             : self::EMITIDO;
+    }
+
+    /**
+     * Estados en los que un instrumento todavía se puede corregir.
+     *
+     * Hasta el 2026-09-15 el corte era "antes de emitir" (BORRADOR / PENDIENTE_EMISION). Con la
+     * emisión movida a Confirmar Pago, ese corte dejaba **cero** margen: el abono nacía y se emitía
+     * en la misma acción, así que no había ningún momento en que se lo pudiera corregir. Un banco
+     * mal tipeado habría obligado a anular y rehacer la orden entera.
+     *
+     * El corte nuevo es **antes de que el banco lo resuelva**: mientras no esté ACREDITADO,
+     * RECHAZADO ni ANULADO, se puede corregir. Lo que el banco ya procesó no se toca.
+     *
+     * ⚠️ Corregir un instrumento **ya asentado rehace su asiento** (ver `reasentarInstrumento()`).
+     * Sin eso la contabilidad quedaría diciendo el monto o la cuenta vieja — que es exactamente el
+     * agujero que estaba anotado como pendiente #12 en `estado-sincronizacion-bases.md`.
+     */
+    private function estadosEditables(): array
+    {
+        return [self::BORRADOR, self::PENDIENTE_EMISION, self::EMITIDO];
+    }
+
+    /**
+     * Rehace el asiento de un instrumento que se corrigió después de haber quedado asentado.
+     *
+     * Es lo que hace segura la edición de un EMITIDO. El asiento de emisión dejó una línea por este
+     * instrumento con SU monto y SU cuenta; si se le cambia cualquiera de las dos —o la forma de
+     * pago, que decide si va contra el banco o contra la cuenta de diferidos— esa línea pasa a
+     * decir algo que ya no es cierto.
+     *
+     * Se resuelve como lo pide Contaduría: **contraasiento de la línea vieja + asiento nuevo por el
+     * valor corregido**. No se edita el asiento original — un asiento emitido no se modifica, se
+     * reversa.
+     *
+     * Cierra el pendiente #12 de `estado-sincronizacion-bases.md`, que estaba anotado como
+     * "editar un abono ya asentado no rehace el asiento". (2026-09-15)
+     *
+     * No hace nada si el instrumento todavía no tenía asiento (no pasó por Confirmar Pago) o si lo
+     * que cambió no afecta a la contabilidad — cambiarle el número de eCheq, por ejemplo.
+     */
+    private function reasentarInstrumento(TesPagosParciales $abono, string $motivo): void
+    {
+        $eventos = \App\Models\Contabilidad\AsientosPagoHistorialEntity::query()
+            ->where('id_pago_parcial', $abono->id_pago_parcial)
+            ->where('es_contraasiento', false)
+            ->whereIn('tipo_evento', ['EMISION', 'DEBITO'])
+            ->whereNotNull('id_asiento_contable_detalle')
+            ->get();
+
+        if ($eventos->isEmpty()) {
+            return;
+        }
+
+        $asientoRepo = new \App\Http\Controllers\Contabilidad\Repository\AsientoContableRepository();
+        $historialRepo = new \App\Http\Controllers\Contabilidad\Repository\AsientosPagoHistorialRepository($asientoRepo);
+
+        // 1) Se revierten las líneas viejas — solo las de ESTE instrumento. El asiento de emisión
+        //    es compartido con los otros medios de pago de la misma orden.
+        foreach ($eventos as $evento) {
+            $contra = $asientoRepo->contraasientoDeLinea($evento->id_asiento_contable_detalle, $motivo);
+
+            $historialRepo->guardarHistorial(
+                $abono->id_pago,
+                $contra->id_asiento_contable,
+                'CONTRAASIENTO',
+                true,
+                $evento->id_asiento_contable,
+                $motivo,
+                $abono->id_pago_parcial
+            );
+        }
+
+        // 2) Y se vuelve a asentar por el valor corregido, con el mismo criterio que la emisión
+        //    original: contra la cuenta de diferidos si es cheque/eCheq, contra el banco si no.
+        $boleta = TesPagoEntity::find($abono->id_pago);
+        $opa = TesOrdenPagoEntity::find($boleta->id_orden_pago);
+        $opaRepo = new TestOrdenPagoRepository();
+        $razones = $opaRepo->razonesSocialesDeOpa($opa->id_orden_pago);
+        $idRazon = $razones[0] ?? null;
+
+        $periodos = new \App\Http\Controllers\Contabilidad\Repository\PeriodosContablesRepository();
+        $periodo = $periodos->findByPeriodoContableActivoNow($idRazon);
+
+        if (is_null($periodo)) {
+            throw new \Exception(
+                'No hay un período contable activo, así que no se puede rehacer el asiento de este '
+                    . 'pago. Corregirlo dejaría la contabilidad diciendo el importe anterior.'
+            );
+        }
+
+        $beneficiario = $opa->tipo_factura === 'PROVEEDOR' ? $opa->proveedor : $opa->prestador;
+
+        $asiento = $asientoRepo->crearAsientoPago([
+            'id_pago'            => $abono->id_pago,
+            'id_proveedor'       => $opa->id_proveedor,
+            'id_prestador'       => $opa->id_prestador,
+            'id_razon'           => $idRazon,
+            'cuit'               => $beneficiario->cuit ?? '',
+            'nombre'             => $beneficiario->razon_social ?? '',
+            'numero_pago'        => 'PAGO-' . ($boleta->num_pago ?? ''),
+            'fecha_registra'     => $this->fechaActual->toDateString(),
+            'id_cuenta_bancaria' => $abono->id_cuenta_bancaria,
+            'monto_total'        => (float) $abono->monto_pago,
+            'cuentas'            => [[
+                'id_cuenta_bancaria' => $abono->id_cuenta_bancaria,
+                'monto'              => (float) $abono->monto_pago,
+                'diferido'           => self::esFormaDiferida($abono->id_forma_pago),
+                'id_pago_parcial'    => $abono->id_pago_parcial,
+            ]],
+        ], $periodo->id_periodo_contable);
+
+        foreach (($asiento->lineasDeInstrumento ?? []) as $idAbono => $idDetalle) {
+            $historialRepo->guardarHistorial(
+                $abono->id_pago,
+                $asiento->id_asiento_contable,
+                'EMISION',
+                false,
+                null,
+                'Reasiento por corrección del pago: ' . $motivo,
+                $idAbono,
+                $idDetalle
+            );
+        }
+    }
+
+    /** Guarda común de las cuatro operaciones que corrigen un instrumento. */
+    private function exigirEditable(TesPagosParciales $abono, string $accion): void
+    {
+        if (in_array((int) $abono->id_estado_instrumento, $this->estadosEditables(), true)) {
+            return;
+        }
+
+        $nombres = [
+            self::ACREDITADO => 'ya fue acreditado por el banco',
+            self::RECHAZADO  => 'fue rechazado',
+            self::ANULADO    => 'está anulado',
+        ];
+
+        $motivo = $nombres[(int) $abono->id_estado_instrumento] ?? 'no está en un estado editable';
+
+        throw new \Exception("No se puede {$accion}: este pago {$motivo}.");
+    }
+
+    /**
+     * Prefijo de los números de eCheq que puso el sistema, no el banco.
+     *
+     * Es un formato que **un número de banco nunca puede tener**, así que un provisorio no puede
+     * chocar con el número real cuando el banco lo asigne. `numero_echeq` tiene un índice UNIQUE
+     * global, y una colisión ahí haría fallar la carga del pago — justo lo que el provisorio viene
+     * a evitar.
+     */
+    const PREFIJO_NUMERO_PROVISORIO = 'PROV-';
+
+    /**
+     * Le pone un número provisorio a un eCheq que se cargó sin el del banco.
+     *
+     * Antes el eCheq quedaba sin número y esperaba en una pantalla aparte (*Carga de eCheq › Sin
+     * número*) a que el banco lo asignara. Esa pantalla se elimina: el pago no se frena por un
+     * dato que llega después.
+     *
+     * **El número sale del id del abono**, no de un aleatorio: así es único por construcción y no
+     * puede chocar contra el UNIQUE. Un aleatorio tendría una probabilidad chica pero real de
+     * colisionar, y el síntoma sería que confirmar el pago falla sin motivo aparente.
+     *
+     * Por eso se hace DESPUÉS del insert —el id no existe antes— y solo si el abono es un eCheq
+     * sin número: un cheque físico trae su número escrito, y una transferencia no lleva.
+     */
+    public static function asignarNumeroProvisorio(TesPagosParciales $abono): void
+    {
+        if ((int) $abono->id_forma_pago !== self::FORMA_PAGO_ECHEQ) {
+            return;
+        }
+
+        if (trim((string) $abono->numero_echeq) !== '') {
+            return;
+        }
+
+        $abono->numero_echeq = self::PREFIJO_NUMERO_PROVISORIO . $abono->id_pago_parcial;
+        $abono->numero_provisorio = true;
+        $abono->save();
+    }
+
+    /**
+     * ¿Este número lo puso el sistema?
+     *
+     * Se mira la COLUMNA, no el texto. El prefijo garantiza que no haya choques, pero la columna es
+     * la que manda: alguien podría llegar a tipear un número con ese prefijo a mano, y al revés,
+     * cambiar el formato del prefijo en el futuro no puede invalidar los datos ya guardados.
+     */
+    public static function tieneNumeroProvisorio($abono): bool
+    {
+        return (bool) ($abono->numero_provisorio ?? false);
+    }
+
+    /**
+     * Pasa a EMITIDO todos los instrumentos de una boleta que estaban esperando salir.
+     *
+     * Reemplaza a `confirmarEmisionDeOpa()` como disparador: era lo único que promovía a EMITIDO, y
+     * vivía en la pestaña *Sin número*, que se elimina. Ahora lo dispara **confirmar el pago**, que
+     * es el momento real en que Tesorería dice "esto sale" — y de paso conserva el "todos los eCheq
+     * de la orden juntos" que pedía el circuito, porque confirmar es una sola acción por orden.
+     *
+     * Ya no se exige tener el número del banco: si falta, el abono lleva uno provisorio. Esa
+     * exigencia era la que obligaba a pasar por la pantalla intermedia. (2026-09-15)
+     */
+    public function emitirInstrumentosDeBoleta($idPago): int
+    {
+        $pendientes = TesPagosParciales::where('id_pago', $idPago)
+            ->whereIn('id_estado_instrumento', [self::BORRADOR, self::PENDIENTE_EMISION])
+            ->get();
+
+        foreach ($pendientes as $p) {
+            $p->id_estado_instrumento = self::EMITIDO;
+            $p->save();
+        }
+
+        return $pendientes->count();
     }
 
     /**

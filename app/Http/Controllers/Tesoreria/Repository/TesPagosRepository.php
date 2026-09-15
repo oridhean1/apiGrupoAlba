@@ -451,6 +451,10 @@ class TesPagosRepository
                     'id_cuenta_bancaria' => $idCuentaFila,
                     'id_banco_emisor' => $this->bancoDeCuenta($idCuentaFila),
                     'id_estado_instrumento' => $estadoInstrumento,
+                    // El numero del banco, si Pagos ya lo tiene al cargar el pago. Si no vino, mas
+                    // abajo se le pone uno provisorio: la carga del pago no se frena por un dato
+                    // que llega despues. (2026-09-15)
+                    'numero_echeq' => $esDiferido ? ($pagos->numero_echeq ?? null) : null,
                     // Fecha de emisión = la cuota del cronograma que este pago cubre. El número
                     // del eCheq no se carga acá: lo asigna el banco y entra por *Sin número*.
                     'fecha_emision_echeq' => $esDiferido && !is_null($idFecha)
@@ -459,6 +463,13 @@ class TesPagosRepository
                     // Este abono nace dentro de un pago confirmado.
                     'fecha_confirmado_en_pago' => $this->fechaActual,
                 ]);
+
+                // Se hace DESPUES del insert porque el numero provisorio se arma con el id del
+                // abono: asi es unico por construccion y no puede chocar contra el indice UNIQUE
+                // de `numero_echeq`.
+                if ($esDiferido) {
+                    TesInstrumentoPagoRepository::asignarNumeroProvisorio($nuevo);
+                }
 
                 $pagosparciales += (float) $pagos->monto_pago;
 
@@ -508,6 +519,32 @@ class TesPagosRepository
                 // acreditarlo despues: un eCheq emitido sobre una boleta YA confirmada no hereda
                 // ese permiso, tiene que pasar por acá. (2026-09-10, OPA-1120)
                 $query->fecha_confirmado_en_pago = $this->fechaActual;
+
+                // ═══ El número del eCheq SÍ se edita desde acá ═══
+                //
+                // Es la única excepción a "un instrumento no se toca desde el pago", y existe
+                // porque reemplaza a la pantalla *Carga de eCheq › Sin número*, que se eliminó el
+                // 2026-09-15. Cuando el banco asigna el número definitivo, se reemplaza el
+                // provisorio acá mismo, sobre el pago ya cargado.
+                //
+                // No reasienta nada: el número no aparece en ninguna línea contable. Lo que sí hace
+                // es limpiar la marca de provisorio, que es lo que después permite saber cuáles
+                // siguen pendientes del banco.
+                if ($esInstrumento) {
+                    $numeroNuevo = trim((string) ($pagos->numero_echeq ?? ''));
+
+                    if ($numeroNuevo !== '' && $numeroNuevo !== (string) $query->numero_echeq) {
+                        if (!$instrumentos->numeroEcheqDisponible($numeroNuevo, $query->id_pago_parcial)) {
+                            throw new \Exception(
+                                "El número de eCheq {$numeroNuevo} ya está usado en otro pago."
+                            );
+                        }
+
+                        $query->numero_echeq = $numeroNuevo;
+                        $query->num_cheque = $numeroNuevo;
+                        $query->numero_provisorio = false;
+                    }
+                }
 
                 if (!$esInstrumento) {
                     $query->id_forma_pago=$pagos->id_forma_pago;
@@ -633,6 +670,19 @@ class TesPagosRepository
         $pago->banco = $params->banco;
 
         $pago->update();
+
+        // ═══ Confirmar el pago EMITE los instrumentos de la orden ═══
+        //
+        // Hasta el 2026-09-15 esto lo hacía `confirmarEmisionDeOpa()`, desde la pestaña *Carga de
+        // eCheq › Sin número*, que exigía tener el número del banco para dejar emitir. Esa pantalla
+        // se eliminó: el número puede ser provisorio y ya no frena nada.
+        //
+        // Confirmar el pago es el momento real en que Tesorería dice "esto sale", y es una sola
+        // acción por orden — así que conserva el "todos los eCheq juntos" que pedía el circuito.
+        //
+        // Importa el orden: va DESPUÉS de guardar la boleta, porque emitir es la consecuencia de
+        // que el pago quedó confirmado, no un paso previo.
+        $instrumentos->emitirInstrumentosDeBoleta($pago->id_pago);
 
         return $pago;
     }

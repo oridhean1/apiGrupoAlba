@@ -867,7 +867,18 @@ class TestOrdenPagoRepository
                 ->vivos()
                 ->get();
 
-            if ($abonos->isEmpty()) {
+            // ⚠️ Una boleta SIN abonos vivos puede ser dos cosas distintas, y tratarlas igual era
+            // el bug: si nunca tuvo abonos es del circuito viejo —el pago vive en la cabecera— y
+            // no hay que tocarla; si los tuvo y se dieron todos de baja, hay que **bajarla** de
+            // estado. Se distinguen mirando si existe alguna fila, viva o muerta.
+            //
+            // Reportado sobre la OPA-1408 (id 4479): se rechazaron los dos eCheq, la orden volvió
+            // a EN PROCESO —correcto— pero la boleta quedó en PAGO PARCIAL, que es lo que muestra
+            // la grilla de Pagos. (2026-09-15)
+            $tuvoAbonos = \App\Models\Tesoreria\TesPagosParciales::where('id_pago', $boleta->id_pago)
+                ->exists();
+
+            if ($abonos->isEmpty() && !$tuvoAbonos) {
                 continue;
             }
 
@@ -888,7 +899,11 @@ class TestOrdenPagoRepository
             } elseif ($cobrado > 0.01) {
                 $estado = self::ESTADO_OPA_PAGO_PARCIAL;
             } else {
-                continue;
+                // Nada cobrado, pero la boleta y su cronograma existen: EN PROCESO, igual que la
+                // orden. Antes esta rama era un `continue`, así que el estado sólo podía SUBIR —
+                // una boleta que llegó a PAGO PARCIAL se quedaba ahí para siempre aunque después
+                // se dieran de baja todos sus pagos.
+                $estado = self::ESTADO_OPA_EN_PROCESO;
             }
 
             if ((int) $boleta->id_estado_orden_pago !== $estado) {

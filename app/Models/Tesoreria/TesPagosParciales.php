@@ -34,6 +34,9 @@ class TesPagosParciales extends Model
         // create() las descarta en silencio -- ya paso dos veces en esta fase.
         'id_estado_instrumento',
         'numero_echeq',
+        // El numero lo puso el sistema para no frenar la carga del pago, y hay que reemplazarlo
+        // por el que asigne el banco. Ver 2026_09_15_100000.
+        'numero_provisorio',
         'fecha_emision_echeq',
         'id_banco_emisor',
         // Cuenta de origen del pago. Vivia en la boleta (una sola para toda la orden), lo que
@@ -41,6 +44,12 @@ class TesPagosParciales extends Model
         'id_cuenta_bancaria',
         'motivo_rechazo',
         'fecha_rechazo',
+    ];
+
+    protected $casts = [
+        // Sin el cast, MySQL devuelve '0'/'1' como string y '0' es truthy en una comparacion
+        // suelta del front. Un provisorio tomado por real termina impreso en un comprobante.
+        'numero_provisorio' => 'boolean',
     ];
 
     /**
