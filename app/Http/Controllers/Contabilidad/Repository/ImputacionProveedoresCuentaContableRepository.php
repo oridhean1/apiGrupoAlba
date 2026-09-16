@@ -84,6 +84,15 @@ class ImputacionProveedoresCuentaContableRepository
             $query->where('imputacion', 'like', '%' . $filtros['imputacion'] . '%');
         }
 
+        // Búsqueda libre: por código o por nombre de imputación
+        if (isset($filtros['search']) && trim($filtros['search']) !== '') {
+            $search = '%' . trim($filtros['search']) . '%';
+            $query->where(function ($q) use ($search) {
+                $q->where('codigo', 'like', $search)
+                    ->orWhere('imputacion', 'like', $search);
+            });
+        }
+
         return $query->get();
     }
 
