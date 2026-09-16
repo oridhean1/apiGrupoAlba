@@ -20,7 +20,7 @@ class InternacionesRepository
 
     public function findByPrestacionInternacionId($id, $codPrestacion = null)
     {
-        $internacion = InternacionesEntity::with(['afiliado'])->find($id);
+        $internacion = InternacionesEntity::with(['afiliado', 'prestador'])->find($id);
 
         // EDICION: se pidio una autorizacion puntual -> la devolvemos completa con su
         // detalle para que el frontend la actualice en vez de crear otra. (T-00000804)
@@ -50,24 +50,42 @@ class InternacionesRepository
             }
         }
 
-        // ALTA: sin cod_prestacion devolvemos la prestacion VACIA (sin cod_prestacion, sin
-        // detalle) para que el frontend cree un registro nuevo e independiente y cada
-        // autorizacion conserve su propia observacion. (T-00000804)
+        // ALTA: sin cod_prestacion devolvemos una prestacion nueva (sin cod_prestacion, sin
+        // detalle) para que el frontend cree un registro independiente y cada autorizacion
+        // conserve su propia observacion. (T-00000804)
+        // Los datos comunes a toda la internacion (tipo de tramite, diagnostico, solicitante,
+        // efector y domicilios) se heredan de la ultima autorizacion cargada para no tener
+        // que volver a completarlos. Observaciones, practicas y documentacion van vacias.
+        $ultima = PrestacionesPracticaLaboratorioEntity::with(['datosTramite'])
+            ->where('cod_internacion', $id)
+            ->orderByDesc('cod_prestacion')
+            ->first();
+
+        $datosTramite = null;
+        if ($ultima && $ultima->datosTramite) {
+            $datosTramite = $ultima->datosTramite->toArray();
+            // Sin id: el alta genera su propio registro de datos del tramite
+            $datosTramite['id_detalle_tramite'] = null;
+        }
+
+        // En la primera autorizacion no hay de donde heredar: el efector suele ser la
+        // misma institucion donde esta internado el paciente
+        $prestadorInternacion = $internacion?->prestador;
 
         $prestacion = new \stdClass();
-        $prestacion->arrayDetalle   = [];
-        $prestacion->observaciones  = null;
-        $prestacion->cod_prestacion = null;
-        $prestacion->afiliado       = $internacion?->afiliado ?? null;
-        $prestacion->cod_prestador  = $internacion?->cod_prestador ?? null;
-        $prestacion->cod_profesional        = null;
-        $prestacion->dni_afiliado           = $internacion?->dni_afiliado ?? null;
-        $prestacion->datos_tramite          = null;
-        $prestacion->domicilio_profesional  = null;
-        $prestacion->domicilio_prestador    = null;
-        $prestacion->diagnostico            = null;
-        $prestacion->id_diagnostico         = null;
-        $prestacion->documentacion          = [];
+        $prestacion->arrayDetalle          = [];
+        $prestacion->observaciones         = null;
+        $prestacion->cod_prestacion        = null;
+        $prestacion->documentacion         = [];
+        $prestacion->afiliado              = $internacion?->afiliado ?? null;
+        $prestacion->dni_afiliado          = $internacion?->dni_afiliado ?? null;
+        $prestacion->datos_tramite         = $datosTramite;
+        $prestacion->cod_prestador         = $ultima?->cod_prestador ?? $internacion?->cod_prestador;
+        $prestacion->cod_profesional       = $ultima?->cod_profesional ?? $internacion?->cod_profesional ?? $internacion?->cod_prestador;
+        $prestacion->domicilio_prestador   = $ultima?->domicilio_prestador ?? $prestadorInternacion?->direccion;
+        $prestacion->domicilio_profesional = $ultima?->domicilio_profesional ?? $prestadorInternacion?->direccion;
+        $prestacion->diagnostico           = $ultima?->diagnostico;
+        $prestacion->id_diagnostico        = $ultima?->id_diagnostico;
 
         return ['internacion' => $internacion, 'prestacion' => $prestacion];
     }
