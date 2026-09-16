@@ -174,6 +174,27 @@ class FacturasOpaRepository
     const ESTADO_FACTURA_VALORIZACION_FINAL = 3;
 
     /**
+     * ⚠️ Y el equivalente para PROVEEDOR es el **1**, no el 3.
+     *
+     * `tb_facturacion_datos.estado` carga **dos catálogos distintos** según el circuito, sobre la
+     * misma columna:
+     *
+     *     prestador:  0 pendiente · 1 en proceso · 2 cerrada · 3 VALORIZACIÓN FINAL · 4 anulada
+     *     proveedor:  0 pendiente · 1 CONFIRMADA  ·                                   9 anulada
+     *
+     * Una factura de proveedor no pasa por liquidación: nace final. Su "valorización final" es el
+     * estado 1. Verificado el 2026-09-16: las 1.256 facturas de proveedor de Alba y las 317 de OSV
+     * están todas en 1, **ninguna en 3** — filtrar por 3 no habría traído ni una.
+     *
+     * No se migró el valor a 3 a propósito: los badges del visor de proveedores leen 0/1/9, así que
+     * cambiarlo dejaría 1.573 facturas sin estado visible, y no haría falta para nada.
+     */
+    const ESTADO_FACTURA_PROVEEDOR_CONFIRMADA = 1;
+
+    /** `id_tipo_factura` 16 = BIENES Y SERVICIOS: la señal canónica de "es de proveedor". */
+    const TIPO_FACTURA_PROVEEDOR = 16;
+
+    /**
      * Facturas de prestador listas para imputar a una OPA, paginadas, con su saldo.
      *
      * Es el listado de la pantalla Tesorería › Crear OPA. Trae SOLO prestadores: para proveedores
@@ -212,12 +233,27 @@ class FacturasOpaRepository
         // aparecía. Y sería más estricto que el camino viejo: "Generar OPA" desde liquidaciones
         // ni siquiera mira esta tabla, así que esas facturas hoy SÍ se pueden pagar. La orden solo
         // necesita el `id_prestador`; el nombre es para mostrar, y sale vacío.
+        // Los dos circuitos usan la misma pantalla y el mismo armado de orden, pero se reconocen
+        // distinto y **califican con estados distintos** — ver las constantes de arriba.
+        $esProveedor = strtoupper((string) ($params->tipo ?? 'PRESTADOR')) === 'PROVEEDOR';
+
         $query = DB::table('tb_facturacion_datos as f')
-            ->leftJoin('tb_prestador as p', 'p.cod_prestador', '=', 'f.id_prestador')
-            ->leftJoin('tb_razones_sociales as rs', 'rs.id_razon', '=', 'f.id_locatorio')
-            ->whereNotNull('f.id_prestador')
-            ->whereNull('f.id_proveedor')
-            ->where('f.estado', self::ESTADO_FACTURA_VALORIZACION_FINAL);
+            ->leftJoin('tb_razones_sociales as rs', 'rs.id_razon', '=', 'f.id_locatorio');
+
+        if ($esProveedor) {
+            // `id_tipo_factura == 16` es la señal canónica de proveedor, no "tiene id_proveedor":
+            // hay facturas con los dos ids cargados a la vez (dato sucio) y decidir por cuál no es
+            // null las clasifica mal en un sentido o en el otro.
+            $query->leftJoin('tb_proveedor as p', 'p.cod_proveedor', '=', 'f.id_proveedor')
+                ->where('f.id_tipo_factura', self::TIPO_FACTURA_PROVEEDOR)
+                ->where('f.estado', self::ESTADO_FACTURA_PROVEEDOR_CONFIRMADA);
+        } else {
+            $query->leftJoin('tb_prestador as p', 'p.cod_prestador', '=', 'f.id_prestador')
+                ->whereNotNull('f.id_prestador')
+                ->whereNull('f.id_proveedor')
+                ->where('f.id_tipo_factura', '!=', self::TIPO_FACTURA_PROVEEDOR)
+                ->where('f.estado', self::ESTADO_FACTURA_VALORIZACION_FINAL);
+        }
 
         if (!is_null($params)) {
             if (!empty($params->desde) && !empty($params->hasta)) {
@@ -234,7 +270,10 @@ class FacturasOpaRepository
             // ya tiene el visor de liquidaciones (2026-08-13); la pantalla de referencia de ospf
             // filtra por CUIT y por eso no se copió esa parte.
             if (!empty($params->id_prestador)) {
-                $query->where('f.id_prestador', $params->id_prestador);
+                $query->where(
+                    $esProveedor ? 'f.id_proveedor' : 'f.id_prestador',
+                    $params->id_prestador
+                );
             }
 
             // La grilla se acota por prestador Y razon social juntos: el mismo prestador le puede
@@ -274,7 +313,10 @@ class FacturasOpaRepository
 
         $query->select([
             'f.id_factura',
-            'f.id_prestador',
+            // `id_prestador` es el nombre que usa el front para anclar la seleccion. Para una
+            // factura de proveedor lleva el `id_proveedor`: el beneficiario es uno solo y la
+            // pantalla no tiene por que saber de cual de las dos tablas salio.
+            DB::raw(($esProveedor ? 'f.id_proveedor' : 'f.id_prestador') . ' as id_prestador'),
             // Cual de nuestras empresas le debe la factura. La orden se paga desde una cuenta que
             // pertenece a UNA razon social, asi que la seleccion no puede cruzarlas. (2026-09-16)
             'f.id_locatorio',

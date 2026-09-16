@@ -180,8 +180,25 @@ class FacturacionProcesosController extends Controller
                 }
 
 
-                /* || $facturacion->id_tipo_factura == 17 */
-                if (!is_null($facturacion->id_proveedor) || !is_null($facturacion->id_prestador)) {
+                // ═══ Registrar una factura YA NO genera su orden de pago ═══
+                //
+                // Hasta el 2026-09-16 esto corría para cualquier factura con proveedor o prestador:
+                // la OPA nacía junto con la factura. Para prestadores ya era contradictorio —el
+                // circuito dice que la orden se arma a demanda—, y para proveedores era el camino
+                // normal: las 1.236 facturas de proveedor con OPA de Alba la tienen generada el
+                // mismo día, todas de acá.
+                //
+                // Ahora las dos van por **Tesorería › Crear OPA**: se eligen las facturas, se
+                // imputa un monto a cada una y de ahí sale la orden. Eso hace que pasen por las
+                // validaciones que este camino nunca tuvo — tope de sobrepago, una sola razón
+                // social por orden, e imputación parcial.
+                //
+                // ⚠️ Queda **solo el tipo 20**, que además de la OPA crea el pago y deja la orden
+                // EN PROCESO. Es un caso aparte (1 sola factura en Alba desde sept/2025, 0 en OSV)
+                // y no se tocó porque no estaba en el pedido: sacarlo implica decidir qué pasa con
+                // esa automatización del pago, no solo con la de la orden. Anotado como pendiente.
+                if ($facturacion->id_tipo_factura == 20
+                    && (!is_null($facturacion->id_proveedor) || !is_null($facturacion->id_prestador))) {
                     $opaData = (object) [
                         "id_proveedor" => $facturacion->id_proveedor,
                         "id_prestador" => $facturacion->id_prestador,

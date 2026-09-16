@@ -1063,21 +1063,41 @@ class TestOrdenPagoRepository
             throw new \Exception('No se encontró la factura ' . $faltantes->implode(', ') . '.');
         }
 
-        // Solo prestadores, y todas del mismo. El front ya lo valida, pero quien pegue al endpoint
-        // directo se lo saltea: sin esto se podían mezclar dos prestadores en una OPA y el
-        // beneficiario quedaba mal asignado para uno de los dos. (mismo criterio que
-        // findByIdFacturaMultiple, 2026-08-13)
-        $beneficiarios = $facturas->pluck('id_prestador')->unique()->values();
+        // Todas del mismo TIPO. No se mezcla una factura de proveedor con una de prestador: el
+        // beneficiario de la orden es uno solo y sale de una tabla distinta en cada caso.
+        //
+        // `id_tipo_factura == 16` (BIENES Y SERVICIOS) es la señal canónica de proveedor, no
+        // "tiene id_proveedor": hay facturas con los dos ids cargados a la vez (dato sucio) y
+        // decidir por cuál no es null las clasifica mal en un sentido o en el otro.
+        $tipos = $facturas
+            ->map(fn($f) => (int) $f->id_tipo_factura === FacturasOpaRepository::TIPO_FACTURA_PROVEEDOR)
+            ->unique();
 
-        if ($beneficiarios->count() > 1) {
+        if ($tipos->count() > 1) {
             throw new \Exception(
-                'No se puede generar: las facturas seleccionadas pertenecen a distintos prestadores.'
+                'No se puede generar: hay facturas de proveedor y de prestador en la misma selección.'
             );
         }
 
-        $idPrestador = $beneficiarios->first();
-        if (empty($idPrestador)) {
-            throw new \Exception('Las facturas seleccionadas no tienen prestador asignado.');
+        $esProveedor = (bool) $tipos->first();
+        $campoBeneficiario = $esProveedor ? 'id_proveedor' : 'id_prestador';
+        $etiqueta = $esProveedor ? 'proveedor' : 'prestador';
+
+        // Y todas del mismo beneficiario. El front ya lo valida, pero quien pegue al endpoint
+        // directo se lo saltea: sin esto se podían mezclar dos en una OPA y el beneficiario
+        // quedaba mal asignado para uno de los dos. (mismo criterio que findByIdFacturaMultiple,
+        // 2026-08-13)
+        $beneficiarios = $facturas->pluck($campoBeneficiario)->unique()->values();
+
+        if ($beneficiarios->count() > 1) {
+            throw new \Exception(
+                "No se puede generar: las facturas seleccionadas pertenecen a distintos {$etiqueta}es."
+            );
+        }
+
+        $idBeneficiario = $beneficiarios->first();
+        if (empty($idBeneficiario)) {
+            throw new \Exception("Las facturas seleccionadas no tienen {$etiqueta} asignado.");
         }
 
         // ⚠️ Y todas de la MISMA RAZÓN SOCIAL.
@@ -1115,9 +1135,18 @@ class TestOrdenPagoRepository
         foreach ($lineas as $linea) {
             $factura = $facturas[$linea->id_factura];
 
-            if ((int) $factura->estado !== FacturasOpaRepository::ESTADO_FACTURA_VALORIZACION_FINAL) {
+            // La misma columna `estado` usa dos catalogos: para prestador el 3 es Valorizacion
+            // Final, y para proveedor su equivalente es el 1 (CONFIRMADA) — no pasa por
+            // liquidacion, nace final. Ver las constantes de FacturasOpaRepository.
+            $estadoQueHabilita = $esProveedor
+                ? FacturasOpaRepository::ESTADO_FACTURA_PROVEEDOR_CONFIRMADA
+                : FacturasOpaRepository::ESTADO_FACTURA_VALORIZACION_FINAL;
+
+            if ((int) $factura->estado !== $estadoQueHabilita) {
+                $exigido = $esProveedor ? 'confirmada' : 'en Valorización Final';
+
                 throw new \Exception(
-                    "La factura {$factura->numero} no está en Valorización Final, no se le puede generar una orden de pago."
+                    "La factura {$factura->numero} no está {$exigido}, no se le puede generar una orden de pago."
                 );
             }
 
@@ -1146,8 +1175,8 @@ class TestOrdenPagoRepository
         $primera = $facturas->first();
 
         $opa = TesOrdenPagoEntity::create([
-            'id_proveedor' => null,
-            'id_prestador' => $idPrestador,
+            'id_proveedor' => $esProveedor ? $idBeneficiario : null,
+            'id_prestador' => $esProveedor ? null : $idBeneficiario,
             'monto_orden_pago' => round($montoTotal, 2),
             'id_moneda' => $request->id_moneda ?? 1,
             // `?? null` antes del `?:`: el `?:` solo NO emite warning cuando el operando existe.
@@ -1166,7 +1195,7 @@ class TestOrdenPagoRepository
             // revés, el beneficiario salía vacío en los comprobantes y el agrupado se rompía
             // porque la clave del beneficiario se arma con este campo. 129 OPAs quedaron así
             // antes de detectarlo. (2026-09-04)
-            'tipo_factura' => 'PRESTADOR',
+            'tipo_factura' => $esProveedor ? 'PROVEEDOR' : 'PRESTADOR',
             // Una OPA de una sola factura conserva la referencia en la cabecera; la agrupada la
             // deja en NULL y el vínculo vive en el detalle/puente (ver findByOpaVigenteFactura).
             'id_factura' => $esAgrupada ? null : array_key_first($imputaciones),
@@ -1177,7 +1206,7 @@ class TestOrdenPagoRepository
                 'id_orden_pago' => $opa->id_orden_pago,
                 'id_factura' => $idFactura,
                 'monto_factura' => $monto,
-                'tipo_factura' => 'PRESTADOR',
+                'tipo_factura' => $esProveedor ? 'PROVEEDOR' : 'PRESTADOR',
                 'factura_unida' => $esAgrupada ? 1 : 0,
             ]);
         }
