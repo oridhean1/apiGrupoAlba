@@ -1080,6 +1080,35 @@ class TestOrdenPagoRepository
             throw new \Exception('Las facturas seleccionadas no tienen prestador asignado.');
         }
 
+        // ⚠️ Y todas de la MISMA RAZÓN SOCIAL.
+        //
+        // `id_locatorio` es cuál de nuestras empresas le debe la factura. Una orden se paga desde
+        // **una** cuenta bancaria, que pertenece a una sola razón social: si la orden mezcla dos,
+        // el desplegable de cuentas ofrece las de las dos entidades y se termina pagando la deuda
+        // de una empresa con la plata de la otra. Las dos contabilidades quedan cruzadas.
+        //
+        // Mismo prestador NO implica misma razón social: un prestador le puede facturar a dos
+        // empresas del grupo. Eso no es un error de datos — simplemente necesita una orden por
+        // cada una.
+        //
+        // Reportado el 2026-09-16 sobre la OPA-16002 (id 6395): mezclaba una factura de GRUPO ALBA
+        // con una de MEDICINA PRIVADA, y al ir a pagar aparecían las cuentas de Alba en una orden
+        // de Medicina. La validación de prestador ya estaba; esta faltaba.
+        $razones = $facturas->pluck('id_locatorio')->filter()->unique()->values();
+
+        if ($razones->count() > 1) {
+            $nombres = DB::table('tb_razones_sociales')
+                ->whereIn('id_razon', $razones)
+                ->pluck('razon_social')
+                ->implode(' y ');
+
+            throw new \Exception(
+                'No se puede generar: las facturas seleccionadas son de distintas razones sociales ('
+                    . $nombres . '). Una orden de pago se paga desde una sola cuenta bancaria, que '
+                    . 'pertenece a una sola empresa — hay que generar una orden por cada una.'
+            );
+        }
+
         $montoTotal = 0.0;
         $imputaciones = [];
 
@@ -1259,6 +1288,35 @@ class TestOrdenPagoRepository
         if ($beneficiarios->count() > 1) {
             throw new \Exception(
                 'No se puede generar: las facturas seleccionadas pertenecen a distintos proveedores/prestadores.'
+            );
+        }
+
+        // Y de la MISMA RAZÓN SOCIAL, por el mismo motivo que en `procesarOpaAgrupada()`: la orden
+        // se paga desde una sola cuenta bancaria, y esa cuenta pertenece a una sola empresa del
+        // grupo. Mezclarlas termina pagando la deuda de una con la plata de la otra.
+        //
+        // Este camino quedó sirviendo solo al visor de PROVEEDORES: el botón "Generar OPA" de
+        // liquidaciones se sacó el 2026-09-16 y los prestadores van por Tesorería › Crear OPA. Se
+        // le pone igual la guarda porque era la misma puerta abierta — de acá salió la OPA-1102,
+        // anotada como anomalía preexistente en `revisar-pagos-razon-social-cruzada.md`.
+        //
+        // Se mira `id_locatorio` de TODAS las facturas involucradas: las que ya tenían OPA
+        // pendiente (vía su detalle) y las que se agregan ahora.
+        $razonesInvolucradas = FacturacionDatosEntity::whereIn(
+            'id_factura',
+            $detalleExistente->pluck('id_factura')->merge($facturasDb->keys())->unique()
+        )->pluck('id_locatorio')->filter()->unique()->values();
+
+        if ($razonesInvolucradas->count() > 1) {
+            $nombres = DB::table('tb_razones_sociales')
+                ->whereIn('id_razon', $razonesInvolucradas)
+                ->pluck('razon_social')
+                ->implode(' y ');
+
+            throw new \Exception(
+                'No se puede generar: las facturas seleccionadas son de distintas razones sociales ('
+                    . $nombres . '). Una orden de pago se paga desde una sola cuenta bancaria, que '
+                    . 'pertenece a una sola empresa — hay que generar una orden por cada una.'
             );
         }
 

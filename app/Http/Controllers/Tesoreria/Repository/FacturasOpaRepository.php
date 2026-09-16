@@ -214,6 +214,7 @@ class FacturasOpaRepository
         // necesita el `id_prestador`; el nombre es para mostrar, y sale vacío.
         $query = DB::table('tb_facturacion_datos as f')
             ->leftJoin('tb_prestador as p', 'p.cod_prestador', '=', 'f.id_prestador')
+            ->leftJoin('tb_razones_sociales as rs', 'rs.id_razon', '=', 'f.id_locatorio')
             ->whereNotNull('f.id_prestador')
             ->whereNull('f.id_proveedor')
             ->where('f.estado', self::ESTADO_FACTURA_VALORIZACION_FINAL);
@@ -234,6 +235,12 @@ class FacturasOpaRepository
             // filtra por CUIT y por eso no se copió esa parte.
             if (!empty($params->id_prestador)) {
                 $query->where('f.id_prestador', $params->id_prestador);
+            }
+
+            // La grilla se acota por prestador Y razon social juntos: el mismo prestador le puede
+            // facturar a dos empresas del grupo, y esas facturas necesitan ordenes separadas.
+            if (!empty($params->id_locatorio)) {
+                $query->where('f.id_locatorio', $params->id_locatorio);
             }
 
             // Los de abajo son búsqueda libre del usuario, no la clave de agrupación.
@@ -268,6 +275,9 @@ class FacturasOpaRepository
         $query->select([
             'f.id_factura',
             'f.id_prestador',
+            // Cual de nuestras empresas le debe la factura. La orden se paga desde una cuenta que
+            // pertenece a UNA razon social, asi que la seleccion no puede cruzarlas. (2026-09-16)
+            'f.id_locatorio',
             'f.periodo',
             'f.fecha_registra',
             'f.fecha_comprobante',
@@ -281,6 +291,7 @@ class FacturasOpaRepository
             'p.cuit',
             'p.razon_social',
             'p.nombre_fantasia',
+            'rs.razon_social as razon_social_empresa',
             DB::raw("CONCAT(f.tipo_letra, ' ', f.sucursal, '-', f.numero) as comprobante"),
             DB::raw("{$pagableSql} as monto_pagable"),
             DB::raw("{$imputadoSql} as monto_imputado"),
