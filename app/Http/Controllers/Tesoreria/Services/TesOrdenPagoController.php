@@ -87,6 +87,40 @@ class TesOrdenPagoController extends Controller
         }
     }
 
+    /**
+     * PUT /v1/tesoreria/opa/{idOpa}/cronograma
+     * Body: { cuotas: [{ fecha_probable_pago }] }
+     *
+     * Corrige las fechas de una OPA ya generada. Desde que el cronograma se define al crear la
+     * orden, éste es el único lugar donde se lo puede cambiar — y sólo mientras no haya ningún
+     * pago cargado (el repositorio explica por qué la guarda es "ningún abono" y no "nada
+     * cobrado").
+     *
+     * 422, igual que al generar: lo que corta acá son cosas que el operador puede arreglar.
+     */
+    public function getEditarCronograma($idOpa, Request $request, TestOrdenPagoRepository $opa)
+    {
+        try {
+            DB::beginTransaction();
+
+            $boleta = $opa->editarCronogramaDeOpa($idOpa, (array) ($request->cuotas ?? []));
+
+            DB::commit();
+
+            $cantidad = count((array) $request->cuotas);
+
+            return response()->json([
+                'message' => $cantidad > 1
+                    ? "Se guardó el cronograma en {$cantidad} cuotas."
+                    : 'Se guardó la fecha de pago.',
+                'id_pago' => $boleta->id_pago,
+            ]);
+        } catch (\Throwable $th) {
+            DB::rollBack();
+            return response()->json(['message' => $th->getMessage()], 422);
+        }
+    }
+
     public function getProcesar(Request $request, TestOrdenPagoRepository $opa, TesPagosRepository $pagosRepo)
     {
         try {

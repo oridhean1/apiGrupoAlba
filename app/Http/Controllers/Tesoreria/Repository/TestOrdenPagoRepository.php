@@ -9,6 +9,7 @@ use App\Models\Tesoreria\TesFechaProbablePagoEntity;
 use App\Models\Tesoreria\TesOrdenPagoDetalleEntity;
 use App\Models\Tesoreria\TesOrdenPagoEntity;
 use App\Models\Tesoreria\TesPagoEntity;
+use App\Models\Tesoreria\TesPagosParciales;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -137,6 +138,7 @@ class TestOrdenPagoRepository
 
     public function getFiltroDinamico($params)
     {
+        // (Había acá la misma asignación dos veces seguidas; la primera se pisaba sin usarse.)
         $query = TesOrdenPagoEntity::with([
             'estado',
             'opadetalle.detallefc.razonSocial',
@@ -146,18 +148,16 @@ class TestOrdenPagoRepository
             'pagoFecha.fechaprobablepagos',
             'opadetalle',
             'opadetalle.detallefc',
-        ]);
-
-        $query = TesOrdenPagoEntity::with([
-            'estado',
-            'opadetalle.detallefc.razonSocial',
-            'opadetalle.detallefc.comprobantes',
-            'proveedor',
-            'prestador',
-            'pagoFecha.fechaprobablepagos',
-            'opadetalle',
-            'opadetalle.detallefc',
-        ]);
+        ])
+            // Sin el select explícito, addSelect() deja la consulta con ESA sola columna.
+            ->select('tb_tes_orden_pago.*')
+            // Cuántos pagos tiene cargados la orden. El Gestor lo usa para saber si el cronograma
+            // todavía se puede editar, sin tener que pedírselo al backend orden por orden.
+            ->addSelect(['abonos_cargados' => DB::table('tb_tes_pago_parcial as pp')
+                ->join('tb_tes_pago as b', 'b.id_pago', '=', 'pp.id_pago')
+                ->whereColumn('b.id_orden_pago', 'tb_tes_orden_pago.id_orden_pago')
+                ->where('b.id_estado_orden_pago', '!=', self::ESTADO_OPA_RECHAZADO)
+                ->selectRaw('count(*)')]);
 
         if (!is_null($params->tipo)) {
             $query->where(function ($q) use ($params) {
@@ -1215,10 +1215,165 @@ class TestOrdenPagoRepository
         // recalcula de paso desde el detalle, así que el monto de arriba es solo el valor inicial.
         $this->recalcularMontoDesdeDetalle($opa->id_orden_pago);
 
+        // ═══ El CRONOGRAMA se define acá, al crear ═══
+        //
+        // Hasta el 2026-09-16 las fechas y cuotas se cargaban después, en un paso aparte llamado
+        // "Confirmar OPA" desde el visor de órdenes. Ese paso no hacía nada más que esto —crear la
+        // boleta con su cronograma y pasar la orden a EN PROCESO—, así que era una pantalla entera
+        // para un dato que se conoce en el mismo momento en que se arma la orden.
+        //
+        // Con el cronograma acá, la orden **nace EN PROCESO** y el paso intermedio desaparece. El
+        // cronograma se puede corregir después desde el Gestor de OPAs, mientras la orden no tenga
+        // pagos cargados.
+        //
+        // Sin cuotas no se crea boleta: la orden queda PENDIENTE, que es el comportamiento viejo.
+        // Sirve de red para cualquier llamador que todavía no las mande.
+        $cuotas = collect($request->cuotas ?? [])
+            ->map(fn($c) => (array) $c)
+            ->filter(fn($c) => !empty($c['fecha_probable_pago']))
+            ->values();
+
+        if ($cuotas->isNotEmpty()) {
+            $this->crearCronogramaDeOpa($opa, $cuotas->all());
+        }
+
         // num_orden_pago lo asigna la base por trigger: sin refresh vuelve null al front.
         $opa->refresh();
 
         return $opa;
+    }
+
+    /**
+     * Crea la boleta de pago de una orden con su cronograma de cuotas.
+     *
+     * Es lo que hacía `TesPagosRepository::findByCrearPago()` desde el paso "Confirmar OPA". Se
+     * reimplementa acá —en vez de llamar a aquel— porque aquel espera el payload completo de ese
+     * formulario (cuenta bancaria, forma de pago, comprobante, anticipo…), datos que en el momento
+     * de crear la orden todavía no existen: **la forma de pago y la cuenta se deciden al cargar
+     * cada pago**, no al armar la orden. Pasarle ceros y nulls a un método que espera otra cosa es
+     * la clase de atajo que después nadie entiende.
+     *
+     * La orden pasa a EN PROCESO: "PENDIENTE" significa "todavía no se definió cuándo se paga", y
+     * eso ya se resolvió. (mismo criterio que 2026-09-05, ver sql-backfill-estado-en-proceso.md)
+     */
+    private function crearCronogramaDeOpa(TesOrdenPagoEntity $opa, array $cuotas): TesPagoEntity
+    {
+        $boleta = TesPagoEntity::create([
+            'id_orden_pago'        => $opa->id_orden_pago,
+            'fecha_registra'       => $this->fechaActual,
+            'fecha_confirma_pago'  => null,
+            'monto_opa'            => $opa->monto_orden_pago,
+            'monto_anticipado'     => 0,
+            'anticipo'             => 0,
+            'recursor'             => 0,
+            'pago_emergencia'      => 0,
+            // La forma de pago real se define por abono, al cargar el pago. Acá va el placeholder
+            // que ya usaba el circuito: la boleta en sí no tiene una sola forma.
+            'id_forma_pago'        => 1,
+            'id_estado_orden_pago' => self::ESTADO_OPA_PENDIENTE,
+            'id_usuario'           => $this->user->cod_usuario ?? null,
+            'tipo_factura'         => $opa->tipo_factura,
+        ]);
+
+        $this->escribirFechasDeCronograma($boleta->id_pago, $cuotas);
+
+        TesOrdenPagoEntity::where('id_orden_pago', $opa->id_orden_pago)
+            ->where('id_estado_orden_pago', self::ESTADO_OPA_PENDIENTE)
+            ->update(['id_estado_orden_pago' => self::ESTADO_OPA_EN_PROCESO]);
+
+        return $boleta;
+    }
+
+    /**
+     * Escribe las fechas del cronograma de una boleta. Compartido por el alta y la edición para
+     * que las dos validen igual — separarlas es lo que abrió la brecha del tope de sobrepago
+     * entre el modal de pago y la emisión (2026-09-14).
+     *
+     * Rechaza fechas repetidas: cada fecha del plan admite **un** abono, así que dos cuotas el
+     * mismo día no son dos cuotas, son una sola que después no se puede pagar dos veces. Es la
+     * forma del duplicado de $7.055.670,31 de la boleta 1105 de OSV.
+     */
+    private function escribirFechasDeCronograma(int $idPago, array $cuotas): void
+    {
+        $fechas = collect($cuotas)
+            ->map(fn($c) => (array) $c)
+            ->pluck('fecha_probable_pago')
+            ->filter()
+            ->values();
+
+        if ($fechas->isEmpty()) {
+            throw new \Exception('El cronograma tiene que tener al menos una fecha de pago.');
+        }
+
+        if ($fechas->unique()->count() !== $fechas->count()) {
+            throw new \Exception('El cronograma tiene fechas repetidas. Cada fecha admite un solo pago: si hay que pagar dos veces el mismo día, va en una sola cuota por el total.');
+        }
+
+        // Se ordenan por fecha antes de numerar: el `orden_cuotas` tiene que reflejar el
+        // calendario, no el orden en que el operador tipeó las filas.
+        $orden = 0;
+
+        foreach ($fechas->sort()->values() as $fecha) {
+            $orden++;
+
+            TesFechaProbablePagoEntity::create([
+                'fecha_registra'      => $this->fechaActual,
+                'fecha_probable_pago' => $fecha,
+                // El orden lo pone el sistema por la posición, no el front: dos cuotas con el
+                // mismo `orden_cuotas` dejarían el cronograma sin forma de ordenarse.
+                'orden_cuotas'        => $orden,
+                'id_pago'             => $idPago,
+            ]);
+        }
+    }
+
+    /**
+     * Reemplaza el cronograma de una OPA ya creada, **mientras no tenga ningún pago cargado**.
+     *
+     * Ahora que las fechas se definen al generar la orden, éste es el único lugar donde se las
+     * puede corregir. La guarda es "ningún abono", no "ningún abono cobrado": un abono en
+     * borrador o pendiente de emisión ya está colgado de una fecha concreta del plan, y borrar
+     * esa fecha lo dejaría huérfano — que es exactamente el destrozo que arreglamos el 2026-09-08
+     * en `sql-fechas-probables-huerfanas.md`. Con un pago cargado, el camino es anular el pago
+     * primero (su fecha vuelve al plan) y recién ahí editar.
+     *
+     * Si la orden es anterior a este cambio y quedó PENDIENTE sin boleta, se le crea el
+     * cronograma en vez de fallar: es el reemplazo del viejo paso "Confirmar OPA".
+     */
+    public function editarCronogramaDeOpa($idOpa, array $cuotas): TesPagoEntity
+    {
+        $opa = TesOrdenPagoEntity::where('id_orden_pago', $idOpa)->firstOrFail();
+
+        if (in_array((int) $opa->id_estado_orden_pago, [self::ESTADO_OPA_RECHAZADO, self::ESTADO_OPA_PAGADO], true)) {
+            throw new \Exception('No se puede editar el cronograma de una orden ' . ((int) $opa->id_estado_orden_pago === self::ESTADO_OPA_PAGADO ? 'ya pagada' : 'rechazada') . '.');
+        }
+
+        $boleta = TesPagoEntity::where('id_orden_pago', $idOpa)
+            ->where('id_estado_orden_pago', '!=', self::ESTADO_OPA_RECHAZADO)
+            ->orderBy('id_pago')
+            ->first();
+
+        if (!$boleta) {
+            return $this->crearCronogramaDeOpa($opa, $cuotas);
+        }
+
+        $abonos = TesPagosParciales::where('id_pago', $boleta->id_pago)->count();
+
+        if ($abonos > 0) {
+            throw new \Exception('La orden ya tiene ' . $abonos . ' pago(s) cargado(s): para cambiar el cronograma hay que anularlos primero, y así sus fechas vuelven al plan.');
+        }
+
+        TesFechaProbablePagoEntity::where('id_pago', $boleta->id_pago)->delete();
+
+        $this->escribirFechasDeCronograma($boleta->id_pago, $cuotas);
+
+        // Una orden con cronograma no es "PENDIENTE" (= sin fecha definida). Si venía de una
+        // anulación que la dejó atrás, vuelve a EN PROCESO.
+        TesOrdenPagoEntity::where('id_orden_pago', $idOpa)
+            ->where('id_estado_orden_pago', self::ESTADO_OPA_PENDIENTE)
+            ->update(['id_estado_orden_pago' => self::ESTADO_OPA_EN_PROCESO]);
+
+        return $boleta->refresh();
     }
 
     /**
