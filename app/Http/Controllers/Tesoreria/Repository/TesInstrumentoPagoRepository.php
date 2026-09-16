@@ -1412,6 +1412,11 @@ class TesInstrumentoPagoRepository
                 'tb_tes_pago_parcial.id_pago_parcial',
                 'tb_tes_pago_parcial.id_pago',
                 'tb_tes_pago_parcial.numero_echeq',
+                // El numero lo puso el sistema para no frenar la carga del pago: todavia no
+                // es el del banco. `marcarAcreditado` corta si esta en 1, asi que el front lo
+                // necesita para no ofrecer un boton que va a rebotar. Faltaba en el select y
+                // por eso la pantalla seguia mostrando "Acreditar" igual. (2026-09-16)
+                'tb_tes_pago_parcial.numero_provisorio',
                 'tb_tes_pago_parcial.monto_pago',
                 'tb_tes_pago_parcial.fecha_emision_echeq',
                 'tb_tes_pago_parcial.fecha_confirma_pago',

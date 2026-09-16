@@ -131,6 +131,11 @@ class TesPagosRepository
             // Pago la muestra en vez de volver a preguntarla.
             'pagosParciales.cuentaBancaria',
             'pagosParciales.bancoEmisor',
+            // Para que el listado pueda mostrar los pagos ya cargados con su estado y a que cuota
+            // corresponden: la fila mostraba solo el importe y no habia forma de ver si el eCheq
+            // estaba emitido, acreditado o todavia sin numero. (2026-09-16)
+            'pagosParciales.estadoInstrumento',
+            'pagosParciales.fechaProbable',
             'fechaprobablepagos',
             'detalleopa.detallefc',
             'detalleopa.detallefc.razonSocial'
@@ -513,7 +518,12 @@ class TesPagosRepository
 
                 $query->monto_opa=$pagos->monto_opa;
                 $query->id_usuario=$this->user->cod_usuario;
-                $query->id_pago=$pagos->id_pago;
+                // Solo si viene: es un abono que YA pertenece a esta boleta, y tomar el id del
+                // request para reescribirlo no aporta nada. Si el payload no lo trae, la columna
+                // es NOT NULL y la confirmacion se cae con un 1048 en vez de guardar. (2026-09-16)
+                if (!empty($pagos->id_pago)) {
+                    $query->id_pago = $pagos->id_pago;
+                }
 
                 // Queda registrado que este abono entro en un pago confirmado. Es lo que habilita
                 // acreditarlo despues: un eCheq emitido sobre una boleta YA confirmada no hereda

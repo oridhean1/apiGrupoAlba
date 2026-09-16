@@ -165,6 +165,27 @@ class TesPagosController extends Controller
                 $monto_total = $monto_total + $monto_Validar;
             }
 
+            // Qué abonos YA habían entrado en un pago confirmado ANTES de esta llamada.
+            //
+            // Hay que leerlo acá: `findByConfirmarPago()` le pone `fecha_confirmado_en_pago` a
+            // todos los abonos que procesa, así que después ya no se distingue lo viejo de lo
+            // nuevo.
+            //
+            // Sin esto, volver a entrar al pago y guardar rehacía el asiento ENTERO —con todos los
+            // abonos, incluidos los que ya estaban asentados— y quedaban dos asientos PAGO activos
+            // por la misma plata. Reportado sobre la boleta 3943 (asientos 779 y 780, identicos);
+            // hay 4 boletas mas asi en Alba y 1 en OSV, todas anteriores a este arreglo.
+            //
+            // Es el mismo problema en el retiro de la cuenta: un abono directo ya debitado se
+            // volvia a debitar. No salto antes porque los eCheq no mueven saldo al confirmar.
+            // (2026-09-16)
+            $abonosYaAsentados = DB::table('tb_tes_pago_parcial')
+                ->where('id_pago', $params->id_pago)
+                ->whereNotNull('fecha_confirmado_en_pago')
+                ->pluck('id_pago_parcial')
+                ->map(fn($id) => (int) $id)
+                ->all();
+
             // @CONFIRMAMOS EL PAGO || CONFIRMA MONTO
             $pagoDb = $pago->findByConfirmarPago($params);
 
@@ -271,7 +292,16 @@ class TesPagosController extends Controller
             $montosPorCuenta = [];   // solo lo que sale YA: mueve saldo
             $desgloseAsiento = [];   // todo, marcando qué porción es diferida
 
-            foreach ($pago->findByPagosParcialesVivos($params->id_pago) as $abono) {
+            $abonosVivos = $pago->findByPagosParcialesVivos($params->id_pago);
+
+            foreach ($abonosVivos as $abono) {
+                // Ya tiene su asiento y su retiro de una confirmación anterior. Volver a incluirlo
+                // duplicaría las dos cosas. Lo que se carga después —"cargar pago restante"— sí
+                // entra, y genera su propio asiento por el importe incremental.
+                if (in_array((int) $abono->id_pago_parcial, $abonosYaAsentados, true)) {
+                    continue;
+                }
+
                 $idCuentaAbono = $abono->id_cuenta_bancaria ?: $params->id_cuenta_bancaria;
 
                 // Sin cuenta no se puede debitar: la plata sale igual en el banco, pero el saldo
@@ -302,7 +332,11 @@ class TesPagosController extends Controller
             }
 
             // Un anticipo no tiene abonos: ahí se conserva el retiro por el total.
-            if (empty($desgloseAsiento) && !empty($params->id_cuenta_bancaria)) {
+            //
+            // Se mira `$abonosVivos`, NO `$desgloseAsiento`: si la boleta tiene abonos pero todos
+            // estaban asentados, el desglose queda vacío y este bloque armaría un asiento por el
+            // total de la orden — justo el duplicado que se viene a evitar.
+            if ($abonosVivos->isEmpty() && !empty($params->id_cuenta_bancaria)) {
                 $montosPorCuenta[$params->id_cuenta_bancaria] = $monto_total;
                 $desgloseAsiento[] = [
                     'id_cuenta_bancaria' => $params->id_cuenta_bancaria,
@@ -321,7 +355,13 @@ class TesPagosController extends Controller
             // ============================================================
             // CREAR ASIENTO CONTABLE AUTOMÁTICO DE PAGO
             // ============================================================
-            if (!is_null($opaFactus)) {
+            // Nada nuevo que asentar: todos los abonos vivos ya tenían su asiento. Pasa cada vez
+            // que se vuelve a abrir el pago y se guarda sin agregar nada —por ejemplo para cargar
+            // el número del eCheq—. Se sale sin tocar contabilidad en vez de emitir un asiento
+            // repetido. (2026-09-16)
+            $hayAlgoNuevoQueAsentar = !empty($desgloseAsiento);
+
+            if (!is_null($opaFactus) && $hayAlgoNuevoQueAsentar) {
                 if (empty($params->id_razon)) {
                     DB::rollBack();
                     return response()->json([
@@ -364,7 +404,10 @@ class TesPagosController extends Controller
                         // es diferida. Las directas van contra la cuenta banco; las de cheque/eCheq
                         // contra la cuenta de pasivo, porque esa plata todavia no salio.
                         'cuentas'            => $desgloseAsiento,
-                        'monto_total'        => $monto_total,
+                        // Lo que se asienta AHORA, no el total del request: en un pago restante el
+                        // desglose trae solo los abonos nuevos, y el DEBE tiene que coincidir con
+                        // el HABER o el asiento no balancea.
+                        'monto_total'        => round(array_sum(array_column($desgloseAsiento, 'monto')), 2),
                     ];
 
                     $asiento = $asientoContableRepository->crearAsientoPago($datosPago, $periodoContableActivo->id_periodo_contable);

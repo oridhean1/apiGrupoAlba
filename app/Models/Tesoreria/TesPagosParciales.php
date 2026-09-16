@@ -93,6 +93,16 @@ class TesPagosParciales extends Model
         return $this->hasOne(TesEstadoInstrumentoEntity::class, 'id_estado_instrumento', 'id_estado_instrumento');
     }
 
+    /**
+     * La fecha del cronograma que planifico este abono. El listado de pagos la muestra para que se
+     * vea a que cuota corresponde cada pago cargado, sin tener que cruzarla a mano contra las
+     * fechas de la boleta. (2026-09-16)
+     */
+    public function fechaProbable()
+    {
+        return $this->hasOne(TesFechaProbablePagoEntity::class, 'id_fecha_probable', 'id_fecha_probable');
+    }
+
     public function bancoEmisor()
     {
         return $this->hasOne(TesEntidadesBancariasEntity::class, 'id_entidad_bancaria', 'id_banco_emisor');
