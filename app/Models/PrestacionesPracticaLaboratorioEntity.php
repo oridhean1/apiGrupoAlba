@@ -5,6 +5,7 @@ namespace App\Models;
 use App\Models\afiliado\AfiliadoPadronEntity;
 use App\Models\prestadores\PrestadorEntity;
 use App\Models\prestadores\PrestadorMedicosEntity;
+use App\Models\PrestacionesMedicas\DetalleTramitePrestacionMedicaEntity;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 
@@ -64,5 +65,10 @@ class PrestacionesPracticaLaboratorioEntity extends Model
     public function profesional()
     {
         return $this->hasOne(PrestadorMedicosEntity::class, 'cod_profesional', 'cod_profesional');
+    }
+
+    public function datosTramite()
+    {
+        return $this->hasOne(DetalleTramitePrestacionMedicaEntity::class, 'id_detalle_tramite', 'id_detalle_tramite');
     }
 }

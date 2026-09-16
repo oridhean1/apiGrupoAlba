@@ -23,10 +23,10 @@ class InternacionFiltrosRepository
             "tipoDiagnostico",
             "usuario",
             "estadoPrestacion",
-            "internacion",
-            "prestaciones_principales",
+            "internacion.datosTramite.tramite",
+            "prestaciones_principales.datosTramite.tramite",
             "autorizacion.detalle_prestacion.practica",
-            "autorizacion.internacion",
+            "autorizacion.internacion.datosTramite.tramite",
             "recien_nacido.autorizacion.detalle_prestacion.practica"
         ];
     }
