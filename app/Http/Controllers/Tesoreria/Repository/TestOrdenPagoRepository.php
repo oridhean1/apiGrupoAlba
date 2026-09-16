@@ -1221,6 +1221,22 @@ class TestOrdenPagoRepository
         return $opa;
     }
 
+    /**
+     * @deprecated 2026-09-16 — **sin llamadores desde la interfaz.**
+     *
+     * Era el "Generar OPA" de los dos visores: el de liquidaciones (prestadores) y el de facturas
+     * de proveedores. Los dos se sacaron, y las órdenes se arman ahora en **Tesorería › Crear
+     * OPA** (`procesarOpaAgrupada()`), que además permite imputar un monto parcial por factura.
+     *
+     * Se conserva un tiempo en vez de borrarlo: son ~180 líneas con guardas que costó afinar
+     * (fusión de OPAs pendientes, pagos vivos, beneficiario único, razón social única), y si
+     * apareciera un consumidor que no vimos conviene que falle ruidosamente arriba y no acá.
+     * Sacarlo —junto con la ruta `generar-multiple_fc` y `getGenerarMultipleOpa`— cuando el
+     * circuito nuevo esté validado en producción.
+     *
+     * OJO: `findAddFacturaMultiple()` es OTRO método y **sigue vivo** (agregar una factura a una
+     * OPA existente, desde el modal de OPAs agrupadas). No se borra con este.
+     */
     public function findByIdFacturaMultiple($idFacturas)
     {
         $idFacturas = collect($idFacturas)->filter()->unique()->values();
