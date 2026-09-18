@@ -100,30 +100,46 @@ class TesInstrumentoPagoController extends Controller
     }
 
     /**
-     * GET /v1/tesoreria/instrumentos-pago/validar-numero?numero=&id_pago=
+     * GET /v1/tesoreria/instrumentos-pago/validar-numero?numero=&id_pago=&id_forma_pago=&id_cuenta_bancaria=
      *
      * Validación en vivo mientras el usuario tipea. `id_pago` es opcional y sirve para que al
      * reeditar un número, el propio pago no se cuente como duplicado.
+     *
+     * `id_forma_pago` decide la regla, porque no es la misma para las dos formas:
+     *  - **eCheq**: unicidad GLOBAL.
+     *  - **cheque**: unicidad dentro de la CUENTA de origen (el número es el de la chequera; dos
+     *    bancos distintos pueden tener el mismo cheque 1234), por eso pide `id_cuenta_bancaria`.
+     *
+     * Sin `id_forma_pago` se comporta como antes —regla de eCheq— para no romper a los llamadores
+     * existentes.
      *
      * Devuelve 200 siempre: "no disponible" es una respuesta válida, no un error.
      */
     public function getValidarNumero(Request $request)
     {
         try {
-            $numero = $request->query('numero');
-            $idPago = $request->query('id_pago');
+            $numero  = $request->query('numero');
+            $idPago  = $request->query('id_pago');
+            $idForma = $request->query('id_forma_pago');
+            $idCta   = $request->query('id_cuenta_bancaria');
 
             if (is_null($numero) || trim((string) $numero) === '') {
                 return response()->json(['message' => 'numero es requerido'], 422);
             }
 
-            $disponible = $this->repository->numeroEcheqDisponible($numero, $idPago);
+            $esCheque = (int) $idForma === TesInstrumentoPagoRepository::FORMA_PAGO_CHEQUE;
+
+            $disponible = $esCheque
+                ? $this->repository->numeroChequeDisponible($numero, $idCta, $idPago)
+                : $this->repository->numeroEcheqDisponible($numero, $idPago);
 
             return response()->json([
                 'disponible' => $disponible,
                 'message'    => $disponible
                     ? 'Número disponible'
-                    : 'Este número de eCheq ya está usado en otro pago',
+                    : ($esCheque
+                        ? 'Este cheque ya está cargado en otro pago de esta misma cuenta bancaria'
+                        : 'Este número de eCheq ya está usado en otro pago'),
             ], 200);
         } catch (\Exception $e) {
             Log::error('Error validar número de eCheq: ' . $e->getMessage());

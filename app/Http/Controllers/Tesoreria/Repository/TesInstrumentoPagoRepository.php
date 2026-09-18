@@ -264,6 +264,65 @@ class TesInstrumentoPagoRepository
     }
 
     /**
+     * ¿El número de CHEQUE está libre en esa chequera?
+     *
+     * A diferencia del eCheq, la unicidad NO es global: el número de un cheque es el de la
+     * chequera, así que dos bancos distintos pueden tener perfectamente el cheque 1234. Validar
+     * global rechazaría cargas correctas. El alcance es **la cuenta bancaria de origen**.
+     *
+     * Se miran solo los abonos pagados con cheque, y se ignoran los RECHAZADOS y ANULADOS: ese
+     * cheque no se usó (o volvió), así que su número queda liberado.
+     */
+    public function numeroChequeDisponible(?string $numero, $idCuentaBancaria, $idAbonoExcluir = null): bool
+    {
+        $numero = trim((string) $numero);
+
+        if ($numero === '' || empty($idCuentaBancaria)) {
+            return true;
+        }
+
+        return !TesPagosParciales::where('num_cheque', $numero)
+            ->where('id_forma_pago', self::FORMA_PAGO_CHEQUE)
+            ->where('id_cuenta_bancaria', $idCuentaBancaria)
+            ->when(!is_null($idAbonoExcluir), fn($q) => $q->where('id_pago_parcial', '!=', $idAbonoExcluir))
+            ->where(function ($q) {
+                $q->whereNull('id_estado_instrumento')
+                    ->orWhereNotIn('id_estado_instrumento', [self::RECHAZADO, self::ANULADO]);
+            })
+            ->exists();
+    }
+
+    /**
+     * Valida el número según la forma de pago, y corta con un mensaje para el usuario.
+     *
+     * Un único punto de entrada para los dos caminos que cargan un número —el alta de un abono en
+     * el modal de pago y la edición posterior— porque son reglas distintas por forma y tenerlas
+     * repetidas es como se abrieron antes otras brechas de este circuito.
+     *
+     * El alta no validaba nada: un `numero_echeq` repetido llegaba hasta el índice UNIQUE de la
+     * tabla y reventaba con un SQLSTATE 23000 crudo, y un `num_cheque` repetido entraba sin más,
+     * porque esa columna no tiene índice. (2026-09-16)
+     */
+    public function exigirNumeroLibre(?string $numero, $idFormaPago, $idCuentaBancaria, $idAbonoExcluir = null): void
+    {
+        $numero = trim((string) $numero);
+
+        if ($numero === '') {
+            return;
+        }
+
+        if ((int) $idFormaPago === self::FORMA_PAGO_ECHEQ && !$this->numeroEcheqDisponible($numero, $idAbonoExcluir)) {
+            throw new \Exception("El número de eCheq {$numero} ya está usado en otro pago.");
+        }
+
+        if ((int) $idFormaPago === self::FORMA_PAGO_CHEQUE && !$this->numeroChequeDisponible($numero, $idCuentaBancaria, $idAbonoExcluir)) {
+            throw new \Exception(
+                "El cheque N° {$numero} ya está cargado en otro pago de esta misma cuenta bancaria."
+            );
+        }
+    }
+
+    /**
      * Guarda el número de un eCheq como BORRADOR: queda persistido pero el abono no avanza de
      * estado hasta que se confirme la OP completa.
      *

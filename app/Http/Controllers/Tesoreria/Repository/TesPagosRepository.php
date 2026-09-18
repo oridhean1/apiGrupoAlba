@@ -436,6 +436,21 @@ class TesPagosRepository
                     );
                 }
 
+                // El numero no puede estar repetido. Reglas por forma: el eCheq es unico
+                // global, el cheque lo es dentro de su chequera (= su cuenta). Sin esto un eCheq
+                // repetido llegaba al indice UNIQUE y volvia como SQLSTATE 23000, y un cheque
+                // repetido entraba sin aviso. (2026-09-16)
+                // Cada forma trae su numero en su propia columna: el eCheq en `numero_echeq`,
+                // el cheque en `num_cheque`. No alcanza con mirar `$esDiferido`, que es true para
+                // las dos.
+                $instrumentos->exigirNumeroLibre(
+                    (int) $pagos->id_forma_pago === TesInstrumentoPagoRepository::FORMA_PAGO_ECHEQ
+                        ? ($pagos->numero_echeq ?? null)
+                        : ($pagos->num_cheque ?? null),
+                    $pagos->id_forma_pago,
+                    $idCuentaFila
+                );
+
                 $nuevo = TesPagosParciales::create([
                     'fecha_registra' => $this->fechaActual,
                     // ⚠️ Un instrumento NO nace cobrado: se entregó el documento, pero el banco
@@ -541,22 +556,44 @@ class TesPagosRepository
                 // es limpiar la marca de provisorio, que es lo que después permite saber cuáles
                 // siguen pendientes del banco.
                 if ($esInstrumento) {
-                    $numeroNuevo = trim((string) ($pagos->numero_echeq ?? ''));
+                    // El cheque trae su número en `num_cheque` y el eCheq en `numero_echeq`: las
+                    // dos formas son "instrumento", así que hay que mirar cuál es.
+                    $esEcheq = (int) $query->id_forma_pago === TesInstrumentoPagoRepository::FORMA_PAGO_ECHEQ;
+                    $numeroNuevo = trim((string) (($esEcheq ? $pagos->numero_echeq : $pagos->num_cheque) ?? ''));
+                    $numeroActual = (string) ($esEcheq ? $query->numero_echeq : $query->num_cheque);
 
-                    if ($numeroNuevo !== '' && $numeroNuevo !== (string) $query->numero_echeq) {
-                        if (!$instrumentos->numeroEcheqDisponible($numeroNuevo, $query->id_pago_parcial)) {
-                            throw new \Exception(
-                                "El número de eCheq {$numeroNuevo} ya está usado en otro pago."
-                            );
+                    if ($numeroNuevo !== '' && $numeroNuevo !== $numeroActual) {
+                        $instrumentos->exigirNumeroLibre(
+                            $numeroNuevo,
+                            $query->id_forma_pago,
+                            $query->id_cuenta_bancaria,
+                            $query->id_pago_parcial
+                        );
+
+                        if ($esEcheq) {
+                            $query->numero_echeq = $numeroNuevo;
+                            // `num_cheque` se mantiene en sincronía: es la columna que leen las
+                            // pantallas viejas y el comprobante de pago.
+                            $query->num_cheque = $numeroNuevo;
+                            $query->numero_provisorio = false;
+                        } else {
+                            $query->num_cheque = $numeroNuevo;
                         }
-
-                        $query->numero_echeq = $numeroNuevo;
-                        $query->num_cheque = $numeroNuevo;
-                        $query->numero_provisorio = false;
                     }
                 }
 
                 if (!$esInstrumento) {
+                    $cuentaFila = $this->cuentaDeLaFila($pagos) ?? $query->id_cuenta_bancaria;
+
+                    // Mismo control que en el alta, para los abonos sin ciclo de instrumento
+                    // (los anteriores al circuito, que igual pueden ser cheques).
+                    $instrumentos->exigirNumeroLibre(
+                        $pagos->num_cheque ?? null,
+                        $pagos->id_forma_pago,
+                        $cuentaFila,
+                        $query->id_pago_parcial
+                    );
+
                     $query->id_forma_pago=$pagos->id_forma_pago;
                     $query->monto_pago=$pagos->monto_pago;
                     $query->num_cheque=$pagos->num_cheque;
