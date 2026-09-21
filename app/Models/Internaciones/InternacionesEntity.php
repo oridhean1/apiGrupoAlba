@@ -125,4 +125,13 @@ class InternacionesEntity extends Model
     {
         return $this->hasMany(RecienNacidoEntity::class, 'cod_internacion', 'cod_internacion');
     }
+
+    // Auditorias de la internacion (el boton Auditar del visor). De aca salen la
+    // fecha de autorizacion y el auditor del comprobante, como en el Jasper:
+    // rpt_internaciones.jrxml unia tb_internaciones_auditadas para imprimir
+    // ia.fecha_autoriza y us.nombre_apellidos. (T-00000804)
+    public function auditorias()
+    {
+        return $this->hasMany(AuditorizacionesInternacionEntity::class, 'cod_internacion', 'cod_internacion');
+    }
 }

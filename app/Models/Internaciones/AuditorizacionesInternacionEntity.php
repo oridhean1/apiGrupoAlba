@@ -2,6 +2,7 @@
 
 namespace   App\Models\Internaciones;
 
+use App\Models\User;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 
@@ -20,4 +21,10 @@ class   AuditorizacionesInternacionEntity extends Model
         'observaciones',
         'dias_autoriza'
     ];
+
+    // Quien firmo la auditoria de la internacion
+    public function usuario()
+    {
+        return $this->hasOne(User::class, 'cod_usuario', 'cod_usuario');
+    }
 }
