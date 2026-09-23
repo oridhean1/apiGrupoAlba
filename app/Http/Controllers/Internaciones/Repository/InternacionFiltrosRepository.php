@@ -30,6 +30,7 @@ class InternacionFiltrosRepository
             "auditorias.usuario",
             "prestaciones_principales.datosTramite.tramite",
             "autorizacion.detalle_prestacion.practica",
+            "autorizacion.detalle_prestacion.auditoria.auditor",
             "autorizacion.internacion.datosTramite.tramite",
             "recien_nacido.autorizacion.detalle_prestacion.practica"
         ];
@@ -174,7 +175,7 @@ class InternacionFiltrosRepository
 
     public function finByListaDetallePrestaciones($id)
     {
-        return  DetallePrestacionesPracticaLaboratorioEntity::with(["practica"])
+        return  DetallePrestacionesPracticaLaboratorioEntity::with(["practica", "auditoria.auditor"])
             ->whereHas('prestacion', function ($query) use ($id) {
                 $query->where('cod_internacion', $id);
             })
