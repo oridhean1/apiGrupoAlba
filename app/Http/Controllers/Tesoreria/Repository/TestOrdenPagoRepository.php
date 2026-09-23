@@ -157,6 +157,25 @@ class TestOrdenPagoRepository
                 ->join('tb_tes_pago as b', 'b.id_pago', '=', 'pp.id_pago')
                 ->whereColumn('b.id_orden_pago', 'tb_tes_orden_pago.id_orden_pago')
                 ->where('b.id_estado_orden_pago', '!=', self::ESTADO_OPA_RECHAZADO)
+                ->selectRaw('count(*)')])
+            // Instrumentos vivos a los que todavía les falta el número del banco: o no tienen, o
+            // tienen el PROVISORIO que puso el sistema.
+            //
+            // Es el reemplazo del sello "PENDIENTE DE EMISION" que se imprimía en el comprobante:
+            // ese dato es interno y no corresponde en un papel que ve el prestador, así que el
+            // aviso pasa a la pantalla. (2026-09-23)
+            ->addSelect(['instrumentos_sin_numero' => DB::table('tb_tes_pago_parcial as pn')
+                ->join('tb_tes_pago as bn', 'bn.id_pago', '=', 'pn.id_pago')
+                ->whereColumn('bn.id_orden_pago', 'tb_tes_orden_pago.id_orden_pago')
+                ->where('bn.id_estado_orden_pago', '!=', self::ESTADO_OPA_RECHAZADO)
+                ->whereNotNull('pn.id_estado_instrumento')
+                ->whereNotIn('pn.id_estado_instrumento', [
+                    TesInstrumentoPagoRepository::RECHAZADO,
+                    TesInstrumentoPagoRepository::ANULADO,
+                ])
+                ->where(fn($q) => $q->whereNull('pn.numero_echeq')
+                    ->orWhere('pn.numero_echeq', '')
+                    ->orWhere('pn.numero_provisorio', 1))
                 ->selectRaw('count(*)')]);
 
         if (!is_null($params->tipo)) {

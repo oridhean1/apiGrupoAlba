@@ -8,7 +8,9 @@ use App\Http\Controllers\Tesoreria\Repository\TesAnticipoRepository;
 use App\Http\Controllers\Tesoreria\Repository\TesImputacionFifoRepository;
 use App\Http\Controllers\Tesoreria\Repository\TesCuentaCorrienteRepository;
 use App\Http\Controllers\Tesoreria\Repository\FacturasOpaRepository;
+use App\Http\Controllers\Tesoreria\Repository\TesInstrumentoPagoRepository;
 use App\Http\Controllers\Tesoreria\Repository\TestOrdenPagoRepository;
+use App\Http\Controllers\Utils\ComprobantesAdjuntosPdf;
 use App\Models\Tesoreria\TesOrdenPagoEntity;
 use Carbon\Carbon;
 use Illuminate\Database\QueryException;
@@ -464,6 +466,8 @@ class TesOrdenPagoController extends Controller
             'pagos.fechaprobablepagos',
             'pagos.pagosParciales.bancoEmisor',
             'pagos.pagosParciales.estadoInstrumento',
+            // Los comprobantes de pago se anexan al final del PDF. (2026-09-23)
+            'pagos.comprobantes',
         ])->where('id_orden_pago', $id)
             ->first();
 
@@ -515,16 +519,22 @@ class TesOrdenPagoController extends Controller
             ->flatMap(fn($p) => $p->fechaprobablepagos ?? collect())
             ->pluck('orden_cuotas', 'id_fecha_probable');
 
-        // Las dos versiones que pide el circuito salen de la MISMA plantilla: lo unico que
-        // cambia es si los numeros ya se cargaron. La inicial va a Tesoreria para que emita;
-        // la definitiva, al proveedor. (2026-09-03)
-        $faltanNumeros = $instrumentos->contains(fn($p) => empty(trim((string) $p->numero_echeq)));
+        // ¿El comprobante todavía no es definitivo? Falta algún número del banco, o quedan cuotas
+        // del cronograma sin un pago que las cubra.
+        //
+        // Un número PROVISORIO cuenta como faltante. Antes se miraba solo `empty()`, y desde que
+        // existe el provisorio (2026-09-15) un `PROV-4123` no está vacío: el comprobante salía
+        // sellado como DEFINITIVO e imprimía ese número inventado como si fuera el del banco.
+        //
+        // Ya NO se imprime ningún sello en el PDF. El de "PENDIENTE DE EMISION - COPIA PARA
+        // TESORERIA" era de uso interno y no corresponde en un documento que ve el prestador; el
+        // aviso vive ahora en la pantalla, antes de imprimir o enviar. (2026-09-23)
+        $faltanNumeros = $instrumentos->contains(
+            fn($p) => empty(trim((string) $p->numero_echeq))
+                || TesInstrumentoPagoRepository::tieneNumeroProvisorio($p)
+        );
 
-        $versionComprobante = ($instrumentos->isEmpty() && $fechasPendientes->isEmpty())
-            ? null
-            : (($faltanNumeros || $fechasPendientes->isNotEmpty())
-                ? 'PENDIENTE DE EMISION - COPIA PARA TESORERIA'
-                : 'COMPROBANTE DEFINITIVO');
+        $comprobanteProvisorio = $faltanNumeros || $fechasPendientes->isNotEmpty();
 
         // Lo que REALMENTE hay que pagar y lo que REALMENTE se entregó.
         //
@@ -556,7 +566,7 @@ class TesOrdenPagoController extends Controller
             "total_restante" => round(max(0, $montoPagable - $totalEntregado), 2),
             "instrumentos" => $instrumentos,
             "fechas_pendientes" => $fechasPendientes,
-            "version_comprobante" => $versionComprobante,
+            "comprobante_provisorio" => $comprobanteProvisorio,
             "comprobante_nro" => $query?->num_orden_pago,
             "fecha_emision" => $query?->fecha_emision,
             "cuit_proveedor" => $query?->proveedor ? $query?->proveedor?->cuit : $query?->prestador?->cuit,
@@ -581,7 +591,56 @@ class TesOrdenPagoController extends Controller
 
         $pdf = PDF::loadView('orden_pago', $datos);
         $pdf->setPaper('A4');
-        return $pdf->download('recibo-pago-' . $query->id_orden_pago . '.pdf');
+
+        // La orden sale junto con los comprobantes de pago adjuntos, en un solo documento: es lo
+        // que se le manda al prestador, y hasta ahora había que bajar el comprobante aparte, uno
+        // por uno, desde el listado de pagos. (2026-09-23)
+        //
+        // `anexar()` nunca tira abajo la descarga: si un adjunto no se puede incrustar lo omite y
+        // lo informa en la hoja separadora (ver la limitación del parser en esa clase).
+        $adjuntos = $this->comprobantesDeLaOrden($query);
+
+        if (empty($adjuntos)) {
+            return $pdf->download('recibo-pago-' . $query->id_orden_pago . '.pdf');
+        }
+
+        $unido = (new ComprobantesAdjuntosPdf())->anexar($pdf->output(), $adjuntos);
+
+        return response($unido['pdf'], 200, [
+            'Content-Type'        => 'application/pdf',
+            'Content-Disposition' => 'attachment; filename="recibo-pago-' . $query->id_orden_pago . '.pdf"',
+            // Para que la pantalla pueda avisar si quedó alguno afuera, sin abrir el PDF.
+            'X-Comprobantes-Omitidos' => (string) count($unido['omitidos']),
+        ]);
+    }
+
+    /**
+     * Los comprobantes vivos de todas las boletas de la orden, ya resueltos a una ruta de disco.
+     *
+     * El año va en la ruta porque así se guardan (`findByCargaMasivaArchivos`), y se toma de
+     * `fecha_registra` del comprobante — no del año actual: un comprobante cargado en 2026 sigue
+     * estando en la carpeta 2026 cuando se imprima la orden en 2027.
+     */
+    private function comprobantesDeLaOrden($orden): array
+    {
+        $adjuntos = [];
+
+        foreach (($orden?->pagos ?? collect()) as $boleta) {
+            foreach (($boleta->comprobantes ?? collect()) as $comp) {
+                if ((string) ($comp->estado ?? '1') !== '1') {
+                    continue;
+                }
+
+                $anio = Carbon::parse($comp->fecha_registra)->year;
+
+                $adjuntos[] = [
+                    'ruta'   => storage_path("app/public/tesoreria/comprobantes_pago/{$anio}/{$comp->nombre_archivo}"),
+                    'nombre' => $comp->nombre_archivo,
+                ];
+            }
+        }
+
+        return $adjuntos;
     }
 
     public function exportOrdenesPago(Request $request)

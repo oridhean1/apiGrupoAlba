@@ -195,20 +195,10 @@
         </tr>
     </table>
 
-    {{-- Sello de version del comprobante: bien visible en el encabezado, no perdido adentro de
-         una card chica. Ambar mientras falta emitir/numerar; verde cuando ya es la version
-         definitiva para el proveedor. --}}
-    @if (!empty($version_comprobante))
-        <table style="margin-bottom: 10px;">
-            <tr>
-                <td style="background-color: {{ $version_comprobante === 'COMPROBANTE DEFINITIVO' ? '#388E3C' : '#b45309' }};
-                           color: #ffffff; text-align: center; padding: 7px 10px; font-weight: 800;
-                           font-size: 13px; letter-spacing: 0.6px; border-radius: 4px;">
-                    {{ $version_comprobante }}
-                </td>
-            </tr>
-        </table>
-    @endif
+    {{-- Acá iba el sello de version ("PENDIENTE DE EMISION - COPIA PARA TESORERIA" /
+         "COMPROBANTE DEFINITIVO"). Se sacó el 2026-09-23: es informacion de uso interno y este
+         documento lo ve el prestador. El aviso de que el comprobante todavia no es definitivo vive
+         ahora en la pantalla, antes de imprimirlo o enviarlo. --}}
 
     <!-- Provider Details Card -->
     <div class="card" style="border-left: 3px solid #388E3C;">
@@ -355,7 +345,12 @@
                                 <tr>
                                     <td class="font-bold text-dark" style="font-size: 9px;">
                                         {{ $inst?->formaPago?->tipo_pago ?? 'eCheq' }}:
-                                        @if (trim((string) $inst?->numero_echeq) !== '')
+                                        {{-- Un numero PROVISORIO no se imprime: lo puso el sistema
+                                             para no frenar la carga del pago, no es el del banco, y
+                                             en un papel que ve el prestador pasaria por real. Sale
+                                             la linea en blanco, como cuando todavia no hay numero.
+                                             (2026-09-23) --}}
+                                        @if (trim((string) $inst?->numero_echeq) !== '' && !$inst?->numero_provisorio)
                                             {{ $inst->numero_echeq }}
                                         @else
                                             <span style="display: inline-block; min-width: 90px;
