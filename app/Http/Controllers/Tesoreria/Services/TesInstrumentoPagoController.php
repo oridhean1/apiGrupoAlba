@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Tesoreria\Services;
 
 use App\Exports\EcheqPendientesNumeroExport;
+use App\Exports\PagosAEmitirExport;
 use App\Http\Controllers\Tesoreria\Repository\TesInstrumentoPagoRepository;
 use App\Http\Controllers\Tesoreria\Repository\TestOrdenPagoRepository;
 use Illuminate\Database\QueryException;
@@ -400,6 +401,55 @@ class TesInstrumentoPagoController extends Controller
     /**
      * GET /v1/tesoreria/instrumentos-pago/pendientes-numero/excel?id_banco=&numero_opa=&id_razon=
      */
+    /**
+     * GET /v1/tesoreria/instrumentos-pago/pagos-a-emitir/excel
+     *
+     * El archivo que Pagos lleva al banco: eCheq y transferencias ya definidos —con monto y
+     * fecha— que todavía no se emitieron. Ordenado por banco emisor, para emitir en tandas.
+     *
+     * Distinto del de abajo: aquél es el de DESPUÉS, cuando el banco ya emitió y falta cargar el
+     * número. Éste es el de ANTES, y por eso no trae columna de número.
+     */
+    public function exportarExcelPagosAEmitir(Request $request)
+    {
+        try {
+            return Excel::download(
+                new PagosAEmitirExport(
+                    $this->repository,
+                    $request->query('id_banco'),
+                    $request->query('numero_opa'),
+                    $request->query('id_razon')
+                ),
+                'pagos-a-emitir.xlsx'
+            );
+        } catch (\Exception $e) {
+            Log::error('Error exportar Excel de pagos a emitir: ' . $e->getMessage());
+            return response()->json(['message' => 'Error al generar el Excel'], 500);
+        }
+    }
+
+    /**
+     * GET /v1/tesoreria/instrumentos-pago/pagos-a-emitir
+     *
+     * El mismo listado, en JSON: la pantalla lo usa para mostrar cuántos hay antes de bajar el
+     * archivo, y para avisar si no hay nada que emitir.
+     */
+    public function getPagosAEmitir(Request $request)
+    {
+        try {
+            return response()->json(
+                $this->repository->listarPagosAEmitir(
+                    $request->query('id_banco'),
+                    $request->query('numero_opa'),
+                    $request->query('id_razon')
+                )
+            );
+        } catch (\Exception $e) {
+            Log::error('Error listar pagos a emitir: ' . $e->getMessage());
+            return response()->json(['message' => 'Error al obtener los pagos a emitir'], 500);
+        }
+    }
+
     public function exportarExcelPendientes(Request $request)
     {
         try {

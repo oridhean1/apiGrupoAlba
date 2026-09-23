@@ -1254,6 +1254,8 @@ Route::group(
 
         // Endpoints del ciclo de vida del instrumento de pago (eCheq)
         Route::get('instrumentos-pago/emitidos', [App\Http\Controllers\Tesoreria\Services\TesInstrumentoPagoController::class, 'getEmitidos']);  // eCheq emitidos: acreditar o rechazar
+        Route::get('instrumentos-pago/pagos-a-emitir', [App\Http\Controllers\Tesoreria\Services\TesInstrumentoPagoController::class, 'getPagosAEmitir']);  // eCheq y transferencias definidos que faltan emitir en el banco
+        Route::get('instrumentos-pago/pagos-a-emitir/excel', [App\Http\Controllers\Tesoreria\Services\TesInstrumentoPagoController::class, 'exportarExcelPagosAEmitir']);  // El mismo listado, para llevar al banco
         Route::get('instrumentos-pago/pendientes-numero', [App\Http\Controllers\Tesoreria\Services\TesInstrumentoPagoController::class, 'getPendientesDeNumero']);  // OPs con eCheq sin numero, por banco
         Route::get('instrumentos-pago/pendientes-numero/excel', [App\Http\Controllers\Tesoreria\Services\TesInstrumentoPagoController::class, 'exportarExcelPendientes']);  // Listado a Excel
         Route::get('instrumentos-pago/pendientes-numero/pdf', [App\Http\Controllers\Tesoreria\Services\TesInstrumentoPagoController::class, 'exportarPdfPendientes']);  // Listado a PDF, por banco

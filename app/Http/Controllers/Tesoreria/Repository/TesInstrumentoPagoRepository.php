@@ -57,6 +57,9 @@ class TesInstrumentoPagoRepository
      * `tb_tes_formas_pago`: 7 = eCheq. Verificado en las DOS bases el 2026-09-03 — los catálogos
      * de formas de pago y de estado de instrumento coinciden id por id entre Alba y OSV.
      */
+    // Transferencia: no genera instrumento (la plata sale ya), pero igual hay que emitirla en el
+    // home banking, asi que entra en el listado de Pagos a emitir. (2026-09-23)
+    const FORMA_PAGO_TRANSFERENCIA = 1;
     const FORMA_PAGO_CHEQUE = 2;
     const FORMA_PAGO_ECHEQ = 7;
 
@@ -1445,6 +1448,121 @@ class TesInstrumentoPagoRepository
     }
 
     /** Estados en los que una OP sigue viva y sus pagos pueden trabajarse. */
+    /**
+     * "Pagos a emitir": lo que Pagos ya definió —monto y fecha— y todavía no se emitió en el banco.
+     *
+     * Es el Excel que se lleva al banco o al home banking para emitir en tandas, por eso sale
+     * ordenado por BANCO EMISOR. Un pago desaparece de acá en cuanto se le carga el número.
+     *
+     * Criterios, y por qué:
+     *
+     * - **Órdenes vivas** (`estadosOpaViva()`: PENDIENTE, APROBADO, EN PROCESO, PAGO PARCIAL). El
+     *   pedido dice "Pendiente o Parcialmente pagada", que en el catálogo de este sistema serían
+     *   sólo los estados 1 y 6 — pero desde que el cronograma se define al crear la orden, una
+     *   orden con pagos definidos queda en EN PROCESO (4), no en PENDIENTE. Filtrar literal dejaría
+     *   el listado casi vacío. Se toma la intención: toda orden que todavía debe plata.
+     *
+     * - **eCheq y transferencia solamente**, como pide el documento. El cheque no entra, y no es un
+     *   olvido: nace EMITIDO porque su número se conoce al librarlo (`estadoInicialDeInstrumento()`),
+     *   así que nunca está pendiente de emisión.
+     *
+     * - **Sin número cargado.** Para el eCheq eso incluye el número PROVISORIO: lo puso el sistema
+     *   para no frenar la carga del pago, no es el del banco, y ese pago sigue estando por emitir.
+     *   Para la transferencia el dato va en `num_cheque`, que es la columna genérica.
+     *
+     * - **Con fecha.** Sale del cronograma (`fecha_probable_pago`), que es donde vive de verdad:
+     *   `fecha_emision_echeq` viene nula en casi todos. Sin fecha en ninguna de las dos el pago
+     *   todavía no está definido y no corresponde llevarlo al banco.
+     */
+    public function listarPagosAEmitir($idBanco = null, $numeroOpa = null, $idRazon = null)
+    {
+        $bancoResuelto = DB::raw('COALESCE(pp.id_banco_emisor, cb.id_entidad_bancaria)');
+        $fechaResuelta = DB::raw('COALESCE(fp.fecha_probable_pago, pp.fecha_emision_echeq)');
+
+        $filas = DB::table('tb_tes_pago_parcial as pp')
+            ->join('tb_tes_pago as p', 'p.id_pago', '=', 'pp.id_pago')
+            ->join('tb_tes_orden_pago as o', 'o.id_orden_pago', '=', 'p.id_orden_pago')
+            ->leftJoin('tb_tes_fecha_probable_pago as fp', 'fp.id_fecha_probable', '=', 'pp.id_fecha_probable')
+            ->leftJoin('tb_tes_cuentas_bancarias as cb', 'cb.id_cuenta_bancaria', '=', 'pp.id_cuenta_bancaria')
+            ->leftJoin('tb_tes_entidades_bancarias as eb', 'eb.id_entidad_bancaria', '=', $bancoResuelto)
+            ->leftJoin('tb_proveedor as prov', 'prov.cod_proveedor', '=', 'o.id_proveedor')
+            ->leftJoin('tb_prestador as pres', 'pres.cod_prestador', '=', 'o.id_prestador')
+            ->leftJoin('tb_proveedor_datos_bancarios as bprov', 'bprov.cod_proveedor', '=', 'o.id_proveedor')
+            ->leftJoin('tb_datos_bancarios_prestador as bpres', 'bpres.cod_prestador', '=', 'o.id_prestador')
+            ->whereIn('o.id_estado_orden_pago', $this->estadosOpaViva())
+            ->where('p.id_estado_orden_pago', '!=', TestOrdenPagoRepository::ESTADO_OPA_RECHAZADO)
+            ->whereIn('pp.id_forma_pago', [self::FORMA_PAGO_ECHEQ, self::FORMA_PAGO_TRANSFERENCIA])
+            ->where(fn($w) => $w->whereNull('pp.id_estado_instrumento')
+                ->orWhereNotIn('pp.id_estado_instrumento', [self::RECHAZADO, self::ANULADO]))
+            ->where('pp.monto_pago', '>', 0)
+            ->whereNotNull($fechaResuelta)
+            ->where(function ($w) {
+                $w->where(fn($e) => $e->where('pp.id_forma_pago', self::FORMA_PAGO_ECHEQ)
+                    ->where(fn($x) => $x->whereNull('pp.numero_echeq')
+                        ->orWhere('pp.numero_echeq', '')
+                        ->orWhere('pp.numero_provisorio', 1)))
+                    ->orWhere(fn($t) => $t->where('pp.id_forma_pago', self::FORMA_PAGO_TRANSFERENCIA)
+                        ->where(fn($x) => $x->whereNull('pp.num_cheque')->orWhere('pp.num_cheque', '')));
+            })
+            ->when(!is_null($idBanco), fn($q) => $q->where($bancoResuelto, $idBanco))
+            ->tap(fn($q) => $this->filtrarPorOpaYRazon($q, $numeroOpa, $idRazon, 'o.num_orden_pago', 'o.id_orden_pago'))
+            ->select([
+                'pp.id_pago_parcial',
+                'o.id_orden_pago',
+                'o.num_orden_pago',
+                'o.observaciones as observaciones_opa',
+                'p.observaciones as observaciones_pago',
+                'o.id_proveedor',
+                'o.id_prestador',
+                'pp.id_forma_pago',
+                'pp.monto_pago',
+                'eb.descripcion_banco',
+                DB::raw('COALESCE(fp.fecha_probable_pago, pp.fecha_emision_echeq) as fecha_pago'),
+                'prov.cuit as proveedor_cuit',
+                'prov.razon_social as proveedor_razon_social',
+                'pres.cuit as prestador_cuit',
+                'pres.razon_social as prestador_razon_social',
+                'bprov.cbu_cuenta as proveedor_cbu',
+                'bpres.cbu_cuenta as prestador_cbu',
+            ])
+            ->orderBy('eb.descripcion_banco')
+            ->orderBy('o.num_orden_pago')
+            ->orderBy($fechaResuelta)
+            ->get();
+
+        // El LOCATARIO es la entidad del grupo que paga. Se resuelve por ORDEN y se memoiza: una
+        // OPA con tres cuotas son tres filas, y la razón social es la misma para las tres.
+        $opaRepo = new TestOrdenPagoRepository();
+        $razonPorOpa = [];
+
+        return $filas->map(function ($f) use ($opaRepo, &$razonPorOpa) {
+            if (!array_key_exists($f->id_orden_pago, $razonPorOpa)) {
+                $idRazonOpa = $opaRepo->razonSocialDeOpa($f->id_orden_pago);
+                $razonPorOpa[$f->id_orden_pago] = $idRazonOpa
+                    ? DB::table('tb_razones_sociales')->where('id_razon', $idRazonOpa)->value('razon_social')
+                    : null;
+            }
+
+            $esProveedor = !is_null($f->id_proveedor);
+            $esEcheq     = (int) $f->id_forma_pago === self::FORMA_PAGO_ECHEQ;
+
+            return (object) [
+                'num_orden_pago' => $f->num_orden_pago,
+                'locatario'      => $razonPorOpa[$f->id_orden_pago] ?: 'SIN RAZON SOCIAL',
+                'cuit'           => $esProveedor ? $f->proveedor_cuit : $f->prestador_cuit,
+                'razon_social'   => $esProveedor ? $f->proveedor_razon_social : $f->prestador_razon_social,
+                'banco'          => $f->descripcion_banco ?: 'SIN BANCO ASIGNADO',
+                'metodo_pago'    => $esEcheq ? 'ECHEQ' : 'TRANSFERENCIA',
+                // El CBU es la cuenta DESTINO y sólo aplica a la transferencia. En un eCheq no
+                // corresponde: si viniera cargado sería un dato inconsistente del origen.
+                'cbu'            => $esEcheq ? '' : (($esProveedor ? $f->proveedor_cbu : $f->prestador_cbu) ?: ''),
+                'monto'          => (float) $f->monto_pago,
+                'fecha_pago'     => $f->fecha_pago,
+                'observaciones'  => $f->observaciones_opa ?: ($f->observaciones_pago ?: ''),
+            ];
+        });
+    }
+
     private function estadosOpaViva(): array
     {
         return [
