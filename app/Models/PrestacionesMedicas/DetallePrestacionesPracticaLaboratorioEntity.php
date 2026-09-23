@@ -33,14 +33,4 @@ class DetallePrestacionesPracticaLaboratorioEntity extends Model
     {
         return $this->hasOne(PracticaMatrizEntity::class, 'id_identificador_practica', 'id_identificador_practica');
     }
-
-    // Auditoria de esta practica (tb_prestaciones_medicas_autorizadas): fecha en
-    // que Auditoria Medica la autorizo y quien firmo. Es la fecha del tramite; la
-    // de tb_internaciones_auditadas es una sola para toda la internacion y se usa
-    // como respaldo. OJO: existe un modelo espejo de este detalle en App\Models,
-    // que tambien la declara. (T-00000804)
-    public function auditoria()
-    {
-        return $this->hasOne(AuditarPrestacionesPracticaLaboratorioEntity::class, 'cod_detalle', 'cod_detalle');
-    }
 }
