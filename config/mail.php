@@ -105,6 +105,12 @@ return [
         'name' => env('MAIL_FROM_NAME', 'Example'),
     ],
 
+    // Destinatarios del aviso de traspasos de Origen que fallaron al aplicarse (R-00000352).
+    // Vacío = el error solo queda en el log y en la pestaña de traspasos con estado ERROR.
+    'notificar_movimientos_programados' => [
+        // 'responsable.afiliaciones@dominio.com',
+    ],
+
     /*
     |--------------------------------------------------------------------------
     | Markdown Mail Settings

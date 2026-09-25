@@ -8,6 +8,7 @@ use App\Mail\NotificarUsuario;
 use App\Models\afiliado\AfiliadoCertificadoEntity;
 use App\Models\afiliado\AfiliadoDetalleTipoPlanEntity;
 use App\Models\afiliado\AfiliadoEscolaridadEntity;
+use App\Models\afiliado\AfiliadoMovimientoProgramadoEntity;
 use App\Models\afiliado\AfiliadoPadronEntity;
 use App\Models\Afip\DeclaracionesJuradasModelo;
 use App\Models\Afip\TransferenciasModelo;
@@ -506,6 +507,7 @@ class PadronController extends Controller
                     ]);
                 }
 
+                $origenAnterior = $query->id_comercial_origen;
                 $query->cuil_tit = $titular->cuil_tit;
                 $query->cuil_benef = $titular->cuil_benef;
                 $query->id_tipo_documento = $titular->id_tipo_documento;
@@ -588,7 +590,7 @@ class PadronController extends Controller
                     }
                 }
                 if ($query->id_parentesco == '00') {
-                    $this->updateDetallesAfiliados($query);
+                    $this->updateDetallesAfiliados($query, $origenAnterior);
                 }
 
                 DB::commit();
@@ -1094,7 +1096,7 @@ class PadronController extends Controller
         }
     }
 
-    public function updateDetallesAfiliados($request)
+    public function updateDetallesAfiliados($request, $origenAnterior)
     {
         $Afiliados = AfiliadoPadronEntity::where('cuil_tit', $request->cuil_tit)->get();
         $relacionLaboral = RelacionLaboralModelo::where('id_padron', $request->dni)->get();
@@ -1102,8 +1104,12 @@ class PadronController extends Controller
         if ($Afiliados) {
             foreach ($Afiliados as $afiliado) {
                 if ($afiliado->id_parentesco != '00') {
-                    $afiliado->id_comercial_caja = $request->id_comercial_caja;
-                    $afiliado->id_comercial_origen = $request->id_comercial_origen;
+                    // Solo sigue al titular el familiar que estaba en su mismo origen:
+                    // uno traspasado de forma individual conserva el suyo (R-00000352, solo ALBA)
+                    if (!AfiliadoMovimientoProgramadoEntity::habilitado() || $afiliado->id_comercial_origen == $origenAnterior) {
+                        $afiliado->id_comercial_caja = $request->id_comercial_caja;
+                        $afiliado->id_comercial_origen = $request->id_comercial_origen;
+                    }
                     $afiliado->id_locatario = $request->id_locatario;
                     $afiliado->domicilio_postal = $request->domicilio_postal;
                     $afiliado->celular = $request->celular;

@@ -244,6 +244,8 @@ Route::group([
     Route::get('getPadronComercialFamiliar/{cuit_titular}', [App\Http\Controllers\PadronComercialController::class, 'getPadronComercialFamiliar']);
     Route::get('getDniPadronComercial', [App\Http\Controllers\PadronComercialController::class, 'getDniPadronComercial']);
     Route::get('getExportPadron', [App\Http\Controllers\PadronComercialController::class, 'exportPadronComercial']);
+    Route::get('getMovimientosProgramados', [App\Http\Controllers\afiliados\Services\MovimientoProgramadoController::class, 'getListarMovimientos']);
+    Route::post('saveTraspasoProgramado', [App\Http\Controllers\afiliados\Services\MovimientoProgramadoController::class, 'postSaveTraspaso']);
 });
 
 Route::group([
