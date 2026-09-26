@@ -136,6 +136,31 @@
             border: none;
         }
 
+        /* Tabla unica Comprobantes | Valores: dompdf corta por fila y repite el thead */
+        .op-table { margin-bottom: 10px; }
+        .op-table tr { page-break-inside: avoid; }
+        .op-table tr.op-card-title th {
+            background-color: #f8fafc;
+            color: #0f172a;
+            text-align: left;
+            padding: 5px 10px;
+            border-top: 1px solid #cbd5e1;
+            border-bottom: 1px solid #cbd5e1;
+        }
+        .op-table .op-l1 { border-left: 1px solid #cbd5e1; }
+        .op-table td.op-l3 { border-right: 1px solid #cbd5e1; }
+        .op-table th.op-l3 { border-right: 1px solid #cbd5e1; }
+        .modern-table tr th.sep,
+        .modern-table tr td.sep,
+        .modern-table tr.op-card-title th.sep,
+        .modern-table tr.total-row td.sep,
+        .modern-table tr.total-final-row td.sep {
+            width: 3%;
+            background-color: #ffffff;
+            border: none;
+            padding: 0;
+        }
+
         .debit-amount {
             color: #dc2626;
             font-weight: bold;
@@ -149,19 +174,23 @@
     <table class="header-container">
         <tr>
             <td width="40%" style="vertical-align: middle;">
+                @php
+                    $empresaRazonSocial = strtoupper(config('app.empresa_razon_social'));
+                    $isOsv = str_contains($empresaRazonSocial, 'VAREADORES') || str_contains($empresaRazonSocial, 'OSV');
+                    $idRazon = isset($facturas[0]) ? $facturas[0]?->detallefc?->razonSocial?->id_razon : null;
+                    [$logoArchivo, $logoAncho] = match (true) {
+                        $isOsv => ['osvsalud.png', '90px'],
+                        $idRazon == 1, $idRazon == 3 => ['alba.png', '90px'],
+                        $idRazon == 2 => ['bon_baja.jpeg', '75px'],
+                        $idRazon == 5 => ['alba.jpeg', '90px'],
+                        $idRazon == 6 => ['bene_baja.jpeg', '90px'],
+                        default => ['sembrar_baja.jpeg', '90px'],
+                    };
+                    $logoPath = storage_path('app/public/images/' . $logoArchivo);
+                @endphp
                 <div style="margin-bottom: 6px;">
-                    @if (isset($facturas[0]) && $facturas[0]->detallefc->razonSocial->id_razon == 1)
-                        <img src="{{ storage_path('app/public/images/alba.png') }}" width="90px">
-                    @elseif (isset($facturas[0]) && $facturas[0]->detallefc->razonSocial?->id_razon == 2)
-                        <img src="{{ storage_path('app/public/images/bon_baja.jpeg') }}" width="75px">
-                    @elseif (isset($facturas[0]) && $facturas[0]->detallefc->razonSocial?->id_razon == 3)
-                        <img src="{{ storage_path('app/public/images/alba.png') }}" width="90px">
-                    @elseif (isset($facturas[0]) && $facturas[0]->detallefc->razonSocial?->id_razon == 5)
-                        <img src="{{ storage_path('app/public/images/alba.jpeg') }}" width="90px">
-                    @elseif (isset($facturas[0]) && $facturas[0]->detallefc->razonSocial?->id_razon == 6)
-                        <img src="{{ storage_path('app/public/images/bene_baja.jpeg') }}" width="90px">
-                    @else
-                        <img src="{{ storage_path('app/public/images/sembrar_baja.jpeg') }}" width="90px">
+                    @if (file_exists($logoPath))
+                        <img src="{{ $logoPath }}" width="{{ $logoAncho }}">
                     @endif
                 </div>
                 <div class="font-bold text-dark" style="font-size: 12px; margin-bottom: 2px;">
@@ -218,150 +247,110 @@
         </div>
     </div>
 
-    <!-- Main Payment Data -->
-    <table style="margin-bottom: 10px;">
-        <tr>
-            <!-- Columna Izquierda: Aplicado a -->
-            <td width="48.5%" style="vertical-align: top; padding: 0;">
-                <div class="card" style="border-top: 3px solid #0f172a; margin-bottom: 0;">
-                    <div class="card-header" style="background-color: #f8fafc;">
-                        Aplicado a (Comprobantes)
+    <!-- Main Payment Data: una sola tabla (Comprobantes | Valores) para que dompdf pagine por fila -->
+    @php
+        $filasIzq = is_iterable($facturas) ? array_values(is_array($facturas) ? $facturas : collect($facturas)->all()) : [];
+        $filasDer = [];
+        if (is_iterable($pagos)) {
+            foreach ($pagos as $pagoItem) {
+                if (isset($pagoItem->pagosParciales) && is_iterable($pagoItem->pagosParciales)) {
+                    $cuota = 0;
+                    foreach ($pagoItem->pagosParciales as $pagosP) {
+                        $filasDer[] = ['tipo' => 'pago', 'pago' => $pagoItem, 'parcial' => $pagosP, 'cuota' => ++$cuota];
+                    }
+                }
+                if ($pagoItem?->id_forma_pago == 1) {
+                    $filasDer[] = ['tipo' => 'destinatario'];
+                }
+            }
+        }
+        $maxFilasTarget = max(count($filasIzq), count($filasDer), 8);
+    @endphp
+    <table class="modern-table op-table">
+        <thead>
+            <tr class="op-card-title">
+                <th colspan="3" class="op-l1 op-l3" style="border-top: 3px solid #0f172a;">Aplicado a (Comprobantes)</th>
+                <th class="sep"></th>
+                <th colspan="3" class="op-l1 op-l3" style="border-top: 3px solid #388E3C;">Valores Entregados</th>
+            </tr>
+            <tr>
+                <th width="24%" class="op-l1">Detalle</th>
+                <th width="10%">Facturas</th>
+                <th width="14.5%" class="op-l3">Importe</th>
+                <th class="sep"></th>
+                <th width="24%" class="op-l1">Detalle</th>
+                <th width="10%">Cuota</th>
+                <th width="14.5%" class="op-l3">Importe</th>
+            </tr>
+        </thead>
+        <tbody>
+            @for ($i = 0; $i < $maxFilasTarget; $i++)
+            @php
+                $item = $filasIzq[$i] ?? null;
+                $der = $filasDer[$i] ?? null;
+            @endphp
+            <tr>
+                {{-- Comprobantes --}}
+                @if ($item)
+                <td class="op-l1" style="font-size: 9px;">
+                    <strong class="text-dark">FAC{{ $item?->detallefc?->tipo_letra }} {{ $item?->detallefc?->sucursal }}-{{ str_pad($item?->detallefc?->numero, 8, '0', STR_PAD_LEFT) }}</strong><br>
+                    <span style="color: #64748b;">(LIQ Nº {{ $item?->detallefc?->num_liquidacion }})</span>
+                    @if(($item?->detallefc?->total_debitado_liquidacion ?? 0) > 0)
+                        <div style="color: #dc2626; font-size: 8.5px; margin-top: 2px;">
+                            <span class="font-bold">Débito:</span> ${{ number_format($item->detallefc->total_debitado_liquidacion, 2, ',', '.') }}
+                        </div>
+                    @endif
+                </td>
+                <td class="text-center font-bold">{{ $i + 1 }}</td>
+                <td class="op-l3 text-right font-bold text-dark">${{ number_format($item?->detallefc?->total_neto ?? 0, 2, ',', '.') }}</td>
+                @else
+                <td class="op-l1" style="height: 18px;"></td><td></td><td class="op-l3"></td>
+                @endif
+
+                <td class="sep"></td>
+
+                {{-- Valores Entregados --}}
+                @if ($der && $der['tipo'] === 'pago')
+                @php $pagosP = $der['parcial']; @endphp
+                <td class="op-l1 font-bold text-dark" style="font-size: 9px;">
+                    {{ $pagosP?->formaPago?->tipo_pago }}{{ $pagosP?->num_cheque ? ': '.$pagosP->num_cheque : '' }}<br>
+                    <span style="font-weight: normal; font-size: 8px; color: #64748b;">{{ $der['pago']->cuenta?->nombre_cuenta }}</span><br>
+                    <div style="margin-top: 3px;">
+                        <span class="font-bold" style="font-size: 8px;">Fecha de Pago:</span>
+                        <span class="text-blue" style="font-size: 8px;">{{ $pagosP?->fecha_confirma_pago }}</span>
                     </div>
-                    @php
-                        $countLeft = is_iterable($facturas) ? count($facturas) : 0;
-                        $countRight = 0;
-                        if (is_iterable($pagos)) {
-                            foreach ($pagos as $pagoItem) {
-                                if (isset($pagoItem->pagosParciales) && is_iterable($pagoItem->pagosParciales)) {
-                                    $countRight += count($pagoItem->pagosParciales) * 2;
-                                }
-                                $countRight += 3;
-                            }
-                        }
-                        $maxFilasTarget = max($countLeft, $countRight, 8);
-                    @endphp
-                    <table class="modern-table">
-                        <thead>
-                            <tr>
-                                <th width="50%">Detalle</th>
-                                <th width="20%">Facturas</th>
-                                <th width="30%">Importe</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            @php
-                                $totalFilas = 0;
-                            @endphp
-                            @foreach ($facturas as $item)
-                            <tr>
-                                <td style="font-size: 9px;">
-                                    <strong class="text-dark">FAC{{ $item?->detallefc?->tipo_letra }} {{ $item?->detallefc?->sucursal }}-{{ str_pad($item?->detallefc?->numero, 8, '0', STR_PAD_LEFT) }}</strong><br>
-                                    <span style="color: #64748b;">(LIQ Nº {{ $item?->detallefc?->num_liquidacion }})</span>
-                                    @if(($item?->detallefc?->total_debitado_liquidacion ?? 0) > 0)
-                                        <div style="color: #dc2626; font-size: 8.5px; margin-top: 2px;">
-                                            <span class="font-bold">Débito:</span> ${{ number_format($item->detallefc->total_debitado_liquidacion, 2, ',', '.') }}
-                                        </div>
-                                    @endif
-                                </td>
-                                <td class="text-center font-bold">{{ $loop->iteration }}</td>
-                                <td class="text-right font-bold text-dark">${{ number_format($item?->detallefc?->total_neto ?? 0, 2, ',', '.') }}</td>
-                            </tr>
-                            @php $totalFilas++; @endphp
-                            @endforeach
-
-                            @while ($totalFilas < $maxFilasTarget)
-                            <tr><td style="height: 18px;"></td><td></td><td></td></tr>
-                            @php $totalFilas++; @endphp
-                            @endwhile
-
-                            <tr class="total-row">
-                                <td colspan="2" class="text-right text-red">Débito:</td>
-                                <td class="text-right text-red">${{ number_format($debito ?? 0, 2, ',', '.') }}</td>
-                            </tr>
-                            <tr class="total-final-row">
-                                <td colspan="2" class="text-right">Total a Pagar:</td>
-                                <td class="text-right">${{ number_format(($total ?? 0) - ($debito ?? 0), 2, ',', '.') }}</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
-            </td>
-
-            <td width="3%"></td>
-
-            <!-- Columna Derecha: Valores -->
-            <td width="48.5%" style="vertical-align: top; padding: 0;">
-                <div class="card" style="border-top: 3px solid #388E3C; margin-bottom: 0;">
-                    <div class="card-header" style="background-color: #f8fafc;">
-                        Valores Entregados
+                </td>
+                <td class="text-center font-bold">{{ $der['cuota'] }}</td>
+                <td class="op-l3 text-right font-bold text-dark">${{ number_format($pagosP?->monto_pago ?? 0, 2, ',', '.') }}</td>
+                @elseif ($der && $der['tipo'] === 'destinatario')
+                <td colspan="3" class="op-l1 op-l3" style="background-color: #f8fafc; padding: 6px;">
+                    <div class="font-bold text-dark" style="font-size: 9px;">DESTINATARIO (DEPÓSITO/TRANSF)</div>
+                    <div style="font-size: 9px; color: #475569; margin-top: 2px;">
+                        CUIT: {{ $cuit_proveedor }} <br>
+                        CBU: {{ $cbu_proveedor }}
                     </div>
-                    <table class="modern-table">
-                        <thead>
-                            <tr>
-                                <th width="50%">Detalle</th>
-                                <th width="20%">Cuota</th>
-                                <th width="30%">Importe</th>
-                        </thead>
-                        <tbody>
-                            @php
-                                $totalFilas2 = 0;
-                            @endphp
+                </td>
+                @else
+                <td class="op-l1" style="height: 18px;"></td><td></td><td class="op-l3"></td>
+                @endif
+            </tr>
+            @endfor
 
-                            @foreach ($pagos as $item)
-                                @foreach ($item->pagosParciales as $pagosP)
-                                <tr>
-                                    <td class="font-bold text-dark" style="font-size: 9px;">
-                                       {{ $pagosP?->formaPago?->tipo_pago }}{{ $pagosP?->num_cheque ? ': '.$pagosP->num_cheque : '' }}<br>
-                                        <span style="font-weight: normal; font-size: 8px; color: #64748b;">{{ $item->cuenta?->nombre_cuenta }}</span><br>
-                                        <div style="margin-top: 3px;">
-                                            <span class="font-bold" style="font-size: 8px;">Fecha de Pago:</span> 
-                                            <span class="text-blue" style="font-size: 8px;">{{ $pagosP?->fecha_confirma_pago }}</span>
-                                        </div>
-                                    </td>
-                                    <td class="text-center font-bold">{{ $loop->iteration }}</td>
-                                    <td class="text-right font-bold text-dark">${{ number_format($pagosP?->monto_pago ?? 0, 2, ',', '.') }}</td>
-                                </tr>
-                                @php $totalFilas2++; @endphp
-                                @endforeach
-
-
-                                @if ($item?->id_forma_pago == 1)
-                                <tr>
-                                    <td colspan="3" style="background-color: #f8fafc; padding: 6px;">
-                                        <div class="font-bold text-dark" style="font-size: 9px;">DESTINATARIO (DEPÓSITO/TRANSF)</div>
-                                        <div style="font-size: 9px; color: #475569; margin-top: 2px;">
-                                            CUIT: {{ $cuit_proveedor }} <br>
-                                            CBU: {{ $cbu_proveedor }}
-                                        </div>
-                                    </td>
-                                </tr>
-                                @php $totalFilas2++; @endphp
-                                @else
-                                    @for ($i = 0; $i < 3; $i++)
-                                    <tr><td colspan="3" style="height: 18px;"></td></tr>
-                                    @endfor
-                                    @php $totalFilas2 += 3; @endphp
-                                @endif
-                            @endforeach
-
-                            @while ($totalFilas2 < $maxFilasTarget)
-                            <tr><td style="height: 18px;"></td><td></td><td></td></tr>
-                            @php $totalFilas2++; @endphp
-                            @endwhile
-
-                            <tr class="total-row">
-                                <td colspan="2" class="text-right text-red">Débito:</td>
-                                <td class="text-right text-red">${{ number_format($debito ?? 0, 2, ',', '.') }}</td>
-                            </tr>
-                            <tr class="total-final-row" style="background-color: #065933;">
-                                <td colspan="2" class="text-right" style="background-color: #065933;">Total:</td>
-                                <td class="text-right" style="background-color: #065933;">${{ number_format(($total ?? 0) - ($debito ?? 0), 2, ',', '.') }}</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
-            </td>
-        </tr>
+            <tr class="total-row">
+                <td colspan="2" class="op-l1 text-right text-red">Débito:</td>
+                <td class="op-l3 text-right text-red">${{ number_format($debito ?? 0, 2, ',', '.') }}</td>
+                <td class="sep"></td>
+                <td colspan="2" class="op-l1 text-right text-red">Débito:</td>
+                <td class="op-l3 text-right text-red">${{ number_format($debito ?? 0, 2, ',', '.') }}</td>
+            </tr>
+            <tr class="total-final-row">
+                <td colspan="2" class="text-right">Total a Pagar:</td>
+                <td class="text-right">${{ number_format(($total ?? 0) - ($debito ?? 0), 2, ',', '.') }}</td>
+                <td class="sep"></td>
+                <td colspan="2" class="text-right" style="background-color: #065933;">Total:</td>
+                <td class="text-right" style="background-color: #065933;">${{ number_format(($total ?? 0) - ($debito ?? 0), 2, ',', '.') }}</td>
+            </tr>
+        </tbody>
     </table>
 
     <!-- Footer: Observaciones y Detalle de Débitos -->
