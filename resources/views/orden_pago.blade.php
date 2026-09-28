@@ -175,18 +175,19 @@
         <tr>
             <td width="40%" style="vertical-align: middle;">
                 @php
-                    $empresaRazonSocial = strtoupper(config('app.empresa_razon_social'));
+                    $razonSocialFactura = isset($facturas[0]) ? $facturas[0]?->detallefc?->razonSocial : null;
+                    $empresaRazonSocial = strtoupper(config('app.empresa_razon_social') . ' ' . ($razonSocialFactura?->razon_social ?? ''));
                     $isOsv = str_contains($empresaRazonSocial, 'VAREADORES') || str_contains($empresaRazonSocial, 'OSV');
-                    $idRazon = isset($facturas[0]) ? $facturas[0]?->detallefc?->razonSocial?->id_razon : null;
-                    [$logoArchivo, $logoAncho] = match (true) {
-                        $isOsv => ['osvsalud.png', '90px'],
-                        $idRazon == 1, $idRazon == 3 => ['alba.png', '90px'],
-                        $idRazon == 2 => ['bon_baja.jpeg', '75px'],
-                        $idRazon == 5 => ['alba.jpeg', '90px'],
-                        $idRazon == 6 => ['bene_baja.jpeg', '90px'],
-                        default => ['sembrar_baja.jpeg', '90px'],
+                    $idRazon = $razonSocialFactura?->id_razon;
+                    // El logo de OSV va versionado en resources/assets/ (storage/app/public esta en .gitignore y no llega a prod)
+                    [$logoPath, $logoAncho] = match (true) {
+                        $isOsv => [resource_path('assets/images/osvsalud.png'), '90px'],
+                        $idRazon == 1, $idRazon == 3 => [storage_path('app/public/images/alba.png'), '90px'],
+                        $idRazon == 2 => [storage_path('app/public/images/bon_baja.jpeg'), '75px'],
+                        $idRazon == 5 => [storage_path('app/public/images/alba.jpeg'), '90px'],
+                        $idRazon == 6 => [storage_path('app/public/images/bene_baja.jpeg'), '90px'],
+                        default => [storage_path('app/public/images/sembrar_baja.jpeg'), '90px'],
                     };
-                    $logoPath = storage_path('app/public/images/' . $logoArchivo);
                 @endphp
                 <div style="margin-bottom: 6px;">
                     @if (file_exists($logoPath))
