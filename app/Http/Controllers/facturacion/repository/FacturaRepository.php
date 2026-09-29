@@ -317,8 +317,6 @@ class FacturaRepository
             return FacturacionDatosEntity::where('numero', $params->numero)
                 ->where('sucursal', $params->sucursal)
                 ->where('id_prestador', $params->id_prestador)
-                ->where('numero', $params->numero)
-                ->where('periodo', $params->periodo)
                 ->where('tipo_letra', $params->tipo_letra)
                 ->where('estado', '!=', 4)
                 ->exists();
@@ -326,8 +324,6 @@ class FacturaRepository
             return FacturacionDatosEntity::where('numero', $params->numero)
                 ->where('sucursal', $params->sucursal)
                 ->where('id_proveedor', $params->id_proveedor)
-                ->where('numero', $params->numero)
-                ->where('periodo', $params->periodo)
                 ->where('tipo_letra', $params->tipo_letra)
                 ->where('estado', '!=', 9)
                 ->exists();
