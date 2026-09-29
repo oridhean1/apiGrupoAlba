@@ -69,6 +69,9 @@ Route::group([
     Route::get('getDetallePlan/{id}', [App\Http\Controllers\PadronController::class, 'getDetalleTipoPlanPadron']);
     Route::get('getIdDetallePlan/{id}', [App\Http\Controllers\PadronController::class, 'getIdTipoPlanPadron']);
     Route::get('getExportPadron', [App\Http\Controllers\PadronController::class, 'exportPadron']);
+    Route::get('getHistoricoOrigen/{dni}', [App\Http\Controllers\afiliados\Services\HistoricoPadronController::class, 'getHistoricoOrigen']);
+    Route::get('getPeriodosFotoPadron', [App\Http\Controllers\afiliados\Services\HistoricoPadronController::class, 'getPeriodosFoto']);
+    Route::get('getExportFotoPadron', [App\Http\Controllers\afiliados\Services\HistoricoPadronController::class, 'exportFotoPadron']);
     Route::get('getUserPadron', [App\Http\Controllers\PadronController::class, 'getUserDni']);
     Route::post('postUserUpdate', [App\Http\Controllers\PadronController::class, 'postActualizarUser']);
     Route::get('getListCredencial/{estado}', [App\Http\Controllers\PadronController::class, 'getListPadroncredencial']);

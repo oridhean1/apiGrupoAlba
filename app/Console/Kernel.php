@@ -20,6 +20,9 @@ class Kernel extends ConsoleKernel
         $schedule->command('afiliados:aplicar-movimientos-programados')
             ->monthlyOn(1, '01:00')
             ->timezone('America/Argentina/Buenos_Aires');
+        $schedule->command('afiliados:foto-padron-mensual')
+            ->monthlyOn(5, '01:00')
+            ->timezone('America/Argentina/Buenos_Aires');
 
     }
 

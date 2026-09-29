@@ -76,7 +76,13 @@ class AplicarMovimientosProgramados extends Command
                     PadronComercialModelo::where('id', $comercial->id)->update($cambios);
                 }
                 if ($afiliado) {
-                    AfiliadoPadronEntity::where('id', $afiliado->id)->update($cambios);
+                    // El trigger de historico de Origen (parte 2) lee esta variable para vincular el cambio al traspaso
+                    DB::statement('SET @r352_id_movimiento = ' . (int) $alta->id);
+                    try {
+                        AfiliadoPadronEntity::where('id', $afiliado->id)->update($cambios);
+                    } finally {
+                        DB::statement('SET @r352_id_movimiento = NULL');
+                    }
                 }
 
                 AuditoriaPadronModelo::create([
