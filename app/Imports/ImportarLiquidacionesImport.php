@@ -28,7 +28,7 @@ class ImportarLiquidacionesImport implements ToCollection, WithStartRow
     {
         $codigosPracticas = $rows->pluck(2)->unique()->values()->all();
         $codigosAfiliados = $rows->pluck(0)->unique()->values()->all();
-        $codigosDebitos   = $rows->pluck(6)->merge($rows->pluck(7))->unique()->values()->all();
+        $codigosDebitos   = $rows->pluck(7)->filter()->unique()->values()->all();
 
         // 2. Traer de la BD en bloque y preparar diccionarios
         $practicas = PracticaMatrizEntity::whereIn('codigo_practica', $codigosPracticas)
@@ -58,7 +58,7 @@ class ImportarLiquidacionesImport implements ToCollection, WithStartRow
 
         foreach ($rows as $row) {
             $practica = $practicas[$row[2]] ?? null;
-            $debito   = $debitos[$row[7]] ?? $debitos[$row[6]] ?? null;
+            $debito   = $debitos[$row[7]] ?? null;
             $afiliado = $afiliados[$row[0]] ?? null;
             $costo = str_replace(['$', ','], '', $row[4]);
             $monto = ($row[5] === null || $row[5] === '') ? 0 : str_replace(['$', ','], '', $row[5]);
