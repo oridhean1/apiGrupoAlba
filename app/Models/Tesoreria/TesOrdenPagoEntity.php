@@ -41,6 +41,9 @@ class TesOrdenPagoEntity extends Model
         // Trazabilidad anulacion -> reemision. Sin esto, create() las descartaba en silencio
         // y la orden nueva nacia sin vinculo con la que reemplaza. (2026-09-03)
         'tipo_opa',
+        // La razón social propia de la orden. Solo se usa cuando NO se puede derivar de las
+        // facturas: hoy, el ANTICIPO. Ver 2026_09_25_100000.
+        'id_razon',
         'id_opa_reemplazada',
         'id_opa_anticipo'
     ];

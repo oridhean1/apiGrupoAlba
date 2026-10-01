@@ -62,7 +62,7 @@ class TesAnticipoRepository
      *
      * @param string $tipoBeneficiario 'PROVEEDOR' o 'PRESTADOR'
      */
-    public function crearAnticipo($idBeneficiario, string $tipoBeneficiario, $monto, ?string $observaciones = null): TesOrdenPagoEntity
+    public function crearAnticipo($idBeneficiario, string $tipoBeneficiario, $monto, ?string $observaciones = null, array $cuotas = [], $idRazon = null): TesOrdenPagoEntity
     {
         $tipoBeneficiario = strtoupper(trim($tipoBeneficiario));
 
@@ -76,6 +76,17 @@ class TesAnticipoRepository
 
         if (self::aCentavos($monto) <= 0) {
             throw new \Exception('El monto del anticipo tiene que ser mayor a cero.');
+        }
+
+        // La razón social es OBLIGATORIA. Un anticipo no tiene facturas de donde derivarla, y sin
+        // ella la guarda que controla de qué cuenta sale la plata no tiene contra qué comparar:
+        // se podía pagar desde la cuenta de cualquier entidad del grupo. (2026-09-25)
+        if (empty($idRazon)) {
+            throw new \Exception('Indicá la razón social que paga el anticipo.');
+        }
+
+        if (!DB::table('tb_razones_sociales')->where('id_razon', $idRazon)->exists()) {
+            throw new \Exception('La razón social indicada no existe.');
         }
 
         $anticipo = TesOrdenPagoEntity::create([
@@ -94,7 +105,20 @@ class TesAnticipoRepository
             'id_factura'           => null,
             'tipo_factura'         => $tipoBeneficiario,
             'tipo_opa'             => self::TIPO_ANTICIPO,
+            'id_razon'             => $idRazon,
         ]);
+
+        // El cronograma se define acá mismo, igual que en Generar OPA. Sin esto el anticipo nacía
+        // como una OPA suelta, sin boleta, y no aparecía en Pagos hasta pasar por "Confirmar OPA"
+        // en el Gestor: el operador lo creaba y no lo encontraba en ningún lado. (2026-09-25)
+        $cuotas = collect($cuotas)
+            ->map(fn($c) => (array) $c)
+            ->filter(fn($c) => !empty($c['fecha_probable_pago']))
+            ->values();
+
+        if ($cuotas->isNotEmpty()) {
+            $this->opaRepository->crearCronogramaDeOpa($anticipo, $cuotas->all());
+        }
 
         // El num_orden_pago lo pone el trigger: sin refresh vuelve en null.
         return $anticipo->refresh();
@@ -278,6 +302,90 @@ class TesAnticipoRepository
      *
      * Es lo que hay que mostrarle al operador cuando va a imputar facturas nuevas.
      */
+    /**
+     * Todos los anticipos, de todos los beneficiarios, para el listado de la pantalla.
+     *
+     * `anticiposConSaldo()` exige un beneficiario: sirve para el detalle de uno, no para abrir la
+     * pantalla y ver qué hay. Sin esto el operador tenía que adivinar a quién buscar. (2026-09-25)
+     *
+     * Trae **todos los vigentes**, no sólo los que tienen saldo. El motivo es concreto: un
+     * anticipo recién creado tiene saldo 0 —no genera saldo hasta que se lo PAGA por el circuito
+     * normal—, así que filtrando por saldo el operador lo crea y lo ve desaparecer. Cada fila trae
+     * su `situacion` para que la pantalla muestre en qué etapa está. Con `$soloConSaldo = true` se
+     * acota a lo aplicable.
+     */
+    public function listarAnticipos(
+        ?string $tipoBeneficiario = null,
+        ?string $texto = null,
+        bool $soloConSaldo = false
+    ): array {
+        $tipoBeneficiario = $tipoBeneficiario ? strtoupper(trim($tipoBeneficiario)) : null;
+
+        $query = TesOrdenPagoEntity::where('tipo_opa', self::TIPO_ANTICIPO)
+            ->whereNotIn('id_estado_orden_pago', [
+                TestOrdenPagoRepository::ESTADO_OPA_RECHAZADO,
+                TestOrdenPagoRepository::ESTADO_OPA_CONSUMIDA,
+            ])
+            ->with(['prestador', 'proveedor', 'estado']);
+
+        if ($tipoBeneficiario === 'PRESTADOR') {
+            $query->whereNotNull('id_prestador');
+        } elseif ($tipoBeneficiario === 'PROVEEDOR') {
+            $query->whereNotNull('id_proveedor');
+        }
+
+        // El texto busca por razón social o CUIT del beneficiario, y también por número de OPA:
+        // es lo que el operador tiene a mano cuando viene con un papel en la mano.
+        if (!empty(trim((string) $texto))) {
+            $t = '%' . trim($texto) . '%';
+
+            $query->where(function ($q) use ($t) {
+                $q->where('num_orden_pago', 'like', $t)
+                    ->orWhereHas('prestador', fn($p) => $p->where('razon_social', 'like', $t)->orWhere('cuit', 'like', $t))
+                    ->orWhereHas('proveedor', fn($p) => $p->where('razon_social', 'like', $t)->orWhere('cuit', 'like', $t));
+            });
+        }
+
+        $salida = [];
+
+        foreach ($query->orderByDesc('fecha_genera')->get() as $a) {
+            $saldo = $this->saldoDisponible($a->id_orden_pago);
+
+            if ($soloConSaldo && $saldo <= 0) {
+                continue;
+            }
+
+            // Un anticipo genera saldo recién cuando se PAGA: mientras tanto es una promesa.
+            $pagado       = $this->opaRepository->montoPagadoOpa($a->id_orden_pago) > 0.01;
+            $esPrestador  = !is_null($a->id_prestador);
+            $beneficiario = $esPrestador ? $a->prestador : $a->proveedor;
+
+            $salida[] = [
+                'id_orden_pago'      => $a->id_orden_pago,
+                'num_orden_pago'     => $a->num_orden_pago,
+                'fecha'              => $a->fecha_genera,
+                'tipo_beneficiario'  => $esPrestador ? 'PRESTADOR' : 'PROVEEDOR',
+                'id_beneficiario'    => $esPrestador ? $a->id_prestador : $a->id_proveedor,
+                'razon_social'       => $beneficiario->razon_social ?? 'SIN BENEFICIARIO',
+                'cuit'               => $beneficiario->cuit ?? '',
+                'monto'              => (float) $a->monto_orden_pago,
+                'aplicado'           => $this->totalAplicado($a->id_orden_pago),
+                'saldo'              => $saldo,
+                'id_estado_orden_pago' => (int) $a->id_estado_orden_pago,
+                'estado'             => $a->estado->descripcion_estado ?? '',
+                'pagado'             => $pagado,
+                // En qué etapa está, ya resuelto acá para que la pantalla no lo re-derive:
+                //   SIN PAGAR -> se creó pero todavía no se pagó, así que no genera saldo.
+                //   CON SALDO -> pagado y con plata para aplicar a facturas.
+                //   APLICADO  -> se aplicó todo; queda listado hasta que pase a CONSUMIDA.
+                'situacion'          => !$pagado ? 'SIN PAGAR' : ($saldo > 0.01 ? 'CON SALDO' : 'APLICADO'),
+                'observaciones'      => $a->observaciones,
+            ];
+        }
+
+        return $salida;
+    }
+
     public function anticiposConSaldo($idBeneficiario, string $tipoBeneficiario): array
     {
         $tipoBeneficiario = strtoupper(trim($tipoBeneficiario));

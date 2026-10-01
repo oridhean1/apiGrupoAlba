@@ -294,7 +294,9 @@ class TesOrdenPagoController extends Controller
     public function getCrearAnticipo(Request $request, TesAnticipoRepository $ant)
     {
         try {
-            foreach (['id_beneficiario', 'tipo_beneficiario', 'monto'] as $campo) {
+            // `id_razon` es obligatoria: sin ella no se puede validar de qué cuenta sale la plata
+            // (el anticipo no tiene facturas de donde derivarla). Ver CLAUDE.md. (2026-09-25)
+            foreach (['id_beneficiario', 'tipo_beneficiario', 'monto', 'id_razon'] as $campo) {
                 if (is_null($request->input($campo)) || $request->input($campo) === '') {
                     return response()->json(['message' => "{$campo} es requerido"], 422);
                 }
@@ -304,10 +306,16 @@ class TesOrdenPagoController extends Controller
                 $request->input('id_beneficiario'),
                 $request->input('tipo_beneficiario'),
                 $request->input('monto'),
-                $request->input('observaciones')
+                $request->input('observaciones'),
+                // Las fechas de pago, para que nazca con boleta y ya aparezca en Pagos.
+                (array) ($request->input('cuotas') ?? []),
+                $request->input('id_razon')
             );
 
-            return response()->json(['message' => "Anticipo {$a->num_orden_pago} creado", 'data' => $a], 201);
+            return response()->json([
+                'message' => "Anticipo {$a->num_orden_pago} creado",
+                'data'    => $a,
+            ], 201);
         } catch (QueryException $e) {
             Log::error('Error crear anticipo: ' . $e->getMessage());
             return response()->json(['message' => 'Error al crear el anticipo'], 500);
@@ -351,6 +359,35 @@ class TesOrdenPagoController extends Controller
     /**
      * GET /v1/tesoreria/anticipos-con-saldo?id_beneficiario=&tipo_beneficiario=
      */
+    /**
+     * GET /v1/tesoreria/anticipos?tipo_beneficiario=&texto=&solo_con_saldo=
+     *
+     * El listado de la pantalla: todos los anticipos, de todos los beneficiarios. A diferencia de
+     * `getAnticiposConSaldo`, que es el detalle de UNO y exige el id, éste se puede abrir sin
+     * saber a quién buscar — que era el problema de la pantalla. (2026-09-25)
+     */
+    public function getListarAnticipos(Request $request, TesAnticipoRepository $ant)
+    {
+        try {
+            $soloConSaldo = $request->query('solo_con_saldo');
+
+            return response()->json(
+                $ant->listarAnticipos(
+                    $request->query('tipo_beneficiario'),
+                    $request->query('texto'),
+                    // Por defecto TODOS los vigentes: un anticipo recién creado todavía no
+                    // tiene saldo (se genera al pagarlo), y filtrándolo por saldo el operador lo
+                    // crea y lo ve desaparecer. Se acota sólo si lo piden.
+                    in_array((string) $soloConSaldo, ['1', 'true', 'si'], true)
+                ),
+                200
+            );
+        } catch (\Throwable $e) {
+            Log::error('Error listar anticipos: ' . $e->getMessage());
+            return response()->json(['message' => 'Error al listar los anticipos'], 500);
+        }
+    }
+
     public function getAnticiposConSaldo(Request $request, TesAnticipoRepository $ant)
     {
         try {
@@ -559,7 +596,21 @@ class TesOrdenPagoController extends Controller
                 ->filter(fn($a) => is_null($a->id_estado_instrumento))
                 ->sum(fn($a) => (float) $a->monto_pago);
 
+        // La entidad del grupo que paga, para el membrete del comprobante.
+        //
+        // La plantilla la sacaba de `$facturas[0]->detallefc->razonSocial`, y con una orden SIN
+        // facturas —un ANTICIPO— ese `[0]` sobre una colección vacía reventaba el PDF entero con
+        // "Undefined array key 0". Ahora se resuelve acá: las facturas primero y, si no hay, la
+        // razón propia de la orden (ver 2026_09_25_100000). Reportado sobre la OPA-16580.
+        // (2026-09-25)
+        $razonEmisora = $query?->opadetalle?->first()?->detallefc?->razonSocial;
+
+        if (!$razonEmisora && !empty($query?->id_razon)) {
+            $razonEmisora = DB::table('tb_razones_sociales')->where('id_razon', $query->id_razon)->first();
+        }
+
         $datos = [
+            "razon_emisora" => $razonEmisora,
             "cuota_por_fecha" => $cuotaPorFecha,
             "monto_pagable" => round($montoPagable, 2),
             "total_entregado" => round($totalEntregado, 2),

@@ -148,6 +148,8 @@ class TestOrdenPagoRepository
             'pagoFecha.fechaprobablepagos',
             'opadetalle',
             'opadetalle.detallefc',
+            // Las facturas que pagó un ANTICIPO viven en sus aplicaciones, no en él. (2026-09-25)
+            'aplicaciones.opadetalle.detallefc',
         ])
             // Sin el select explícito, addSelect() deja la consulta con ESA sola columna.
             ->select('tb_tes_orden_pago.*')
@@ -182,7 +184,15 @@ class TestOrdenPagoRepository
             $query->where(function ($q) use ($params) {
                 $q->whereHas('opadetalle.detallefc', function ($subQuery) use ($params) {
                     $subQuery->where('tipo_factura', $params->tipo);
-                });
+                })
+                    // Una orden SIN facturas no tiene de dónde derivar el tipo, así que el
+                    // `whereHas` la dejaba afuera y desaparecía del listado al filtrar. Es el caso
+                    // del ANTICIPO: no tiene facturas por definición, pero la orden sí guarda su
+                    // `tipo_factura`. Reportado sobre la OPA-16555. (2026-09-25)
+                    ->orWhere(function ($sin) use ($params) {
+                        $sin->where('tipo_factura', $params->tipo)
+                            ->whereDoesntHave('opadetalle');
+                    });
             });
         }
 
@@ -753,7 +763,7 @@ class TestOrdenPagoRepository
      */
     public function razonesSocialesDeOpa($idOpa): array
     {
-        return DB::table('tb_tes_orden_pago_detalle as od')
+        $deFacturas = DB::table('tb_tes_orden_pago_detalle as od')
             ->join('tb_facturacion_datos as fd', 'fd.id_factura', '=', 'od.id_factura')
             ->where('od.id_orden_pago', $idOpa)
             ->whereNotNull('fd.id_locatorio')
@@ -763,6 +773,18 @@ class TestOrdenPagoRepository
             ->sort()
             ->values()
             ->all();
+
+        if (!empty($deFacturas)) {
+            return $deFacturas;
+        }
+
+        // Sin facturas de dónde derivarla, vale la razón propia de la orden. Es el caso del
+        // ANTICIPO, que por definición no tiene facturas: antes devolvía vacío y eso apagaba la
+        // guarda de cuenta bancaria, dejando pagar un anticipo desde la cuenta de cualquier razón
+        // social del grupo. Ver 2026_09_25_100000 y la regla de CLAUDE.md. (2026-09-25)
+        $propia = TesOrdenPagoEntity::where('id_orden_pago', $idOpa)->value('id_razon');
+
+        return $propia ? [(int) $propia] : [];
     }
 
     /**
@@ -1275,7 +1297,10 @@ class TestOrdenPagoRepository
      * La orden pasa a EN PROCESO: "PENDIENTE" significa "todavía no se definió cuándo se paga", y
      * eso ya se resolvió. (mismo criterio que 2026-09-05, ver sql-backfill-estado-en-proceso.md)
      */
-    private function crearCronogramaDeOpa(TesOrdenPagoEntity $opa, array $cuotas): TesPagoEntity
+    // Público desde el 2026-09-25: lo usa también el alta de ANTICIPOS, para que nazcan con su
+    // cronograma igual que las órdenes de Generar OPA. Antes el anticipo se creaba sin boleta y
+    // no aparecía en Pagos hasta pasar por "Confirmar OPA" en el Gestor.
+    public function crearCronogramaDeOpa(TesOrdenPagoEntity $opa, array $cuotas): TesPagoEntity
     {
         $boleta = TesPagoEntity::create([
             'id_orden_pago'        => $opa->id_orden_pago,

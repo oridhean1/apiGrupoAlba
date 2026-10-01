@@ -878,8 +878,16 @@ class TesInstrumentoPagoRepository
 
         $razonesOpa = $opaRepo->razonesSocialesDeOpa($idOpa);
 
+        // Sin razón social NO se deja pagar. Acá había un `return` que apagaba la guarda entera
+        // cuando faltaba el dato: un anticipo —que no tiene facturas de donde derivarla— se podía
+        // pagar desde la cuenta de cualquiera de las razones sociales del grupo. Verificado contra
+        // las 3 de Alba el 2026-09-25. Ver la regla en CLAUDE.md: una guarda que protege plata no
+        // se apaga sola, corta y dice qué falta.
         if (empty($razonesOpa)) {
-            return;
+            throw new \Exception(
+                'Esta orden no tiene razón social, así que no se puede validar de qué cuenta sale '
+                    . 'el pago. Si es un anticipo, indicá su razón social antes de pagarlo.'
+            );
         }
 
         $razonCuenta = DB::table('tb_tes_cuentas_bancarias')
@@ -1437,12 +1445,26 @@ class TesInstrumentoPagoRepository
         }
 
         if (!empty($idRazon)) {
-            $query->whereExists(function ($q) use ($idRazon, $colIdOrdenPago) {
-                $q->select(DB::raw(1))
-                    ->from('tb_tes_orden_pago_detalle as od')
-                    ->join('tb_facturacion_datos as fd', 'fd.id_factura', '=', 'od.id_factura')
-                    ->whereColumn('od.id_orden_pago', $colIdOrdenPago)
-                    ->where('fd.id_locatorio', $idRazon);
+            $query->where(function ($w) use ($idRazon, $colIdOrdenPago) {
+                $w->whereExists(function ($q) use ($idRazon, $colIdOrdenPago) {
+                    $q->select(DB::raw(1))
+                        ->from('tb_tes_orden_pago_detalle as od')
+                        ->join('tb_facturacion_datos as fd', 'fd.id_factura', '=', 'od.id_factura')
+                        ->whereColumn('od.id_orden_pago', $colIdOrdenPago)
+                        ->where('fd.id_locatorio', $idRazon);
+                })
+                    // Una orden sin facturas no tiene `id_locatorio` de dónde derivar la razón,
+                    // así que quedaba fuera de TODOS los filtros por razón social: aparecía sin
+                    // filtro y desaparecía al filtrar. Es el caso del ANTICIPO, que lleva su razón
+                    // en la orden misma (ver 2026_09_25_100000). En "Pagos a emitir" eso
+                    // significaba que el archivo filtrado que va al banco se comía el anticipo.
+                    // (2026-09-25)
+                    ->orWhereExists(function ($q) use ($idRazon, $colIdOrdenPago) {
+                        $q->select(DB::raw(1))
+                            ->from('tb_tes_orden_pago as opr')
+                            ->whereColumn('opr.id_orden_pago', $colIdOrdenPago)
+                            ->where('opr.id_razon', $idRazon);
+                    });
             });
         }
     }

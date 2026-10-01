@@ -150,26 +150,30 @@
         <tr>
             <td width="40%" style="vertical-align: middle;">
                 <div style="margin-bottom: 6px;">
-                    @if (isset($facturas[0]) && $facturas[0]->detallefc->razonSocial->id_razon == 1)
+                    {{-- `razon_emisora` la resuelve el controller: de las facturas y, si la orden
+                         no tiene, de su propia razon social. Antes esto leia `$facturas[0]` y con
+                         una orden sin facturas —un anticipo— el PDF moria con "Undefined array
+                         key 0": el `?->` no salva, porque falla el acceso al indice. (2026-09-25) --}}
+                    @if (($razon_emisora?->id_razon ?? null) == 1)
                         <img src="{{ storage_path('app/public/images/alba.png') }}" width="90px">
-                    @elseif (isset($facturas[0]) && $facturas[0]->detallefc->razonSocial?->id_razon == 2)
+                    @elseif (($razon_emisora?->id_razon ?? null) == 2)
                         <img src="{{ storage_path('app/public/images/bon_baja.jpeg') }}" width="75px">
-                    @elseif (isset($facturas[0]) && $facturas[0]->detallefc->razonSocial?->id_razon == 3)
+                    @elseif (($razon_emisora?->id_razon ?? null) == 3)
                         <img src="{{ storage_path('app/public/images/alba.png') }}" width="90px">
-                    @elseif (isset($facturas[0]) && $facturas[0]->detallefc->razonSocial?->id_razon == 5)
+                    @elseif (($razon_emisora?->id_razon ?? null) == 5)
                         <img src="{{ storage_path('app/public/images/alba.jpeg') }}" width="90px">
-                    @elseif (isset($facturas[0]) && $facturas[0]->detallefc->razonSocial?->id_razon == 6)
+                    @elseif (($razon_emisora?->id_razon ?? null) == 6)
                         <img src="{{ storage_path('app/public/images/bene_baja.jpeg') }}" width="90px">
                     @else
                         <img src="{{ storage_path('app/public/images/sembrar_baja.jpeg') }}" width="90px">
                     @endif
                 </div>
                 <div class="font-bold text-dark" style="font-size: 12px; margin-bottom: 2px;">
-                    {{ $facturas[0]?->detallefc->razonSocial?->razon_social ?? 'Empresa' }}
+                    {{ $razon_emisora?->razon_social ?? 'Empresa' }}
                 </div>
                 <div style="color: #64748b; font-size: 9px;">
-                    IVA: {{ $facturas[0]?->detallefc->razonSocial?->iva }} <br>
-                    Domicilio: {{ $facturas[0]?->detallefc->razonSocial?->domicilio }}
+                    IVA: {{ $razon_emisora?->iva }} <br>
+                    Domicilio: {{ $razon_emisora?->domicilio }}
                 </div>
             </td>
 
@@ -187,7 +191,7 @@
                 </div>
                 <div style="color: #475569; line-height: 1.4; font-size: 9px;">
                     <span class="font-bold text-dark">Emisión:</span> {{ $fecha_emision }} <br>
-                    <span class="font-bold text-dark">CUIT:</span> {{ $facturas[0]?->detallefc->razonSocial?->cuit }} <br>
+                    <span class="font-bold text-dark">CUIT:</span> {{ $razon_emisora?->cuit }} <br>
                     <span class="font-bold text-dark">Ingresos Brutos:</span> Exento <br>
                     <span class="font-bold text-dark">Inic. Actividades:</span> 01/11/2007
                 </div>

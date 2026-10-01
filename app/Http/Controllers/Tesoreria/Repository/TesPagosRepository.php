@@ -219,8 +219,25 @@ class TesPagosRepository
             });
         }
 
-        // $jquery->orderBy('id_estado_orden_pago', 'asc');
-        $jquery->orderBy('fecha_probable_pago');
+        // Orden: por la fecha en que se paga, de la más próxima a la más lejana. Es el orden de
+        // trabajo — lo que vence primero, primero.
+        //
+        // Ordenaba por `tb_tes_pago.fecha_probable_pago`, que para las boletas del circuito nuevo
+        // viene SIEMPRE en NULL: desde que el cronograma se define al crear la orden, las fechas
+        // se escriben en `tb_tes_fecha_probable_pago` y esa columna quedó sin llenarse. Resultado:
+        // el orden no ordenaba y lo recién cargado caía al fondo del listado, en la última página.
+        // Reportado porque un anticipo recién pagado "no aparecía". (2026-09-25)
+        //
+        // Se toma la primera fecha del cronograma y, si la boleta no tiene, la columna vieja o la
+        // fecha de registro — así ninguna queda sin criterio y ninguna se va al fondo por NULL.
+        $jquery->orderByRaw(
+            'COALESCE('
+                . '(SELECT MIN(fp.fecha_probable_pago) FROM tb_tes_fecha_probable_pago fp'
+                . '  WHERE fp.id_pago = tb_tes_pago.id_pago),'
+                . ' tb_tes_pago.fecha_probable_pago,'
+                . ' DATE(tb_tes_pago.fecha_registra)'
+            . ') ASC'
+        );
 
         $boletas = $jquery->get();
 
