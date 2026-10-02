@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Tesoreria\Repository;
 
+use App\Http\Controllers\Tesoreria\Repository\FacturasOpaRepository;
 use App\Models\Tesoreria\TesOrdenPagoDetalleEntity;
 use App\Models\Tesoreria\TesOrdenPagoEntity;
 use Carbon\Carbon;
@@ -211,13 +212,72 @@ class TesAnticipoRepository
 
             // Una factura no puede recibir saldo si ya está imputada en una OP viva: sería
             // pagarla dos veces. Se chequea antes de crear nada.
-            foreach ($lineas as $l) {
-                $vigente = $this->opaRepository->findByOpaVigenteFactura($l['id_factura']);
+            // Cada factura tiene que estar verificada. Se valida acá y no sólo en el listado: el
+            // listado es comodidad, la guarda es esta. Ver la regla de CLAUDE.md. (2026-10-01)
+            if (empty($anticipo->id_razon)) {
+                throw new \Exception(
+                    "El anticipo {$anticipo->num_orden_pago} no tiene razón social: no se puede "
+                        . 'validar a qué facturas corresponde. Cargásela antes de aplicarlo.'
+                );
+            }
 
-                if (!is_null($vigente)) {
+            $estadoQueHabilita = $this->estadoQueHabilita((string) $anticipo->tipo_factura);
+            $exigido = $estadoQueHabilita === FacturasOpaRepository::ESTADO_FACTURA_PROVEEDOR_CONFIRMADA
+                ? 'confirmada' : 'en Valorización Final';
+
+            foreach ($lineas as $l) {
+                $fact = DB::table('tb_facturacion_datos')->where('id_factura', $l['id_factura'])->first();
+
+                if (is_null($fact)) {
+                    throw new \Exception("No se encontró la factura {$l['id_factura']}.");
+                }
+
+                if ((int) $fact->estado !== $estadoQueHabilita) {
                     throw new \Exception(
-                        "La factura {$l['id_factura']} ya está en la orden de pago "
-                        . "{$vigente->num_orden_pago}: no se le puede aplicar el anticipo."
+                        "La factura {$fact->numero} no está {$exigido}: no se le puede aplicar el anticipo."
+                    );
+                }
+
+                // La factura tiene que ser de la MISMA razón social que el anticipo. Antes no se
+                // miraba: un anticipo de GRUPO ALBA se aplicó a la factura 126 de MEDICINA del
+                // mismo prestador. Plata de una entidad pagando deuda de otra. (2026-10-01)
+                if ((int) $fact->id_locatorio !== (int) $anticipo->id_razon) {
+                    throw new \Exception(
+                        "La factura {$fact->numero} es de otra razón social que el anticipo: "
+                            . 'no se puede pagar deuda de una entidad con plata de otra.'
+                    );
+                }
+            }
+
+            // Lo que se aplica a cada factura no puede pasarse de lo que le QUEDA por pagar.
+            //
+            // Antes se rechazaba cualquier factura que estuviera en una OPA viva. Protegía contra
+            // pagarla dos veces, pero de más: la propia aplicación de un anticipo es una OPA viva,
+            // así que una factura aplicada a medias quedaba bloqueada para siempre y su remanente
+            // no se podía cubrir nunca. Reportado sobre la factura 123 de ZENTRUM: $1.000, $500
+            // aplicados, y no volvía a aparecer. (2026-10-01)
+            //
+            // `saldoImputableFactura()` es el mismo cálculo que usa Generar OPA: neto − débito −
+            // lo ya imputado en OPAs vivas. Una factura imputada completa en otra orden tiene saldo
+            // 0 y sigue sin poder recibir anticipo, que es la protección que importaba.
+            $saldos = new FacturasOpaRepository();
+            $porFactura = [];
+
+            foreach ($lineas as $l) {
+                $porFactura[$l['id_factura']] = ($porFactura[$l['id_factura']] ?? 0)
+                    + self::aCentavos($l['monto']);
+            }
+
+            foreach ($porFactura as $idFactura => $centavos) {
+                $saldo = self::aCentavos($saldos->saldoImputableFactura($idFactura));
+
+                if ($centavos > $saldo) {
+                    $num = DB::table('tb_facturacion_datos')->where('id_factura', $idFactura)->value('numero');
+
+                    throw new \Exception(
+                        "A la factura {$num} le quedan $" . number_format(self::aPesos($saldo), 2, ',', '.')
+                            . ' por pagar: no se le pueden aplicar $'
+                            . number_format(self::aPesos($centavos), 2, ',', '.') . '.'
                     );
                 }
             }
@@ -321,11 +381,11 @@ class TesAnticipoRepository
     ): array {
         $tipoBeneficiario = $tipoBeneficiario ? strtoupper(trim($tipoBeneficiario)) : null;
 
+        // Las CONSUMIDAS también: se excluían, y un anticipo agotado desaparecía de la grilla sin
+        // forma de abrir su detalle para ver a dónde fue la plata. Con "solo con saldo" quedan
+        // afuera solas, porque su saldo es 0. (2026-10-01)
         $query = TesOrdenPagoEntity::where('tipo_opa', self::TIPO_ANTICIPO)
-            ->whereNotIn('id_estado_orden_pago', [
-                TestOrdenPagoRepository::ESTADO_OPA_RECHAZADO,
-                TestOrdenPagoRepository::ESTADO_OPA_CONSUMIDA,
-            ])
+            ->where('id_estado_orden_pago', '!=', TestOrdenPagoRepository::ESTADO_OPA_RECHAZADO)
             ->with(['prestador', 'proveedor', 'estado']);
 
         if ($tipoBeneficiario === 'PRESTADOR') {
@@ -374,16 +434,124 @@ class TesAnticipoRepository
                 'id_estado_orden_pago' => (int) $a->id_estado_orden_pago,
                 'estado'             => $a->estado->descripcion_estado ?? '',
                 'pagado'             => $pagado,
-                // En qué etapa está, ya resuelto acá para que la pantalla no lo re-derive:
-                //   SIN PAGAR -> se creó pero todavía no se pagó, así que no genera saldo.
-                //   CON SALDO -> pagado y con plata para aplicar a facturas.
-                //   APLICADO  -> se aplicó todo; queda listado hasta que pase a CONSUMIDA.
-                'situacion'          => !$pagado ? 'SIN PAGAR' : ($saldo > 0.01 ? 'CON SALDO' : 'APLICADO'),
+                // En qué etapa está, resuelto en un solo lugar: ver situacionDe().
+                'situacion'          => self::situacionDe($pagado, $this->totalAplicado($a->id_orden_pago), $saldo),
                 'observaciones'      => $a->observaciones,
             ];
         }
 
         return $salida;
+    }
+
+    /**
+     * En qué etapa está un anticipo, con los nombres que acordó el área (doc UX/UI de Anticipos,
+     * 2026-10-01). Un solo lugar para que el listado y el detalle digan lo mismo.
+     *
+     *   SIN PAGAR              -> se creó pero no se pagó: no genera saldo todavía.
+     *   DISPONIBLE             -> pagado y sin aplicar nada.
+     *   PARCIALMENTE APLICADO  -> se aplicó una parte; el resto queda para futuras aplicaciones.
+     *   CONSUMIDA              -> se aplicó todo. Mismo nombre que el estado 7 de la OPA.
+     */
+    public static function situacionDe(bool $pagado, float $aplicado, float $saldo): string
+    {
+        if (!$pagado) {
+            return 'SIN PAGAR';
+        }
+
+        if ($saldo <= 0.01) {
+            return 'CONSUMIDA';
+        }
+
+        return $aplicado > 0.01 ? 'PARCIALMENTE APLICADO' : 'DISPONIBLE';
+    }
+
+    /**
+     * Detalle de un anticipo: cabecera, historial de aplicaciones y evolución del saldo.
+     *
+     * Es el punto 5 del doc UX/UI: la trazabilidad de cómo se fue consumiendo cada anticipo —qué
+     * facturas cubrió, en qué OP de aplicación, por qué monto y cuándo—. Los datos ya existían:
+     * cada aplicación es una OPA hija (`id_opa_anticipo`) con sus facturas en el detalle.
+     *
+     * El historial va **por factura**, no por aplicación: una misma OP de aplicación puede cubrir
+     * varias facturas, y lo que Finanzas quiere ver es cada factura cubierta.
+     *
+     * La evolución arranca en lo PAGADO, no en el monto del anticipo: el saldo es lo pagado menos
+     * lo aplicado, así que un anticipo pagado a medias no puede mostrar como disponible un monto
+     * que nunca salió del banco.
+     */
+    public function detalleAnticipo($idAnticipo): array
+    {
+        $a = TesOrdenPagoEntity::with(['prestador', 'proveedor', 'estado'])->find($idAnticipo);
+
+        if (is_null($a) || $a->tipo_opa !== self::TIPO_ANTICIPO) {
+            throw new \Exception('La orden indicada no es un anticipo.');
+        }
+
+        $esPrestador  = !is_null($a->id_prestador);
+        $beneficiario = $esPrestador ? $a->prestador : $a->proveedor;
+
+        $pagadoMonto = (float) $this->opaRepository->montoPagadoOpa($a->id_orden_pago);
+        $pagado      = $pagadoMonto > 0.01;
+        $aplicado    = $this->totalAplicado($a->id_orden_pago);
+        $saldo       = $this->saldoDisponible($a->id_orden_pago);
+
+        $aplicaciones = TesOrdenPagoEntity::where('id_opa_anticipo', $a->id_orden_pago)
+            ->where('tipo_opa', self::TIPO_APLICACION)
+            ->where('id_estado_orden_pago', '!=', TestOrdenPagoRepository::ESTADO_OPA_RECHAZADO)
+            ->with(['opadetalle.detallefc'])
+            ->orderBy('fecha_genera')
+            ->orderBy('id_orden_pago')
+            ->get();
+
+        $historial = [];
+        $evolucion = [[
+            'fecha'   => $a->fecha_genera,
+            'saldo'   => round($pagadoMonto, 2),
+            'detalle' => $pagado ? 'Saldo inicial (lo pagado)' : 'Todavía sin pagar',
+        ]];
+
+        $corriente = self::aCentavos($pagadoMonto);
+
+        foreach ($aplicaciones as $ap) {
+            foreach ($ap->opadetalle as $d) {
+                $corriente -= self::aCentavos($d->monto_factura);
+
+                $historial[] = [
+                    'fecha'           => $ap->fecha_genera,
+                    'num_aplicacion'  => $ap->num_orden_pago,
+                    'id_aplicacion'   => $ap->id_orden_pago,
+                    'factura'         => $d->detallefc->numero ?? ('#' . $d->id_factura),
+                    'monto_aplicado'  => (float) $d->monto_factura,
+                    'saldo_posterior' => self::aPesos(max(0, $corriente)),
+                ];
+            }
+
+            // Un punto por APLICACIÓN, no por factura: es lo que el operador reconoce como un
+            // movimiento ("luego de la aplicación OPA-xxxx").
+            $evolucion[] = [
+                'fecha'   => $ap->fecha_genera,
+                'saldo'   => self::aPesos(max(0, $corriente)),
+                'detalle' => 'Luego de la aplicación ' . $ap->num_orden_pago,
+            ];
+        }
+
+        return [
+            'id_orden_pago'     => $a->id_orden_pago,
+            'num_orden_pago'    => $a->num_orden_pago,
+            'fecha'             => $a->fecha_genera,
+            'tipo_beneficiario' => $esPrestador ? 'PRESTADOR' : 'PROVEEDOR',
+            'id_beneficiario'   => $esPrestador ? $a->id_prestador : $a->id_proveedor,
+            'razon_social'      => $beneficiario->razon_social ?? 'SIN BENEFICIARIO',
+            'cuit'              => $beneficiario->cuit ?? '',
+            'monto'             => (float) $a->monto_orden_pago,
+            'pagado'            => round($pagadoMonto, 2),
+            'aplicado'          => round($aplicado, 2),
+            'saldo'             => round($saldo, 2),
+            'situacion'         => self::situacionDe($pagado, $aplicado, $saldo),
+            'observaciones'     => $a->observaciones,
+            'historial'         => $historial,
+            'evolucion'         => $evolucion,
+        ];
     }
 
     public function anticiposConSaldo($idBeneficiario, string $tipoBeneficiario): array
@@ -433,35 +601,88 @@ class TesAnticipoRepository
      *
      * Devuelve el saldo de cada una para poder proponer el monto a aplicar.
      */
-    public function facturasAplicables($idBeneficiario, string $tipoBeneficiario): array
+    /**
+     * El estado en que una factura queda habilitada para pagarse. El MISMO criterio que Generar
+     * OPA (`procesarOpaAgrupada`): una factura que no está verificada no se paga, venga por una
+     * orden normal o por la aplicación de un anticipo.
+     *
+     * La columna `estado` usa dos catálogos: para prestador el 3 es Valorización Final; para
+     * proveedor el equivalente es el 1 (CONFIRMADA), que no pasa por liquidación.
+     *
+     * Hasta el 2026-10-01 el anticipo ofrecía y aceptaba cualquier factura no anulada: se podía
+     * imputar saldo a facturas que todavía no estaban listas para pagarse. Medido sobre SANTE
+     * MEDICINA: las 35 que se ofrecían estaban en estado 0, ninguna en VF.
+     */
+    private function estadoQueHabilita(string $tipoBeneficiario): int
+    {
+        return strtoupper(trim($tipoBeneficiario)) === 'PROVEEDOR'
+            ? FacturasOpaRepository::ESTADO_FACTURA_PROVEEDOR_CONFIRMADA
+            : FacturasOpaRepository::ESTADO_FACTURA_VALORIZACION_FINAL;
+    }
+
+    /**
+     * Facturas a las que se le puede aplicar ESTE anticipo.
+     *
+     * Beneficiario y razón social salen del anticipo mismo, no del front: así la pantalla no puede
+     * pedir facturas de otra entidad. Sin razón social corta — ver la regla de CLAUDE.md: una
+     * guarda que protege plata no se apaga sola cuando le falta el dato. (2026-10-01)
+     */
+    public function facturasAplicablesDeAnticipo($idAnticipo): array
+    {
+        $a = TesOrdenPagoEntity::find($idAnticipo);
+
+        if (is_null($a) || $a->tipo_opa !== self::TIPO_ANTICIPO) {
+            throw new \Exception('La orden indicada no es un anticipo.');
+        }
+
+        if (empty($a->id_razon)) {
+            throw new \Exception(
+                "El anticipo {$a->num_orden_pago} no tiene razón social: no se puede saber a qué "
+                    . 'facturas corresponde aplicarlo. Cargásela antes de aplicarlo.'
+            );
+        }
+
+        $esPrestador = !is_null($a->id_prestador);
+
+        return $this->facturasAplicables(
+            $esPrestador ? $a->id_prestador : $a->id_proveedor,
+            $esPrestador ? 'PRESTADOR' : 'PROVEEDOR',
+            $a->id_razon
+        );
+    }
+
+    public function facturasAplicables($idBeneficiario, string $tipoBeneficiario, $idRazon = null): array
     {
         $tipoBeneficiario = strtoupper(trim($tipoBeneficiario));
         $campo = $tipoBeneficiario === 'PROVEEDOR' ? 'id_proveedor' : 'id_prestador';
 
         $facturas = DB::table('tb_facturacion_datos as f')
             ->where("f.{$campo}", $idBeneficiario)
-            ->where('f.estado', '!=', 4)
+            // Solo las verificadas: VF para prestador, CONFIRMADA para proveedor. Antes era
+            // `estado != 4` (no anulada), mas laxo que Generar OPA. (2026-10-01)
+            ->where('f.estado', $this->estadoQueHabilita($tipoBeneficiario))
+            // De la MISMA razón social que el anticipo: la plata de una entidad del grupo no paga
+            // facturas de otra. Antes no se filtraba y un anticipo de GRUPO ALBA ofrecía —y
+            // aplicaba— facturas de MEDICINA del mismo prestador. (2026-10-01)
+            ->when(!empty($idRazon), fn($q) => $q->where('f.id_locatorio', $idRazon))
             ->where('f.total_neto', '>', 0)
-            ->whereNotExists(function ($sub) {
-                $sub->select(DB::raw(1))
-                    ->from('tb_tes_orden_pago_detalle as d')
-                    ->join('tb_tes_orden_pago as o', 'o.id_orden_pago', '=', 'd.id_orden_pago')
-                    ->whereColumn('d.id_factura', 'f.id_factura')
-                    ->where('o.id_estado_orden_pago', '!=', TestOrdenPagoRepository::ESTADO_OPA_RECHAZADO);
-            })
+            // Ya NO se excluyen las facturas que están en alguna OPA viva: eso dejaba afuera para
+            // siempre a una factura aplicada a medias (la propia aplicación es una OPA viva). El
+            // criterio ahora es el saldo que le QUEDA, el mismo de Generar OPA. Una factura que
+            // otra orden ya cubre completa queda con saldo 0 y sale del listado igual. (2026-10-01)
             ->select([
                 'f.id_factura', 'f.numero', 'f.periodo', 'f.fecha_comprobante', 'f.estado',
                 'f.total_neto', 'f.total_debitado_liquidacion',
             ])
             ->orderBy('f.fecha_comprobante')
             ->orderBy('f.id_factura')
-            ->limit(200)
             ->get();
 
-        return $facturas->map(function ($f) {
-            $saldo = self::aPesos(
-                self::aCentavos($f->total_neto) - self::aCentavos($f->total_debitado_liquidacion ?? 0)
-            );
+        $saldos = new FacturasOpaRepository();
+
+        return $facturas->map(function ($f) use ($saldos) {
+            $pagable = $saldos->pagableFactura($f);
+            $saldo   = $saldos->saldoImputableFactura($f->id_factura);
 
             return [
                 'id_factura'        => $f->id_factura,
@@ -470,9 +691,17 @@ class TesAnticipoRepository
                 'fecha_comprobante' => $f->fecha_comprobante,
                 'estado'            => $f->estado,
                 'total_neto'        => (float) $f->total_neto,
+                // Lo que ya tiene cubierto, para que la pantalla muestre que es un remanente.
+                'ya_imputado'       => round(max(0, $pagable - $saldo), 2),
                 'saldo'             => $saldo,
             ];
-        })->filter(fn($f) => $f['saldo'] > 0)->values()->all();
+        })
+            ->filter(fn($f) => $f['saldo'] > 0)
+            // El tope va DESPUÉS de filtrar: aplicado antes, las facturas ya cubiertas ocupaban
+            // los lugares y las que tenían saldo podían no entrar.
+            ->take(200)
+            ->values()
+            ->all();
     }
 
     /** Saldo a favor total de un beneficiario, sumando todos sus anticipos vivos. */

@@ -225,12 +225,243 @@ class TesCuentaCorrienteRepository
             ->all();
     }
 
+    /**
+     * Movimientos con DOS saldos en paralelo: económico y financiero. (doc "Cuenta corriente del
+     * proveedor — saldo económico y saldo financiero", Micaela, 2026-10-01)
+     *
+     *   - ECONÓMICO: baja apenas el pago se imputa a la factura, aunque el eCheq todavía no se haya
+     *     hecho efectivo. Es la deuda "en los papeles".
+     *   - FINANCIERO: baja recién cuando la plata sale del banco. Para una transferencia es al
+     *     confirmarla; para un cheque/eCheq, cuando se ACREDITA. Mientras el eCheq figura emitido, el
+     *     saldo financiero queda congelado.
+     *
+     * No hizo falta el campo nuevo que proponía el doc (`fecha_acreditación_real`): ya existe, es
+     * `tb_tes_pago_parcial.fecha_confirma_pago`, y SOLO lo completa `marcarAcreditado()` — es decir,
+     * el criterio conservador que pide el doc: no se asume la acreditación en la fecha pactada.
+     *
+     * Un renglón por PAGO (abono), no un cobro agregado por factura: es lo que permite ver qué eCheq
+     * está emitido y cuál ya salió del banco. Las aplicaciones de anticipo bajan los dos saldos a
+     * la vez: la plata salió del banco cuando se pagó el anticipo.
+     *
+     * Un eCheq rechazado o anulado no aparece (sólo abonos vivos): su imputación se revierte, y los
+     * dos saldos vuelven juntos — el criterio del doc ante un rechazo.
+     */
+    public function movimientosDosSaldos($idBeneficiario, string $tipo, ?string $desde = null, ?string $hasta = null): array
+    {
+        $facturas = $this->facturasConDeuda($idBeneficiario, $tipo, $desde, $hasta);
+        $idsFacturas = $facturas->pluck('id_factura')->all();
+        $filas = [];
+
+        foreach ($facturas as $f) {
+            $filas[] = [
+                'fecha'            => substr((string) $f->fecha_comprobante, 0, 10),
+                'orden'            => 0,
+                'tipo'             => 'FACTURA',
+                'comprobante'      => 'Factura ' . $f->numero,
+                'periodo'          => $f->periodo,
+                'debe'             => self::aPesos(self::aCentavos($f->total_neto) - self::aCentavos($f->total_debitado_liquidacion ?? 0)),
+                'haber'            => 0.0,
+                'baja_economico'   => false,
+                'baja_financiero'  => false,
+                'fecha_pactada'    => null,
+                'fecha_acreditada' => null,
+                'estado'           => null,
+            ];
+        }
+
+        // Órdenes que imputan facturas de este beneficiario, con cuánto imputa cada una a ESTAS
+        // facturas: si el período deja afuera otras facturas de la misma orden, sus pagos no se
+        // pueden contar enteros.
+        $imputadoPorOpa = empty($idsFacturas) ? collect() : DB::table('tb_tes_opa_factura as pf')
+            ->join('tb_tes_orden_pago as o', 'o.id_orden_pago', '=', 'pf.id_orden_pago')
+            ->whereIn('pf.id_factura', $idsFacturas)
+            ->where('o.id_estado_orden_pago', '!=', TestOrdenPagoRepository::ESTADO_OPA_RECHAZADO)
+            ->groupBy('o.id_orden_pago', 'o.num_orden_pago', 'o.tipo_opa', 'o.fecha_genera')
+            ->select('o.id_orden_pago', 'o.num_orden_pago', 'o.tipo_opa', 'o.fecha_genera',
+                DB::raw('SUM(pf.monto_aplicado) as imputado'))
+            ->get();
+
+        $enCuenta = array_flip($idsFacturas);
+
+        foreach ($imputadoPorOpa as $op) {
+            $tope = self::aCentavos($op->imputado);
+
+            // Los pagos de la orden recorren sus facturas en el MISMO orden que el FIFO
+            // (`facturasOrdenadas`). Si la orden tiene facturas que no entran en esta cuenta
+            // —anuladas, fuera del período—, la parte del pago que el FIFO les asigna a ellas no
+            // baja esta deuda. Antes se topeaba por orden y no por factura: el prestador 128 de
+            // Alba (OPA-1225, número duplicado) daba $23.854,18 de menos. (2026-10-02)
+            $cola = [];
+            foreach ($this->fifo->facturasOrdenadas($op->id_orden_pago) as $fo) {
+                $cola[] = [self::aCentavos($fo->monto_aplicado), isset($enCuenta[$fo->id_factura])];
+            }
+            $consumir = function (int $centavos) use (&$cola): int {
+                $enEsta = 0;
+                while ($centavos > 0 && !empty($cola)) {
+                    $toma = min($centavos, $cola[0][0]);
+                    if ($cola[0][1]) { $enEsta += $toma; }
+                    $cola[0][0] -= $toma;
+                    $centavos -= $toma;
+                    if ($cola[0][0] <= 0) { array_shift($cola); }
+                }
+                return $enEsta;
+            };
+
+            if ($op->tipo_opa === TesAnticipoRepository::TIPO_APLICACION) {
+                $filas[] = [
+                    'fecha'            => substr((string) $op->fecha_genera, 0, 10),
+                    'orden'            => 1,
+                    'tipo'             => 'APLICACION',
+                    'comprobante'      => $op->num_orden_pago . ' — aplicación de anticipo',
+                    'periodo'          => null,
+                    'debe'             => 0.0,
+                    'haber'            => self::aPesos($tope),
+                    'baja_economico'   => true,
+                    'baja_financiero'  => true,
+                    'fecha_pactada'    => null,
+                    'fecha_acreditada' => null,
+                    'estado'           => 'APLICADO',
+                ];
+                continue;
+            }
+
+            $boletas = DB::table('tb_tes_pago')
+                ->where('id_orden_pago', $op->id_orden_pago)
+                ->where('id_estado_orden_pago', '!=', TestOrdenPagoRepository::ESTADO_OPA_RECHAZADO)
+                ->get();
+
+            foreach ($boletas as $b) {
+                $abonos = DB::table('tb_tes_pago_parcial as pp')
+                    ->leftJoin('tb_tes_fecha_probable_pago as fp', 'fp.id_fecha_probable', '=', 'pp.id_fecha_probable')
+                    ->leftJoin('tb_tes_formas_pago as fo', 'fo.id_forma_pago', '=', 'pp.id_forma_pago')
+                    ->leftJoin('tb_tes_estado_instrumento as ei', 'ei.id_estado_instrumento', '=', 'pp.id_estado_instrumento')
+                    ->where('pp.id_pago', $b->id_pago)
+                    ->where(fn($w) => $w->whereNull('pp.id_estado_instrumento')
+                        ->orWhereNotIn('pp.id_estado_instrumento', [
+                            TesInstrumentoPagoRepository::RECHAZADO,
+                            TesInstrumentoPagoRepository::ANULADO,
+                        ]))
+                    ->select('pp.*', 'fp.fecha_probable_pago', 'fo.tipo_pago', 'ei.descripcion_estado')
+                    ->orderBy('pp.id_pago_parcial')
+                    ->get();
+
+                if ($abonos->isEmpty()) {
+                    // Pago viejo, anterior al detalle por abono: la boleta confirmada es el pago.
+                    $confirmada = (int) $b->id_estado_orden_pago === TestOrdenPagoRepository::ESTADO_OPA_PAGADO
+                        || !is_null($b->fecha_confirma_pago);
+
+                    if (!$confirmada) {
+                        continue;
+                    }
+
+                    $monto = $consumir(self::aCentavos($b->monto_pago ?? $b->monto_opa ?? 0));
+                    if ($monto <= 0) {
+                        continue;
+                    }
+
+                    $filas[] = [
+                        'fecha'            => substr((string) ($b->fecha_confirma_pago ?? $b->fecha_registra), 0, 10),
+                        'orden'            => 1,
+                        'tipo'             => 'PAGO',
+                        'comprobante'      => $op->num_orden_pago . ' — pago',
+                        'periodo'          => null,
+                        'debe'             => 0.0,
+                        'haber'            => self::aPesos($monto),
+                        'baja_economico'   => true,
+                        'baja_financiero'  => true,
+                        'fecha_pactada'    => null,
+                        'fecha_acreditada' => substr((string) ($b->fecha_confirma_pago ?? ''), 0, 10) ?: null,
+                        'estado'           => 'PAGADO',
+                    ];
+                    continue;
+                }
+
+                foreach ($abonos as $a) {
+
+                    $esInstrumento = !is_null($a->id_estado_instrumento);
+                    // Económico: el pago está imputado en cuanto entró en un pago confirmado (o,
+                    // para los abonos viejos, en cuanto tiene fecha de cobro).
+                    $imputado = !is_null($a->fecha_confirmado_en_pago) || !is_null($a->fecha_confirma_pago);
+                    // Financiero: la plata salió del banco. Para un instrumento eso es acreditarlo.
+                    $salio = !is_null($a->fecha_confirma_pago);
+
+                    if (!$imputado) {
+                        continue;   // borrador: todavía no se imputó a nada
+                    }
+
+                    $monto = $consumir(self::aCentavos($a->monto_pago));
+                    if ($monto <= 0) {
+                        continue;   // todo este pago cae en facturas de fuera de esta cuenta
+                    }
+
+                    $numero = trim((string) ($a->numero_echeq ?: $a->num_cheque));
+                    $detalle = $op->num_orden_pago . ' — ' . ($a->tipo_pago ?: 'Pago')
+                        . ($numero !== '' && !$a->numero_provisorio ? ' ' . $numero : '');
+
+                    $filas[] = [
+                        'fecha'            => substr((string) ($a->fecha_confirmado_en_pago ?? $a->fecha_confirma_pago ?? $a->fecha_registra), 0, 10),
+                        'orden'            => 1,
+                        'tipo'             => $esInstrumento ? 'INSTRUMENTO' : 'PAGO',
+                        'comprobante'      => $detalle,
+                        'periodo'          => null,
+                        'debe'             => 0.0,
+                        'haber'            => self::aPesos($monto),
+                        'baja_economico'   => true,
+                        'baja_financiero'  => $salio,
+                        'fecha_pactada'    => $esInstrumento
+                            ? substr((string) ($a->fecha_probable_pago ?? $a->fecha_emision_echeq ?? ''), 0, 10) ?: null
+                            : null,
+                        'fecha_acreditada' => $salio ? substr((string) $a->fecha_confirma_pago, 0, 10) : null,
+                        'estado'           => $esInstrumento ? ($a->descripcion_estado ?: 'EMITIDO') : 'PAGADO',
+                    ];
+                }
+            }
+        }
+
+        // Cronológico; a igual fecha, la factura antes que sus pagos.
+        usort($filas, fn($x, $y) => [$x['fecha'], $x['orden']] <=> [$y['fecha'], $y['orden']]);
+
+        $economico = 0;
+        $financiero = 0;
+
+        foreach ($filas as &$m) {
+            $debe  = self::aCentavos($m['debe']);
+            $haber = self::aCentavos($m['haber']);
+
+            $economico  += $debe - ($m['baja_economico'] ? $haber : 0);
+            $financiero += $debe - ($m['baja_financiero'] ? $haber : 0);
+
+            $m['saldo_economico']  = self::aPesos($economico);
+            $m['saldo_financiero'] = self::aPesos($financiero);
+            // Compatibilidad: `saldo` era el saldo de la vista vieja, que era la financiera, y la
+            // pantalla lee el texto en `detalle`.
+            $m['saldo'] = $m['saldo_financiero'];
+            $m['detalle'] = $m['comprobante'];
+            unset($m['orden']);
+        }
+        unset($m);
+
+        return $filas;
+    }
+
     /** Cuenta corriente completa: resumen, movimientos y anticipos con saldo. */
     public function cuentaCorriente($idBeneficiario, string $tipo, ?string $desde = null, ?string $hasta = null): array
     {
+        $movimientos = $this->movimientosDosSaldos($idBeneficiario, $tipo, $desde, $hasta);
+        $resumen = $this->resumen($idBeneficiario, $tipo, $desde, $hasta);
+        $ultimo = end($movimientos) ?: null;
+
+        // Los dos saldos al cierre. El financiero coincide con `deuda_pendiente` (verificado contra
+        // el FIFO en 766 beneficiarios de las dos bases); la diferencia con el económico es lo que
+        // está en eCheq emitidos todavía no debitados.
+        $resumen['saldo_economico']  = $ultimo['saldo_economico'] ?? 0.0;
+        $resumen['saldo_financiero'] = $ultimo['saldo_financiero'] ?? 0.0;
+        $resumen['en_echeq_emitidos'] = round($resumen['saldo_financiero'] - $resumen['saldo_economico'], 2);
+
         return [
-            'resumen'     => $this->resumen($idBeneficiario, $tipo, $desde, $hasta),
-            'movimientos' => $this->movimientos($idBeneficiario, $tipo, $desde, $hasta),
+            'resumen'     => $resumen,
+            // Un renglón por pago, con saldo económico y financiero (ver movimientosDosSaldos).
+            'movimientos' => $movimientos,
             'anticipos'   => $this->anticipos->anticiposConSaldo($idBeneficiario, $tipo),
         ];
     }

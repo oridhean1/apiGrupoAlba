@@ -388,6 +388,22 @@ class TesOrdenPagoController extends Controller
         }
     }
 
+    /**
+     * GET /v1/tesoreria/anticipos/{id}/detalle
+     *
+     * Cabecera, historial de aplicaciones y evolución del saldo de un anticipo. Es el punto 5 del
+     * doc UX/UI: la trazabilidad de cómo se fue consumiendo. (2026-10-01)
+     */
+    public function getDetalleAnticipo($id, TesAnticipoRepository $ant)
+    {
+        try {
+            return response()->json($ant->detalleAnticipo($id), 200);
+        } catch (\Throwable $e) {
+            Log::error('Error detalle de anticipo: ' . $e->getMessage());
+            return response()->json(['message' => $e->getMessage()], 422);
+        }
+    }
+
     public function getAnticiposConSaldo(Request $request, TesAnticipoRepository $ant)
     {
         try {
@@ -467,17 +483,19 @@ class TesOrdenPagoController extends Controller
     public function getFacturasAplicables(Request $request, TesAnticipoRepository $ant)
     {
         try {
-            $id   = $request->query('id_beneficiario');
-            $tipo = $request->query('tipo_beneficiario');
+            // Se pide por ANTICIPO: el backend saca de ahí beneficiario y razón social, así la
+            // pantalla no puede pedir facturas de otra entidad del grupo. Por beneficiario solo,
+            // un anticipo de GRUPO ALBA ofrecía facturas de MEDICINA. (2026-10-01)
+            $idAnticipo = $request->query('id_anticipo');
 
-            if (!$id || !$tipo) {
-                return response()->json(['message' => 'id_beneficiario y tipo_beneficiario son requeridos'], 422);
+            if (!$idAnticipo) {
+                return response()->json(['message' => 'id_anticipo es requerido'], 422);
             }
 
-            return response()->json($ant->facturasAplicables($id, $tipo), 200);
+            return response()->json($ant->facturasAplicablesDeAnticipo($idAnticipo), 200);
         } catch (\Throwable $e) {
             Log::error('Error listar facturas aplicables: ' . $e->getMessage());
-            return response()->json(['message' => 'Error al listar las facturas'], 500);
+            return response()->json(['message' => $e->getMessage()], 422);
         }
     }
 

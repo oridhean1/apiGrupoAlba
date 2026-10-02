@@ -1196,7 +1196,8 @@ Route::group(
         Route::get('cuenta-corriente-beneficiarios', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getBeneficiariosCuentaCorriente']);  // Buscador de beneficiarios
         Route::get('cuenta-corriente', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getCuentaCorriente']);  // Cuenta corriente del prestador/proveedor
         Route::get('anticipos-facturas-aplicables', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getFacturasAplicables']);  // Facturas candidatas a recibir anticipo
-        Route::get('anticipos', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getListarAnticipos']);  // Listado de anticipos de todos los beneficiarios
+        Route::get('anticipos', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getListarAnticipos']);
+        Route::get('anticipos/{id}/detalle', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getDetalleAnticipo']);  // Historial y evolucion del saldo  // Listado de anticipos de todos los beneficiarios
         Route::get('anticipos-con-saldo', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getAnticiposConSaldo']);  // Saldo a favor de un beneficiario
         Route::post('anticipos', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getCrearAnticipo']);  // Anticipo: OP sin facturas
         Route::post('anticipos/aplicar', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getAplicarAnticipo']);  // Aplica saldo a facturas
