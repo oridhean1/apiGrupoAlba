@@ -30,6 +30,81 @@ class TesCuentaCorrienteRepository
 {
     const ESTADO_FACTURA_ANULADA            = 4;
 
+    /*
+     * Con qué fecha se ubica cada movimiento en la línea de tiempo (minuta con el cliente,
+     * 2026-10-05). Un solo rango de fechas con un selector, en vez de tres pares de fechas:
+     *
+     *   recepcion   (por defecto) facturas por `fecha_registra` —cuando entraron al sistema—,
+     *                             pagos por la fecha en que se imputaron.
+     *   comprobante               facturas por la fecha del comprobante, pagos igual que arriba.
+     *   emision_opa               facturas por recepción, pagos por la fecha de EMISIÓN de su OPA.
+     */
+    const CRITERIO_RECEPCION   = 'recepcion';
+    const CRITERIO_COMPROBANTE = 'comprobante';
+    const CRITERIO_EMISION_OPA = 'emision_opa';
+
+    private static function criterioValido(?string $criterio): string
+    {
+        return in_array($criterio, [self::CRITERIO_RECEPCION, self::CRITERIO_COMPROBANTE, self::CRITERIO_EMISION_OPA], true)
+            ? $criterio
+            : self::CRITERIO_RECEPCION;
+    }
+
+    /**
+     * Recorta los movimientos al período y resume todo lo anterior en un renglón SALDO ANTERIOR.
+     *
+     * Los saldos se calculan ANTES de recortar, sobre la historia completa: así el saldo de cada
+     * renglón del período es la deuda real a esa fecha, no un acumulado que arranca en cero.
+     * Lo posterior a `hasta` no se muestra.
+     */
+    private static function aplicarPeriodo(array $filas, ?string $desde, ?string $hasta): array
+    {
+        if (empty($desde) && empty($hasta)) {
+            return $filas;
+        }
+
+        $anteriores = [];
+        $enPeriodo = [];
+
+        foreach ($filas as $f) {
+            if (!empty($desde) && $f['fecha'] < $desde) {
+                $anteriores[] = $f;
+            } elseif (empty($hasta) || $f['fecha'] <= $hasta) {
+                $enPeriodo[] = $f;
+            }
+        }
+
+        if (empty($anteriores)) {
+            return $enPeriodo;
+        }
+
+        $ultimo = end($anteriores);
+
+        array_unshift($enPeriodo, [
+            'fecha'            => $desde,
+            'tipo'             => 'SALDO_ANTERIOR',
+            'comprobante'      => 'Saldo anterior al período',
+            'detalle'          => 'Saldo anterior al período',
+            'periodo'          => null,
+            'debe'             => 0.0,
+            'haber'            => 0.0,
+            'baja_economico'   => false,
+            'baja_financiero'  => false,
+            'fecha_pactada'    => null,
+            'fecha_acreditada' => null,
+            'estado'           => null,
+            'saldo_economico'  => $ultimo['saldo_economico'],
+            'saldo_financiero' => $ultimo['saldo_financiero'],
+            'saldo'            => $ultimo['saldo_financiero'],
+            'movimientos_resumidos' => count($anteriores),
+            'id_orden_pago'    => null,
+            'num_orden_pago'   => null,
+            'facturas'         => [],
+        ]);
+
+        return $enPeriodo;
+    }
+
     private $fifo;
     private $anticipos;
 
@@ -67,6 +142,9 @@ class TesCuentaCorrienteRepository
             ->select([
                 'f.id_factura', 'f.numero', 'f.periodo', 'f.fecha_comprobante', 'f.estado',
                 'f.total_neto', 'f.total_debitado_liquidacion',
+                // Fecha de RECEPCION: cuando la factura entro al sistema. Es el criterio por
+                // defecto de la cuenta corriente (minuta con el cliente, 2026-10-05).
+                'f.fecha_registra',
             ])
             ->orderBy('f.fecha_comprobante')
             ->orderBy('f.id_factura')
@@ -246,17 +324,33 @@ class TesCuentaCorrienteRepository
      * Un eCheq rechazado o anulado no aparece (sólo abonos vivos): su imputación se revierte, y los
      * dos saldos vuelven juntos — el criterio del doc ante un rechazo.
      */
-    public function movimientosDosSaldos($idBeneficiario, string $tipo, ?string $desde = null, ?string $hasta = null): array
-    {
-        $facturas = $this->facturasConDeuda($idBeneficiario, $tipo, $desde, $hasta);
+    public function movimientosDosSaldos(
+        $idBeneficiario,
+        string $tipo,
+        ?string $desde = null,
+        ?string $hasta = null,
+        string $criterio = self::CRITERIO_RECEPCION
+    ): array {
+        // Se traen TODAS las facturas: el período no se aplica acá sino al final, sobre los
+        // movimientos ya ordenados, para poder armar el SALDO ANTERIOR. Filtrar acá hacía que el
+        // saldo arrancara de cero en cada período y no mostrara la deuda real.
+        $facturas = $this->facturasConDeuda($idBeneficiario, $tipo);
+        $criterio = self::criterioValido($criterio);
         $idsFacturas = $facturas->pluck('id_factura')->all();
         $filas = [];
 
         foreach ($facturas as $f) {
             $filas[] = [
-                'fecha'            => substr((string) $f->fecha_comprobante, 0, 10),
+                'fecha'            => substr((string) ($criterio === self::CRITERIO_COMPROBANTE
+                    ? $f->fecha_comprobante
+                    : ($f->fecha_registra ?? $f->fecha_comprobante)), 0, 10),
                 'orden'            => 0,
                 'tipo'             => 'FACTURA',
+                'id_orden_pago'    => null,
+                'num_orden_pago'   => null,
+                'facturas'         => [],
+                'fecha_comprobante' => substr((string) $f->fecha_comprobante, 0, 10),
+                'fecha_recepcion'   => substr((string) ($f->fecha_registra ?? ''), 0, 10) ?: null,
                 'comprobante'      => 'Factura ' . $f->numero,
                 'periodo'          => $f->periodo,
                 'debe'             => self::aPesos(self::aCentavos($f->total_neto) - self::aCentavos($f->total_debitado_liquidacion ?? 0)),
@@ -276,8 +370,8 @@ class TesCuentaCorrienteRepository
             ->join('tb_tes_orden_pago as o', 'o.id_orden_pago', '=', 'pf.id_orden_pago')
             ->whereIn('pf.id_factura', $idsFacturas)
             ->where('o.id_estado_orden_pago', '!=', TestOrdenPagoRepository::ESTADO_OPA_RECHAZADO)
-            ->groupBy('o.id_orden_pago', 'o.num_orden_pago', 'o.tipo_opa', 'o.fecha_genera')
-            ->select('o.id_orden_pago', 'o.num_orden_pago', 'o.tipo_opa', 'o.fecha_genera',
+            ->groupBy('o.id_orden_pago', 'o.num_orden_pago', 'o.tipo_opa', 'o.fecha_genera', 'o.fecha_emision')
+            ->select('o.id_orden_pago', 'o.num_orden_pago', 'o.tipo_opa', 'o.fecha_genera', 'o.fecha_emision',
                 DB::raw('SUM(pf.monto_aplicado) as imputado'))
             ->get();
 
@@ -293,13 +387,23 @@ class TesCuentaCorrienteRepository
             // Alba (OPA-1225, número duplicado) daba $23.854,18 de menos. (2026-10-02)
             $cola = [];
             foreach ($this->fifo->facturasOrdenadas($op->id_orden_pago) as $fo) {
-                $cola[] = [self::aCentavos($fo->monto_aplicado), isset($enCuenta[$fo->id_factura])];
+                $cola[] = [self::aCentavos($fo->monto_aplicado), isset($enCuenta[$fo->id_factura]), $fo->id_factura, $fo->numero];
             }
-            $consumir = function (int $centavos) use (&$cola): int {
+
+            // Qué facturas canceló el ÚLTIMO pago consumido, y por cuánto. Es el mismo recorrido
+            // FIFO que baja los saldos, así que la factura que se nombra es exactamente la que ese
+            // pago cubrió — no "las facturas de la OPA". Lo usan el desplegable de la pantalla y la
+            // exportación. (pedido del cliente, 2026-10-05)
+            $desglose = [];
+            $consumir = function (int $centavos) use (&$cola, &$desglose): int {
                 $enEsta = 0;
+                $desglose = [];
                 while ($centavos > 0 && !empty($cola)) {
                     $toma = min($centavos, $cola[0][0]);
-                    if ($cola[0][1]) { $enEsta += $toma; }
+                    if ($cola[0][1]) {
+                        $enEsta += $toma;
+                        $desglose[] = ['id_factura' => $cola[0][2], 'numero' => $cola[0][3], 'monto' => self::aPesos($toma)];
+                    }
                     $cola[0][0] -= $toma;
                     $centavos -= $toma;
                     if ($cola[0][0] <= 0) { array_shift($cola); }
@@ -309,9 +413,17 @@ class TesCuentaCorrienteRepository
 
             if ($op->tipo_opa === TesAnticipoRepository::TIPO_APLICACION) {
                 $filas[] = [
-                    'fecha'            => substr((string) $op->fecha_genera, 0, 10),
+                    'fecha'            => substr((string) ($criterio === self::CRITERIO_EMISION_OPA
+                        ? ($op->fecha_emision ?? $op->fecha_genera)
+                        : $op->fecha_genera), 0, 10),
                     'orden'            => 1,
                     'tipo'             => 'APLICACION',
+                    'id_orden_pago'    => $op->id_orden_pago,
+                    'num_orden_pago'   => $op->num_orden_pago,
+                    'facturas'         => array_values(array_map(
+                        fn($c) => ['id_factura' => $c[2], 'numero' => $c[3], 'monto' => self::aPesos($c[0])],
+                        array_filter($cola, fn($c) => $c[1] && $c[0] > 0)
+                    )),
                     'comprobante'      => $op->num_orden_pago . ' — aplicación de anticipo',
                     'periodo'          => null,
                     'debe'             => 0.0,
@@ -360,9 +472,14 @@ class TesCuentaCorrienteRepository
                     }
 
                     $filas[] = [
-                        'fecha'            => substr((string) ($b->fecha_confirma_pago ?? $b->fecha_registra), 0, 10),
+                        'fecha'            => substr((string) ($criterio === self::CRITERIO_EMISION_OPA
+                            ? ($op->fecha_emision ?? $op->fecha_genera)
+                            : ($b->fecha_confirma_pago ?? $b->fecha_registra)), 0, 10),
                         'orden'            => 1,
                         'tipo'             => 'PAGO',
+                        'id_orden_pago'    => $op->id_orden_pago,
+                        'num_orden_pago'   => $op->num_orden_pago,
+                        'facturas'         => $desglose,
                         'comprobante'      => $op->num_orden_pago . ' — pago',
                         'periodo'          => null,
                         'debe'             => 0.0,
@@ -399,9 +516,14 @@ class TesCuentaCorrienteRepository
                         . ($numero !== '' && !$a->numero_provisorio ? ' ' . $numero : '');
 
                     $filas[] = [
-                        'fecha'            => substr((string) ($a->fecha_confirmado_en_pago ?? $a->fecha_confirma_pago ?? $a->fecha_registra), 0, 10),
+                        'fecha'            => substr((string) ($criterio === self::CRITERIO_EMISION_OPA
+                            ? ($op->fecha_emision ?? $op->fecha_genera)
+                            : ($a->fecha_confirmado_en_pago ?? $a->fecha_confirma_pago ?? $a->fecha_registra)), 0, 10),
                         'orden'            => 1,
                         'tipo'             => $esInstrumento ? 'INSTRUMENTO' : 'PAGO',
+                        'id_orden_pago'    => $op->id_orden_pago,
+                        'num_orden_pago'   => $op->num_orden_pago,
+                        'facturas'         => $desglose,
                         'comprobante'      => $detalle,
                         'periodo'          => null,
                         'debe'             => 0.0,
@@ -441,15 +563,31 @@ class TesCuentaCorrienteRepository
         }
         unset($m);
 
-        return $filas;
+        return self::aplicarPeriodo($filas, $desde, $hasta);
     }
 
     /** Cuenta corriente completa: resumen, movimientos y anticipos con saldo. */
-    public function cuentaCorriente($idBeneficiario, string $tipo, ?string $desde = null, ?string $hasta = null): array
-    {
-        $movimientos = $this->movimientosDosSaldos($idBeneficiario, $tipo, $desde, $hasta);
-        $resumen = $this->resumen($idBeneficiario, $tipo, $desde, $hasta);
+    public function cuentaCorriente(
+        $idBeneficiario,
+        string $tipo,
+        ?string $desde = null,
+        ?string $hasta = null,
+        ?string $criterio = null
+    ): array {
+        $criterio = self::criterioValido($criterio);
+        $movimientos = $this->movimientosDosSaldos($idBeneficiario, $tipo, $desde, $hasta, $criterio);
+        // El resumen general es de la historia completa; lo del período sale de los movimientos.
+        $resumen = $this->resumen($idBeneficiario, $tipo);
         $ultimo = end($movimientos) ?: null;
+
+        // Facturado y facturas DEL PERÍODO, según el criterio elegido. Sin período, coincide con
+        // el total. El renglón de saldo anterior no cuenta.
+        $facturasPeriodo = array_filter($movimientos, fn($m) => $m['tipo'] === 'FACTURA');
+        $resumen['total_facturado']   = round(array_sum(array_column($facturasPeriodo, 'debe')), 2);
+        $resumen['cantidad_facturas'] = count($facturasPeriodo);
+        $resumen['criterio']          = $criterio;
+        $resumen['desde']             = $desde;
+        $resumen['hasta']             = $hasta;
 
         // Los dos saldos al cierre. El financiero coincide con `deuda_pendiente` (verificado contra
         // el FIFO en 766 beneficiarios de las dos bases); la diferencia con el económico es lo que
@@ -457,6 +595,8 @@ class TesCuentaCorrienteRepository
         $resumen['saldo_economico']  = $ultimo['saldo_economico'] ?? 0.0;
         $resumen['saldo_financiero'] = $ultimo['saldo_financiero'] ?? 0.0;
         $resumen['en_echeq_emitidos'] = round($resumen['saldo_financiero'] - $resumen['saldo_economico'], 2);
+        // Neto = lo que se debe al cierre del período, menos lo que hay a favor en anticipos.
+        $resumen['saldo_neto'] = round($resumen['saldo_financiero'] - $resumen['anticipos_disponibles'], 2);
 
         return [
             'resumen'     => $resumen,

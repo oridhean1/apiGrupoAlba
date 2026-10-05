@@ -1195,6 +1195,7 @@ Route::group(
         Route::put('opa/{idOpa}/cronograma', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getEditarCronograma']);  // Corrige las fechas de una OPA sin pagos cargados
         Route::get('cuenta-corriente-beneficiarios', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getBeneficiariosCuentaCorriente']);  // Buscador de beneficiarios
         Route::get('cuenta-corriente', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getCuentaCorriente']);  // Cuenta corriente del prestador/proveedor
+        Route::get('cuenta-corriente/excel', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'exportCuentaCorriente']);  // Export con un saldo (economico|financiero)
         Route::get('anticipos-facturas-aplicables', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getFacturasAplicables']);  // Facturas candidatas a recibir anticipo
         Route::get('anticipos', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getListarAnticipos']);
         Route::get('anticipos/{id}/detalle', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getDetalleAnticipo']);  // Historial y evolucion del saldo  // Listado de anticipos de todos los beneficiarios

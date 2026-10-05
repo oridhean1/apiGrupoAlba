@@ -440,12 +440,50 @@ class TesOrdenPagoController extends Controller
             }
 
             return response()->json(
-                $cc->cuentaCorriente($id, $tipo, $request->query('desde'), $request->query('hasta')),
+                $cc->cuentaCorriente(
+                    $id,
+                    $tipo,
+                    $request->query('desde'),
+                    $request->query('hasta'),
+                    // recepcion (por defecto) | comprobante | emision_opa
+                    $request->query('criterio')
+                ),
                 200
             );
         } catch (\Throwable $e) {
             Log::error('Error obtener cuenta corriente: ' . $e->getMessage());
             return response()->json(['message' => 'Error al obtener la cuenta corriente'], 500);
+        }
+    }
+
+    /**
+     * GET /v1/tesoreria/cuenta-corriente/excel?id_beneficiario=&tipo_beneficiario=&desde=&hasta=&criterio=&saldo=
+     *
+     * La cuenta corriente a Excel con UN saldo: `saldo=economico` (por defecto) o `financiero`.
+     * Mismos filtros que la pantalla; cada pago nombra las facturas que canceló.
+     */
+    public function exportCuentaCorriente(Request $request, TesCuentaCorrienteRepository $cc)
+    {
+        $id   = $request->query('id_beneficiario');
+        $tipo = $request->query('tipo_beneficiario');
+
+        if (!$id || !$tipo) {
+            return response()->json(['message' => 'id_beneficiario y tipo_beneficiario son requeridos'], 422);
+        }
+
+        try {
+            $saldo = $request->query('saldo') === 'financiero' ? 'financiero' : 'economico';
+
+            return Excel::download(
+                new \App\Exports\CuentaCorrienteExport(
+                    $cc, $id, $tipo, $request->query('desde'), $request->query('hasta'),
+                    $request->query('criterio'), $saldo
+                ),
+                "cuenta-corriente-{$id}-{$saldo}.xlsx"
+            );
+        } catch (\Throwable $e) {
+            Log::error('Error exportar cuenta corriente: ' . $e->getMessage());
+            return response()->json(['message' => 'Error al exportar la cuenta corriente'], 500);
         }
     }
 
