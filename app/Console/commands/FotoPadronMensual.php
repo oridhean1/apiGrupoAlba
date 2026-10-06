@@ -11,7 +11,8 @@ use Illuminate\Support\Facades\Schema;
 /**
  * Foto mensual del padrón (R-00000352, parte 2, solo ALBA).
  * Copia el estado actual de tb_padron a tb_padron_foto_mensual para el período indicado (por defecto el mes en curso).
- * Corre el día 5 de cada mes a la 1:00 (ver Kernel). Si la foto del período ya existe no la vuelve a generar.
+ * Corre el último día de cada mes a las 23:50 (ver Kernel), así la foto refleja el cierre del mes.
+ * Si la foto del período ya existe no la vuelve a generar.
  */
 class FotoPadronMensual extends Command
 {
