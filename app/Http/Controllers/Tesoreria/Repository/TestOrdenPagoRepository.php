@@ -180,20 +180,12 @@ class TestOrdenPagoRepository
                     ->orWhere('pn.numero_provisorio', 1))
                 ->selectRaw('count(*)')]);
 
-        if (!is_null($params->tipo)) {
-            $query->where(function ($q) use ($params) {
-                $q->whereHas('opadetalle.detallefc', function ($subQuery) use ($params) {
-                    $subQuery->where('tipo_factura', $params->tipo);
-                })
-                    // Una orden SIN facturas no tiene de dónde derivar el tipo, así que el
-                    // `whereHas` la dejaba afuera y desaparecía del listado al filtrar. Es el caso
-                    // del ANTICIPO: no tiene facturas por definición, pero la orden sí guarda su
-                    // `tipo_factura`. Reportado sobre la OPA-16555. (2026-09-25)
-                    ->orWhere(function ($sin) use ($params) {
-                        $sin->where('tipo_factura', $params->tipo)
-                            ->whereDoesntHave('opadetalle');
-                    });
-            });
+        // Por el tipo de la ORDEN, que es lo que muestra la grilla. Antes se derivaba de las facturas
+        // y dejaba afuera a las órdenes sin facturas (anticipos), con un parche para ese caso; desde
+        // que `tipo_factura` de la orden quedó corregido (sql-fix-tipo-factura-opa.md) es la fuente.
+        // (2026-10-06)
+        if (!empty($params->tipo)) {
+            $query->where('tb_tes_orden_pago.tipo_factura', $params->tipo);
         }
 
         if (!is_null($params->estado)) {
@@ -204,24 +196,45 @@ class TestOrdenPagoRepository
             $query->whereBetween('monto_orden_pago', [$params->monto_desde, $params->monto_hasta]);
         }
 
-        if (!is_null($params->desde) && !is_null($params->hasta)) {
-            $query->whereBetween(DB::raw('DATE(fecha_genera)'), [$params->desde, $params->hasta]);
+        // Fechas: cada extremo por separado (antes, sin "hasta" el filtro se ignoraba entero). Y si
+        // se busca una orden puntual —por N° de OPA o de factura— las fechas NO se aplican: la
+        // pantalla trae por defecto los últimos 20 días, y una orden vieja "no aparecía" aunque el
+        // número fuera correcto. (2026-10-06)
+        $buscaPuntual = !empty($params->num_orden_pago) || !empty($params->n_factura);
+        if (!$buscaPuntual && !empty($params->desde)) {
+            $query->whereDate('fecha_genera', '>=', $params->desde);
+        }
+        if (!$buscaPuntual && !empty($params->hasta)) {
+            $query->whereDate('fecha_genera', '<=', $params->hasta);
         }
 
-        if (!is_null($params->beneficiario)) {
-            $query->where(function ($q) use ($params) {
-                $q->whereHas('proveedor', function ($subQuery) use ($params) {
-                    $subQuery->where('razon_social', 'LIKE', "{$params->beneficiario}%");
-                })->orWhereHas('prestador', function ($subQuery) use ($params) {
-                    $subQuery->where('razon_social', 'LIKE', "{$params->beneficiario}%");
+        // Por razón social (cualquier parte, no solo el comienzo) o por CUIT. Antes era solo
+        // "empieza con" sobre la razón social: el CUIT no encontraba nada. (2026-10-06)
+        $beneficiario = trim((string) ($params->beneficiario ?? ''));
+        if ($beneficiario !== '') {
+            $cuit = preg_replace('/\D/', '', $beneficiario);
+            $porNombreOCuit = function ($sub) use ($beneficiario, $cuit) {
+                $sub->where(function ($w) use ($beneficiario, $cuit) {
+                    $w->where('razon_social', 'LIKE', "%{$beneficiario}%");
+                    if (strlen($cuit) >= 5) {
+                        $w->orWhere('cuit', 'LIKE', "%{$cuit}%");
+                    }
                 });
+            };
+            $query->where(function ($q) use ($porNombreOCuit) {
+                $q->whereHas('proveedor', $porNombreOCuit)->orWhereHas('prestador', $porNombreOCuit);
             });
         }
 
-        if (!is_null($params->id_locatorio)) {
+        // Razón social: la de sus facturas o, si no tiene (ANTICIPO), la propia de la orden.
+        // Antes solo miraba las facturas y los anticipos desaparecían al filtrar. (2026-10-06)
+        if (!empty($params->id_locatorio)) {
             $query->where(function ($q) use ($params) {
                 $q->whereHas('opadetalle.detallefc', function ($subQuery) use ($params) {
                     $subQuery->where('id_locatorio', $params->id_locatorio);
+                })->orWhere(function ($sin) use ($params) {
+                    $sin->whereDoesntHave('opadetalle')
+                        ->where('tb_tes_orden_pago.id_razon', $params->id_locatorio);
                 });
             });
         }

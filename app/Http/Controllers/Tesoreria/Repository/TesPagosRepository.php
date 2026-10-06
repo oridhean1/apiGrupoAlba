@@ -143,18 +143,33 @@ class TesPagosRepository
 
         $jquery->where('tipo_factura', $tipoFactura);
 
+        // Por nombre o por CUIT (antes solo nombre: el CUIT no encontraba nada). (2026-10-06)
         if (!empty($params->beneficiario)) {
-            $jquery->whereHas("opa.$tipoRelacion", function ($query) use ($params) {
-                $query->where(function ($q) use ($params) {
-                    $q->where('razon_social', 'like', '%' . $params->beneficiario . '%')
-                        ->orWhere('nombre_fantasia', 'like', '%' . $params->beneficiario . '%');
+            $texto = trim((string) $params->beneficiario);
+            $cuit = preg_replace('/\D/', '', $texto);
+            $jquery->whereHas("opa.$tipoRelacion", function ($query) use ($texto, $cuit) {
+                $query->where(function ($q) use ($texto, $cuit) {
+                    $q->where('razon_social', 'like', '%' . $texto . '%')
+                        ->orWhere('nombre_fantasia', 'like', '%' . $texto . '%');
+                    if (strlen($cuit) >= 5) {
+                        $q->orWhere('cuit', 'like', '%' . $cuit . '%');
+                    }
                 });
             });
         }
 
-        if (!is_null($params->desde) && !is_null($params->hasta)) {
+        // Fechas del cronograma: cada extremo por separado, y NO se aplican si se busca una orden
+        // o factura puntual. La pantalla trae por defecto -3 semanas / +1 mes, y una boleta vieja
+        // "no aparecía" buscándola por su número. (2026-10-06)
+        $buscaPuntual = !empty($params->numero_opa) || !empty($params->numero);
+        if (!$buscaPuntual && (!empty($params->desde) || !empty($params->hasta))) {
             $jquery->whereHas('fechaprobablepagos', function ($query) use ($params) {
-                $query->whereBetween(DB::raw('DATE(fecha_probable_pago)'), [$params->desde, $params->hasta]);
+                if (!empty($params->desde)) {
+                    $query->whereDate('fecha_probable_pago', '>=', $params->desde);
+                }
+                if (!empty($params->hasta)) {
+                    $query->whereDate('fecha_probable_pago', '<=', $params->hasta);
+                }
             });
         }
 
@@ -189,9 +204,15 @@ class TesPagosRepository
             $jquery->where('pago_emergencia', $params->pago_urgente);
         }
 
+        // Razón social: la de las facturas o, si la orden no tiene (ANTICIPO), la propia de la
+        // orden. Antes las boletas de anticipos desaparecían al filtrar. (2026-10-06)
         if (!empty($params->id_locatario)) {
-            $jquery->whereHas('detalleopa.detallefc', function ($query) use ($params) {
-                $query->where('id_locatorio', $params->id_locatario);
+            $jquery->where(function ($w) use ($params) {
+                $w->whereHas('detalleopa.detallefc', function ($query) use ($params) {
+                    $query->where('id_locatorio', $params->id_locatario);
+                })->orWhereHas('opa', function ($o) use ($params) {
+                    $o->where('id_razon', $params->id_locatario)->whereDoesntHave('opadetalle');
+                });
             });
         }
 
