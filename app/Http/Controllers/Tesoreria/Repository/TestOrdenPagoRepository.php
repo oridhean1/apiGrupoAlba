@@ -250,17 +250,8 @@ class TestOrdenPagoRepository
         // "OPA-1435", "1435" o incluso "opa 1435" — pedirle el formato exacto de un numero que
         // arma un trigger seria trasladarle un detalle interno. (2026-09-04)
         if (!empty($params->num_orden_pago)) {
-            $numero = preg_replace('/\D/', '', (string) $params->num_orden_pago);
-
-            if ($numero !== '') {
-                // Comparacion NUMERICA: los numeros viejos traen ceros a la izquierda
-                // ('OPA-0999') y los nuevos no ('OPA-14358'). Con LIKE, buscar 1435 devolvia
-                // tambien OPA-14358; con igual textual, "999" no encontraba "OPA-0999".
-                $query->whereRaw(
-                    "CAST(REPLACE(num_orden_pago, 'OPA-', '') AS UNSIGNED) = ?",
-                    [(int) $numero]
-                );
-            }
+            // Formato viejo y nuevo (OPA-AAAAMMDD-consecutivo), o solo la fecha: ver NumeroOpa.
+            NumeroOpa::filtrar($query, $params->num_orden_pago);
         }
 
         return $query

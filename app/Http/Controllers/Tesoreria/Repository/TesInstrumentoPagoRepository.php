@@ -1437,11 +1437,8 @@ class TesInstrumentoPagoRepository
     private function filtrarPorOpaYRazon($query, $numeroOpa, $idRazon, string $colNumOpa, string $colIdOrdenPago): void
     {
         if (!empty($numeroOpa)) {
-            $numero = preg_replace('/\D/', '', (string) $numeroOpa);
-
-            if ($numero !== '') {
-                $query->whereRaw("CAST(REPLACE({$colNumOpa}, 'OPA-', '') AS UNSIGNED) = ?", [(int) $numero]);
-            }
+            // Formato viejo y nuevo (OPA-AAAAMMDD-consecutivo), o solo la fecha: ver NumeroOpa.
+            NumeroOpa::filtrar($query, $numeroOpa, $colNumOpa);
         }
 
         if (!empty($idRazon)) {

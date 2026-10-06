@@ -305,6 +305,10 @@ Route::group([
     Route::post('postUpdateasignacion', [App\Http\Controllers\TicketSoporteController::class, 'updateAsignacion']);
     Route::get('getListFechaResponsable', [App\Http\Controllers\TicketSoporteController::class, 'getFechaAndResponsable']);
     Route::post('postUpdateEstado', [App\Http\Controllers\TicketSoporteController::class, 'updateEstado']);
+
+    // Soporte › Tutoriales (2026-10-05)
+    Route::get('tutoriales', [App\Http\Controllers\Soporte\TutorialesController::class, 'listar']);
+    Route::get('tutoriales/{id}/video', [App\Http\Controllers\Soporte\TutorialesController::class, 'video']);
 });
 
 Route::group([

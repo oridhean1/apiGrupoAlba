@@ -170,18 +170,13 @@ class TesPagosRepository
         // Se usa LIKE y se limpia el prefijo porque el usuario tipea indistinto "OPA-1435",
         // "1435" o "opa 1435".
         if (!empty($params->numero_opa)) {
-            $numero = preg_replace('/\D/', '', (string) $params->numero_opa);
+            $texto = $params->numero_opa;
 
-            if ($numero !== '') {
-                $jquery->whereHas('opa', function ($query) use ($numero) {
-                    // Comparacion NUMERICA del correlativo, no textual: los numeros viejos vienen
-                    // con ceros a la izquierda ('OPA-0999') y los nuevos no ('OPA-14358'), asi que
-                    // un LIKE devolvia de mas (buscar 1435 traia OPA-14358) y un igual textual
-                    // fallaba con los rellenados. Asi "999", "0999" y "OPA-0999" encuentran lo mismo.
-                    $query->whereRaw(
-                        "CAST(REPLACE(num_orden_pago, 'OPA-', '') AS UNSIGNED) = ?",
-                        [(int) $numero]
-                    );
+            if (preg_match('/\d/', (string) $texto)) {
+                $jquery->whereHas('opa', function ($query) use ($texto) {
+                    // Formato viejo y nuevo (OPA-AAAAMMDD-consecutivo), o solo la fecha:
+                    // ver NumeroOpa.
+                    NumeroOpa::filtrar($query, $texto);
                 });
             }
         }
