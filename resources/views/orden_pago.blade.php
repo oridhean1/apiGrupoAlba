@@ -273,7 +273,21 @@
                                     @endif
                                 </td>
                                 <td class="text-center font-bold">{{ $loop->iteration }}</td>
-                                <td class="text-right font-bold text-dark">${{ number_format($item?->detallefc?->total_neto ?? 0, 2, ',', '.') }}</td>
+                                {{-- Lo IMPUTADO a esta factura en esta orden, no su total: con una
+                                     imputación parcial las filas no sumaban al total a pagar.
+                                     (2026-10-06) --}}
+                                @php
+                                    $netoFc = (float) ($item?->detallefc?->total_neto ?? 0);
+                                    $imputadoFc = $item?->monto_factura !== null ? (float) $item->monto_factura : $netoFc;
+                                @endphp
+                                <td class="text-right font-bold text-dark">
+                                    ${{ number_format($imputadoFc, 2, ',', '.') }}
+                                    @if ($imputadoFc < $netoFc - (float) ($item?->detallefc?->total_debitado_liquidacion ?? 0) - 0.01)
+                                        <div style="font-weight: normal; font-size: 7.5px; color: #64748b;">
+                                            parcial, de ${{ number_format($netoFc, 2, ',', '.') }}
+                                        </div>
+                                    @endif
+                                </td>
                             </tr>
                             @php $totalFilas++; @endphp
                             @endforeach

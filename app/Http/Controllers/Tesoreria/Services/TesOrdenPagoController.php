@@ -646,6 +646,16 @@ class TesOrdenPagoController extends Controller
             $montoPagable = max(0, (float) ($query?->monto_orden_pago ?? 0) - $debito);
         }
 
+        // El débito impreso es lo imputado menos lo que se paga, así las filas (que ahora muestran
+        // lo imputado, no el total de cada factura) cierran con el total. Con una orden de
+        // facturas enteras da lo mismo que antes. (2026-10-06)
+        $imputado = (float) ($query?->opadetalle ?? collect())->sum(
+            fn($d) => $d->monto_factura ?? ($d->detallefc->total_neto ?? 0)
+        );
+        if ($imputado > 0) {
+            $debito = max(0, round($imputado - $montoPagable, 2));
+        }
+
         $totalEntregado = $instrumentos->sum(fn($i) => (float) $i->monto_pago)
             + ($query?->pagos ?? collect())
                 ->flatMap(fn($p) => $p->pagosParciales ?? collect())

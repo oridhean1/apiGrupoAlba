@@ -1228,7 +1228,10 @@ class TestOrdenPagoRepository
             // Con un Request da igual (devuelve null para lo que no vino), pero con un stdClass
             // —como lo llaman los tests, o cualquier llamador interno— tira
             // "Undefined property" por cada fecha opcional que no se mandó.
-            'fecha_emision' => ($request->fecha_emision ?? null) ?: ($primera->fecha_comprobante ?? $this->fechaActual),
+            // La emisión es el día en que se genera la OPA, no la fecha de la primera factura
+            // (pedido del usuario, 2026-10-06): el comprobante decía "Emisión: 2025-09-08" para
+            // una orden de hoy, y el filtro "Emisión de la OPA" de la cuenta corriente mentía.
+            'fecha_emision' => ($request->fecha_emision ?? null) ?: $this->fechaActual,
             'fecha_vencimiento' => ($request->fecha_vencimiento ?? null) ?: ($primera->fecha_vencimiento ?? null),
             'fecha_probable_pago' => ($request->fecha_probable_pago ?? null) ?: null,
             'id_estado_orden_pago' => self::ESTADO_OPA_PENDIENTE,
@@ -1594,7 +1597,9 @@ class TestOrdenPagoRepository
             'id_prestador' => $ref->id_prestador ?? null,
             'monto_orden_pago' => $totalMonto,
             'id_moneda' => $ref->id_moneda ?? 1,
-            'fecha_emision' => $ref->fecha_emision ?? $ref->fecha_comprobante ?? $this->fechaActual,
+            // Agrupar crea una orden NUEVA: se emite hoy. Antes heredaba la emisión de la orden
+            // vieja o, sin orden, la fecha del comprobante de la factura. (2026-10-06)
+            'fecha_emision' => $this->fechaActual,
             'fecha_vencimiento' => $ref->fecha_vencimiento ?? null,
             'fecha_probable_pago' => $ref->fecha_probable_pago ?? null,
             'id_estado_orden_pago' => $opaExistente->id_estado_orden_pago ?? self::ESTADO_OPA_PENDIENTE,
