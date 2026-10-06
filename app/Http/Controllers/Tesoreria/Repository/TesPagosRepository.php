@@ -571,7 +571,9 @@ class TesPagosRepository
                     // El cheque trae su número en `num_cheque` y el eCheq en `numero_echeq`: las
                     // dos formas son "instrumento", así que hay que mirar cuál es.
                     $esEcheq = (int) $query->id_forma_pago === TesInstrumentoPagoRepository::FORMA_PAGO_ECHEQ;
-                    $numeroNuevo = trim((string) (($esEcheq ? $pagos->numero_echeq : $pagos->num_cheque) ?? ''));
+                    // `?? null` dentro de cada rama: si el payload no trae el campo, PHP tira un
+                    // warning que Laravel convierte en excepción (500). Sin número = no se cambia.
+                    $numeroNuevo = trim((string) ($esEcheq ? ($pagos->numero_echeq ?? '') : ($pagos->num_cheque ?? '')));
                     $numeroActual = (string) ($esEcheq ? $query->numero_echeq : $query->num_cheque);
 
                     if ($numeroNuevo !== '' && $numeroNuevo !== $numeroActual) {

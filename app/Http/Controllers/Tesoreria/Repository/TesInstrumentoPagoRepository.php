@@ -1544,6 +1544,9 @@ class TesInstrumentoPagoRepository
                 'bprov.cbu_cuenta as proveedor_cbu',
                 'bpres.cbu_cuenta as prestador_cbu',
             ])
+            // Los que no tienen banco van AL FINAL: SQL pone los NULL primero, y el archivo se lee
+            // de arriba para abajo para emitir de a un banco por vez. (2026-10-06)
+            ->orderByRaw('eb.descripcion_banco IS NULL')
             ->orderBy('eb.descripcion_banco')
             ->orderBy('o.num_orden_pago')
             ->orderBy($fechaResuelta)

@@ -28,11 +28,14 @@ use Illuminate\Support\Facades\DB;
 return new class extends Migration
 {
     /** [trigger, tabla, columna, prefijo, ancho de padding] */
+    // CADA trigger con SU secuencia, como en producción: solo la OPA usa sec_correlativos.
+    // (Corregido 2026-10-06: la primera versión les ponía sec_correlativos a los cuatro, y en
+    // producción las liquidaciones habrían numerado para atrás y repetido números.)
     private array $triggers = [
-        ['tg_asignar_numero_opa',                    'tb_tes_orden_pago',    'num_orden_pago',   'OPA-', 4],
-        ['tg_asignar_numero_autorizacion_protesis',  'tb_protesis',          'num_autorizacion', '',     5],
-        ['tg_asignar_numero_internacion',            'tb_internaciones',     'num_internacion',  '',     5],
-        ['tg_asignar_numero_liquidacion',            'tb_facturacion_datos', 'num_liquidacion',  '',     8],
+        ['tg_asignar_numero_opa',                    'tb_tes_orden_pago',    'num_orden_pago',   'OPA-', 4, 'sec_correlativos'],
+        ['tg_asignar_numero_autorizacion_protesis',  'tb_protesis',          'num_autorizacion', '',     5, 'sec_numero_autorizacion'],
+        ['tg_asignar_numero_internacion',            'tb_internaciones',     'num_internacion',  '',     5, 'sec_numero_internacion'],
+        ['tg_asignar_numero_liquidacion',            'tb_facturacion_datos', 'num_liquidacion',  '',     8, 'sec_numero_liquidacion'],
     ];
 
     private function triggerExiste(string $trigger): bool
@@ -50,7 +53,7 @@ return new class extends Migration
         // el prefijo más 7 dígitos, o el INSERT va a fallar cuando la secuencia crezca.
         DB::statement('ALTER TABLE tb_tes_orden_pago MODIFY num_orden_pago varchar(20) NULL');
 
-        foreach ($this->triggers as [$trigger, $tabla, $columna, $prefijo, $ancho]) {
+        foreach ($this->triggers as [$trigger, $tabla, $columna, $prefijo, $ancho, $secuencia]) {
             // Las dos bases NO tienen los mismos triggers: `tg_asignar_numero_internacion`
             // existe en OSV pero no en Alba. Recrearlo a ciegas le agregaría a Alba una
             // numeración automática que nunca tuvo, pisando la que asigna la aplicación.
@@ -71,7 +74,7 @@ return new class extends Migration
                 FOR EACH ROW
                 BEGIN
                     DECLARE LET_SECUENCIAL INT DEFAULT 0;
-                    SET LET_SECUENCIAL = NEXTVAL(sec_correlativos);
+                    SET LET_SECUENCIAL = NEXTVAL({$secuencia});
                     SET NEW.{$columna} = {$expr};
                 END
             ");
@@ -81,7 +84,7 @@ return new class extends Migration
     public function down(): void
     {
         // Se restauran los triggers originales, con el truncamiento incluido.
-        foreach ($this->triggers as [$trigger, $tabla, $columna, $prefijo, $ancho]) {
+        foreach ($this->triggers as [$trigger, $tabla, $columna, $prefijo, $ancho, $secuencia]) {
             if (!$this->triggerExiste($trigger)) {
                 continue;
             }
@@ -95,7 +98,7 @@ return new class extends Migration
                 FOR EACH ROW
                 BEGIN
                     DECLARE LET_SECUENCIAL INT DEFAULT 0;
-                    SET LET_SECUENCIAL = NEXTVAL(sec_correlativos);
+                    SET LET_SECUENCIAL = NEXTVAL({$secuencia});
                     SET NEW.{$columna} = {$expr};
                 END
             ");
