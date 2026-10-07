@@ -1,11 +1,14 @@
 name: Deploy Back Alba a Producción
 
-# Se dispara solo al mergear a main. workflow_dispatch queda como opción
-# para forzar un re-deploy a mano sin necesidad de un commit nuevo.
 on:
   push:
     branches: ["main"]
   workflow_dispatch:
+    inputs:
+      dry_run_osv:
+        description: "Dry-run para el deploy de OSV (no borra/copia nada real)"
+        type: boolean
+        default: true
 
 jobs:
   deploy:
@@ -21,8 +24,7 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -p ${{ secrets.SSH_PORT }} ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts || true
 
-      # Guarda una copia de lo que hay en el servidor ANTES de tocar nada.
-      - name: Backup del código actual en el servidor
+      - name: Backup del código actual en el servidor (Alba)
         run: |
           ssh -p ${{ secrets.SSH_PORT }} -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=15 -o ServerAliveCountMax=10 ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} << 'EOF'
           cd /home/u979626107/domains/oridheansoft.com/apis/apigrupoalbasalud/
@@ -32,7 +34,7 @@ jobs:
           cd ../backups_apigrupoalbasalud && ls -1t backup-*.zip | tail -n +6 | xargs -r rm --
           EOF
 
-      - name: Upload files to Hostinger
+      - name: Upload files to Hostinger (Alba)
         run: |
           rsync -avz --delete \
             -e "ssh -p ${{ secrets.SSH_PORT }} -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=15 -o ServerAliveCountMax=10" \
@@ -46,7 +48,7 @@ jobs:
             --exclude 'apiGrupoAlba_ultimo.zip' \
             ./ ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/home/u979626107/domains/oridheansoft.com/apis/apigrupoalbasalud/
 
-      - name: Run remote Laravel commands
+      - name: Run remote Laravel commands (Alba)
         run: |
           ssh -p ${{ secrets.SSH_PORT }} -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=15 -o ServerAliveCountMax=10 ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} << 'EOF'
           cd /home/u979626107/domains/oridheansoft.com/apis/apigrupoalbasalud/
@@ -62,4 +64,49 @@ jobs:
           /opt/alt/php82/usr/bin/php artisan view:cache
           echo "== DONE =="
           EOF
-          # Sin composer install (vendor/ no se toca) ni migraciones, como en Coqsa.
+
+      # ───────── A partir de acá, solo corre si lo disparás manualmente ─────────
+
+      - name: Backup del código actual en el servidor (OSV)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          ssh -p ${{ secrets.SSH_PORT }} -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=15 -o ServerAliveCountMax=10 ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} << 'EOF'
+          cd /home/u979626107/domains/oridheansoft.com/apis/apiosvsalud/
+          mkdir -p ../backups_apiosvsalud
+          zip -r "../backups_apiosvsalud/backup-$(date +%Y%m%d-%H%M%S).zip" . \
+            -x "*.zip" -x "vendor/*" -x "node_modules/*" -x "storage/*"
+          cd ../backups_apiosvsalud && ls -1t backup-*.zip | tail -n +6 | xargs -r rm --
+          EOF
+
+      - name: Upload files to Hostinger (OSV)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          DRY_FLAG=""
+          if [ "${{ inputs.dry_run_osv }}" = "true" ]; then DRY_FLAG="-n"; fi
+          rsync -avz --delete $DRY_FLAG \
+            -e "ssh -p ${{ secrets.SSH_PORT }} -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=15 -o ServerAliveCountMax=10" \
+            --exclude 'storage/' \
+            --exclude 'public/' \
+            --exclude 'vendor/' \
+            --exclude '.env' \
+            --exclude '.git' \
+            --exclude '.github' \
+            ./ ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/home/u979626107/domains/oridheansoft.com/apis/apiosvsalud/
+
+      - name: Run remote Laravel commands (OSV)
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run_osv == false
+        run: |
+          ssh -p ${{ secrets.SSH_PORT }} -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=15 -o ServerAliveCountMax=10 ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} << 'EOF'
+          cd /home/u979626107/domains/oridheansoft.com/apis/apiosvsalud/
+          echo "== config:clear =="
+          /opt/alt/php82/usr/bin/php artisan config:clear
+          echo "== cache:clear =="
+          /opt/alt/php82/usr/bin/php artisan cache:clear
+          echo "== config:cache =="
+          /opt/alt/php82/usr/bin/php artisan config:cache
+          echo "== route:cache =="
+          /opt/alt/php82/usr/bin/php artisan route:cache
+          echo "== view:cache =="
+          /opt/alt/php82/usr/bin/php artisan view:cache
+          echo "== DONE =="
+          EOF

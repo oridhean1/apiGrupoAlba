@@ -110,6 +110,12 @@ class InternacionesEntity extends Model
         return $this->hasOne(PrestacionesPracticaLaboratorioEntity::class, 'cod_internacion', 'cod_internacion');
     }
 
+    // Todas las autorizaciones principales (1:N) — T-00000804
+    public function prestaciones_principales()
+    {
+        return $this->hasMany(PrestacionesPracticaLaboratorioEntity::class, 'cod_internacion', 'cod_internacion');
+    }
+
     public function autorizacion()
     {
         return $this->hasMany(InternacionAutorizacionEntity::class, 'cod_internacion', 'cod_internacion');
@@ -118,5 +124,14 @@ class InternacionesEntity extends Model
     public function recien_nacido()
     {
         return $this->hasMany(RecienNacidoEntity::class, 'cod_internacion', 'cod_internacion');
+    }
+
+    // Auditorias de la internacion (el boton Auditar del visor). De aca salen la
+    // fecha de autorizacion y el auditor del comprobante, como en el Jasper:
+    // rpt_internaciones.jrxml unia tb_internaciones_auditadas para imprimir
+    // ia.fecha_autoriza y us.nombre_apellidos. (T-00000804)
+    public function auditorias()
+    {
+        return $this->hasMany(AuditorizacionesInternacionEntity::class, 'cod_internacion', 'cod_internacion');
     }
 }

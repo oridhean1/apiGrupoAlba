@@ -136,6 +136,31 @@
             border: none;
         }
 
+        /* Tabla unica Comprobantes | Valores: dompdf corta por fila y repite el thead */
+        .op-table { margin-bottom: 10px; }
+        .op-table tr { page-break-inside: avoid; }
+        .op-table tr.op-card-title th {
+            background-color: #f8fafc;
+            color: #0f172a;
+            text-align: left;
+            padding: 5px 10px;
+            border-top: 1px solid #cbd5e1;
+            border-bottom: 1px solid #cbd5e1;
+        }
+        .op-table .op-l1 { border-left: 1px solid #cbd5e1; }
+        .op-table td.op-l3 { border-right: 1px solid #cbd5e1; }
+        .op-table th.op-l3 { border-right: 1px solid #cbd5e1; }
+        .modern-table tr th.sep,
+        .modern-table tr td.sep,
+        .modern-table tr.op-card-title th.sep,
+        .modern-table tr.total-row td.sep,
+        .modern-table tr.total-final-row td.sep {
+            width: 3%;
+            background-color: #ffffff;
+            border: none;
+            padding: 0;
+        }
+
         .debit-amount {
             color: #dc2626;
             font-weight: bold;
@@ -149,23 +174,27 @@
     <table class="header-container">
         <tr>
             <td width="40%" style="vertical-align: middle;">
+                @php
+                    // `razon_emisora` la resuelve el controller: de las facturas y, si la orden no tiene
+                    // (un ANTICIPO), de su propia razón social. Va primero; la factura queda de respaldo.
+                    // (merge con main, 2026-10-07)
+                    $razonSocialFactura = $razon_emisora ?? (isset($facturas[0]) ? $facturas[0]?->detallefc?->razonSocial : null);
+                    $empresaRazonSocial = strtoupper(config('app.empresa_razon_social') . ' ' . ($razonSocialFactura?->razon_social ?? ''));
+                    $isOsv = str_contains($empresaRazonSocial, 'VAREADORES') || str_contains($empresaRazonSocial, 'OSV');
+                    $idRazon = $razonSocialFactura?->id_razon;
+                    // El logo de OSV va versionado en resources/assets/ (storage/app/public esta en .gitignore y no llega a prod)
+                    [$logoPath, $logoAncho] = match (true) {
+                        $isOsv => [resource_path('assets/images/osvsalud.png'), '90px'],
+                        $idRazon == 1, $idRazon == 3 => [storage_path('app/public/images/alba.png'), '90px'],
+                        $idRazon == 2 => [storage_path('app/public/images/bon_baja.jpeg'), '75px'],
+                        $idRazon == 5 => [storage_path('app/public/images/alba.jpeg'), '90px'],
+                        $idRazon == 6 => [storage_path('app/public/images/bene_baja.jpeg'), '90px'],
+                        default => [storage_path('app/public/images/sembrar_baja.jpeg'), '90px'],
+                    };
+                @endphp
                 <div style="margin-bottom: 6px;">
-                    {{-- `razon_emisora` la resuelve el controller: de las facturas y, si la orden
-                         no tiene, de su propia razon social. Antes esto leia `$facturas[0]` y con
-                         una orden sin facturas —un anticipo— el PDF moria con "Undefined array
-                         key 0": el `?->` no salva, porque falla el acceso al indice. (2026-09-25) --}}
-                    @if (($razon_emisora?->id_razon ?? null) == 1)
-                        <img src="{{ storage_path('app/public/images/alba.png') }}" width="90px">
-                    @elseif (($razon_emisora?->id_razon ?? null) == 2)
-                        <img src="{{ storage_path('app/public/images/bon_baja.jpeg') }}" width="75px">
-                    @elseif (($razon_emisora?->id_razon ?? null) == 3)
-                        <img src="{{ storage_path('app/public/images/alba.png') }}" width="90px">
-                    @elseif (($razon_emisora?->id_razon ?? null) == 5)
-                        <img src="{{ storage_path('app/public/images/alba.jpeg') }}" width="90px">
-                    @elseif (($razon_emisora?->id_razon ?? null) == 6)
-                        <img src="{{ storage_path('app/public/images/bene_baja.jpeg') }}" width="90px">
-                    @else
-                        <img src="{{ storage_path('app/public/images/sembrar_baja.jpeg') }}" width="90px">
+                    @if (file_exists($logoPath))
+                        <img src="{{ $logoPath }}" width="{{ $logoAncho }}">
                     @endif
                 </div>
                 <div class="font-bold text-dark" style="font-size: 12px; margin-bottom: 2px;">
@@ -227,241 +256,176 @@
         </div>
     </div>
 
-    <!-- Main Payment Data -->
-    <table style="margin-bottom: 10px;">
-        <tr>
-            <!-- Columna Izquierda: Aplicado a -->
-            <td width="48.5%" style="vertical-align: top; padding: 0;">
-                <div class="card" style="border-top: 3px solid #0f172a; margin-bottom: 0;">
-                    <div class="card-header" style="background-color: #f8fafc;">
-                        Aplicado a (Comprobantes)
+    <!-- Main Payment Data: una sola tabla (Comprobantes | Valores) para que dompdf pagine por fila.
+         Merge del 2026-10-07: la ESTRUCTURA es la de main (R-00000472, paginación con muchas
+         facturas); el CONTENIDO de cada columna es el del circuito de pagos (lo imputado por
+         factura, fechas pendientes de emitir, instrumentos con su cuota real y sin el número
+         provisorio, pagos viejos, destinatario) y los totales salen de monto_pagable / entregado. -->
+    @php
+        $filasIzq = is_iterable($facturas) ? array_values(is_array($facturas) ? $facturas : collect($facturas)->all()) : [];
+
+        // Columna derecha: cada renglón es una fila de "Valores Entregados", en el mismo orden que
+        // tenía la tabla del circuito.
+        $filasDer = [];
+        foreach ($fechas_pendientes ?? [] as $fecha) {
+            $filasDer[] = ['tipo' => 'pendiente', 'fecha' => $fecha];
+        }
+        foreach ($instrumentos ?? [] as $inst) {
+            $filasDer[] = ['tipo' => 'instrumento', 'inst' => $inst];
+        }
+        if (is_iterable($pagos)) {
+            foreach ($pagos as $pagoItem) {
+                // Los abonos del circuito nuevo (con id_estado_instrumento) ya van arriba como
+                // instrumentos: acá solo los VIEJOS, para no listar un eCheq dos veces.
+                foreach (($pagoItem->pagosParciales ?? collect())->whereNull('id_estado_instrumento') as $pagosP) {
+                    $filasDer[] = ['tipo' => 'pago', 'pago' => $pagoItem, 'parcial' => $pagosP];
+                }
+                if ($pagoItem?->id_forma_pago == 1) {
+                    $filasDer[] = ['tipo' => 'destinatario'];
+                }
+            }
+        }
+        $maxFilasTarget = max(count($filasIzq), count($filasDer), 8);
+    @endphp
+    <table class="modern-table op-table">
+        <thead>
+            <tr class="op-card-title">
+                <th colspan="3" class="op-l1 op-l3" style="border-top: 3px solid #0f172a;">Aplicado a (Comprobantes)</th>
+                <th class="sep"></th>
+                <th colspan="3" class="op-l1 op-l3" style="border-top: 3px solid #388E3C;">Valores Entregados</th>
+            </tr>
+            <tr>
+                <th width="24%" class="op-l1">Detalle</th>
+                <th width="10%">Facturas</th>
+                <th width="14.5%" class="op-l3">Importe</th>
+                <th class="sep"></th>
+                <th width="24%" class="op-l1">Detalle</th>
+                <th width="10%">Cuota</th>
+                <th width="14.5%" class="op-l3">Importe</th>
+            </tr>
+        </thead>
+        <tbody>
+            @for ($i = 0; $i < $maxFilasTarget; $i++)
+            @php
+                $item = $filasIzq[$i] ?? null;
+                $der = $filasDer[$i] ?? null;
+            @endphp
+            <tr>
+                {{-- Comprobantes --}}
+                @if ($item)
+                @php
+                    // Lo IMPUTADO a esta factura en esta orden, no su total: con una imputación
+                    // parcial las filas no sumaban al total a pagar. (2026-10-06)
+                    $netoFc = (float) ($item?->detallefc?->total_neto ?? 0);
+                    $imputadoFc = $item?->monto_factura !== null ? (float) $item->monto_factura : $netoFc;
+                @endphp
+                <td class="op-l1" style="font-size: 9px;">
+                    <strong class="text-dark">FAC{{ $item?->detallefc?->tipo_letra }} {{ $item?->detallefc?->sucursal }}-{{ str_pad($item?->detallefc?->numero, 8, '0', STR_PAD_LEFT) }}</strong><br>
+                    <span style="color: #64748b;">(LIQ Nº {{ $item?->detallefc?->num_liquidacion }})</span>
+                    @if(($item?->detallefc?->total_debitado_liquidacion ?? 0) > 0)
+                        <div style="color: #dc2626; font-size: 8.5px; margin-top: 2px;">
+                            <span class="font-bold">Débito:</span> ${{ number_format($item->detallefc->total_debitado_liquidacion, 2, ',', '.') }}
+                        </div>
+                    @endif
+                </td>
+                <td class="text-center font-bold">{{ $i + 1 }}</td>
+                <td class="op-l3 text-right font-bold text-dark">
+                    ${{ number_format($imputadoFc, 2, ',', '.') }}
+                    @if ($imputadoFc < $netoFc - (float) ($item?->detallefc?->total_debitado_liquidacion ?? 0) - 0.01)
+                        <div style="font-weight: normal; font-size: 7.5px; color: #64748b;">
+                            parcial, de ${{ number_format($netoFc, 2, ',', '.') }}
+                        </div>
+                    @endif
+                </td>
+                @else
+                <td class="op-l1" style="height: 18px;"></td><td></td><td class="op-l3"></td>
+                @endif
+
+                <td class="sep"></td>
+
+                {{-- Valores Entregados --}}
+                @if ($der && $der['tipo'] === 'pendiente')
+                {{-- Fecha planificada todavía sin emitir: sin monto ni forma de pago, que se
+                     definen recién al pagar. --}}
+                <td class="op-l1 font-bold text-dark" style="font-size: 9px;">
+                    Pendiente de emitir
+                    <div style="margin-top: 3px;">
+                        <span class="font-bold" style="font-size: 8px;">Fecha de Pago:</span>
+                        <span class="text-blue" style="font-size: 8px;">{{ $der['fecha']->fecha_probable_pago }}</span>
                     </div>
-                    @php
-                        $countLeft = is_iterable($facturas) ? count($facturas) : 0;
-                        $countRight = 0;
-                        if (is_iterable($pagos)) {
-                            foreach ($pagos as $pagoItem) {
-                                if (isset($pagoItem->pagosParciales) && is_iterable($pagoItem->pagosParciales)) {
-                                    $countRight += count($pagoItem->pagosParciales) * 2;
-                                }
-                                $countRight += 3;
-                            }
-                        }
-                        $maxFilasTarget = max($countLeft, $countRight, 8);
-                    @endphp
-                    <table class="modern-table">
-                        <thead>
-                            <tr>
-                                <th width="50%">Detalle</th>
-                                <th width="20%">Facturas</th>
-                                <th width="30%">Importe</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            @php
-                                $totalFilas = 0;
-                            @endphp
-                            @foreach ($facturas as $item)
-                            <tr>
-                                <td style="font-size: 9px;">
-                                    <strong class="text-dark">FAC{{ $item?->detallefc?->tipo_letra }} {{ $item?->detallefc?->sucursal }}-{{ str_pad($item?->detallefc?->numero, 8, '0', STR_PAD_LEFT) }}</strong><br>
-                                    <span style="color: #64748b;">(LIQ Nº {{ $item?->detallefc?->num_liquidacion }})</span>
-                                    @if(($item?->detallefc?->total_debitado_liquidacion ?? 0) > 0)
-                                        <div style="color: #dc2626; font-size: 8.5px; margin-top: 2px;">
-                                            <span class="font-bold">Débito:</span> ${{ number_format($item->detallefc->total_debitado_liquidacion, 2, ',', '.') }}
-                                        </div>
-                                    @endif
-                                </td>
-                                <td class="text-center font-bold">{{ $loop->iteration }}</td>
-                                {{-- Lo IMPUTADO a esta factura en esta orden, no su total: con una
-                                     imputación parcial las filas no sumaban al total a pagar.
-                                     (2026-10-06) --}}
-                                @php
-                                    $netoFc = (float) ($item?->detallefc?->total_neto ?? 0);
-                                    $imputadoFc = $item?->monto_factura !== null ? (float) $item->monto_factura : $netoFc;
-                                @endphp
-                                <td class="text-right font-bold text-dark">
-                                    ${{ number_format($imputadoFc, 2, ',', '.') }}
-                                    @if ($imputadoFc < $netoFc - (float) ($item?->detallefc?->total_debitado_liquidacion ?? 0) - 0.01)
-                                        <div style="font-weight: normal; font-size: 7.5px; color: #64748b;">
-                                            parcial, de ${{ number_format($netoFc, 2, ',', '.') }}
-                                        </div>
-                                    @endif
-                                </td>
-                            </tr>
-                            @php $totalFilas++; @endphp
-                            @endforeach
-
-                            @while ($totalFilas < $maxFilasTarget)
-                            <tr><td style="height: 18px;"></td><td></td><td></td></tr>
-                            @php $totalFilas++; @endphp
-                            @endwhile
-
-                            <tr class="total-row">
-                                <td colspan="2" class="text-right text-red">Débito:</td>
-                                <td class="text-right text-red">${{ number_format($debito ?? 0, 2, ',', '.') }}</td>
-                            </tr>
-                            {{-- El total sale de las facturas imputadas (monto_pagable), no de
-                                 `cabecera - debito`: la cabecera puede estar desincronizada con lo
-                                 imputado y entonces el total no cerraba ni con las filas de arriba
-                                 ni con lo que el sistema deja pagar. --}}
-                            <tr class="total-final-row">
-                                <td colspan="2" class="text-right">Total a Pagar:</td>
-                                <td class="text-right">${{ number_format($monto_pagable ?? (($total ?? 0) - ($debito ?? 0)), 2, ',', '.') }}</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
-            </td>
-
-            <td width="3%"></td>
-
-            <!-- Columna Derecha: Valores -->
-            <td width="48.5%" style="vertical-align: top; padding: 0;">
-                <div class="card" style="border-top: 3px solid #388E3C; margin-bottom: 0;">
-                    <div class="card-header" style="background-color: #f8fafc;">
-                        Valores Entregados
+                </td>
+                <td class="text-center font-bold">{{ $der['fecha']->orden_cuotas }}</td>
+                <td class="op-l3 text-right font-bold text-dark">
+                    <span style="display: inline-block; min-width: 40px; border-bottom: 1px solid #94a3b8;">&nbsp;</span>
+                </td>
+                @elseif ($der && $der['tipo'] === 'instrumento')
+                @php $inst = $der['inst']; @endphp
+                <td class="op-l1 font-bold text-dark" style="font-size: 9px;">
+                    {{ $inst?->formaPago?->tipo_pago ?? 'eCheq' }}:
+                    {{-- Un número PROVISORIO no se imprime: lo puso el sistema, no el banco, y en un
+                         papel que ve el prestador pasaría por real. (2026-09-23) --}}
+                    @if (trim((string) $inst?->numero_echeq) !== '' && !$inst?->numero_provisorio)
+                        {{ $inst->numero_echeq }}
+                    @else
+                        <span style="display: inline-block; min-width: 90px; border-bottom: 1px solid #94a3b8;">&nbsp;</span>
+                    @endif
+                    <br>
+                    <span style="font-weight: normal; font-size: 8px; color: #64748b;">{{ $inst?->bancoEmisor?->descripcion_banco }}</span><br>
+                    <div style="margin-top: 3px;">
+                        <span class="font-bold" style="font-size: 8px;">Fecha de Pago:</span>
+                        <span class="text-blue" style="font-size: 8px;">{{ $inst?->fecha_emision_echeq }}</span>
+                        @if ($inst?->estadoInstrumento)
+                            <span style="font-size: 8px; color: #64748b;">&middot; {{ $inst->estadoInstrumento->descripcion_estado }}</span>
+                        @endif
                     </div>
-                    <table class="modern-table">
-                        <thead>
-                            <tr>
-                                <th width="50%">Detalle</th>
-                                <th width="20%">Cuota</th>
-                                <th width="30%">Importe</th>
-                        </thead>
-                        <tbody>
-                            @php
-                                $totalFilas2 = 0;
-                            @endphp
+                </td>
+                {{-- La cuota REAL del cronograma, no un índice. --}}
+                <td class="text-center font-bold">{{ ($cuota_por_fecha ?? collect())[$inst?->id_fecha_probable] ?? '' }}</td>
+                <td class="op-l3 text-right font-bold text-dark">${{ number_format($inst?->monto_pago ?? 0, 2, ',', '.') }}</td>
+                @elseif ($der && $der['tipo'] === 'pago')
+                @php $pagosP = $der['parcial']; @endphp
+                <td class="op-l1 font-bold text-dark" style="font-size: 9px;">
+                    {{ $pagosP?->formaPago?->tipo_pago }}{{ $pagosP?->num_cheque ? ': '.$pagosP->num_cheque : '' }}<br>
+                    <span style="font-weight: normal; font-size: 8px; color: #64748b;">{{ $der['pago']->cuenta?->nombre_cuenta }}</span><br>
+                    <div style="margin-top: 3px;">
+                        <span class="font-bold" style="font-size: 8px;">Fecha de Pago:</span>
+                        <span class="text-blue" style="font-size: 8px;">{{ $pagosP?->fecha_confirma_pago }}</span>
+                    </div>
+                </td>
+                <td class="text-center font-bold">{{ ($cuota_por_fecha ?? collect())[$pagosP?->id_fecha_probable] ?? '' }}</td>
+                <td class="op-l3 text-right font-bold text-dark">${{ number_format($pagosP?->monto_pago ?? 0, 2, ',', '.') }}</td>
+                @elseif ($der && $der['tipo'] === 'destinatario')
+                <td colspan="3" class="op-l1 op-l3" style="background-color: #f8fafc; padding: 6px;">
+                    <div class="font-bold text-dark" style="font-size: 9px;">DESTINATARIO (DEPÓSITO/TRANSF)</div>
+                    <div style="font-size: 9px; color: #475569; margin-top: 2px;">
+                        CUIT: {{ $cuit_proveedor }} <br>
+                        CBU: {{ $cbu_proveedor }}
+                    </div>
+                </td>
+                @else
+                <td class="op-l1" style="height: 18px;"></td><td></td><td class="op-l3"></td>
+                @endif
+            </tr>
+            @endfor
 
-                            {{-- Instrumentos del circuito nuevo (eCheq). Cuando el numero
-                                 todavia no se cargo, sale una linea en blanco para completar a
-                                 mano: es la version que va a Tesoreria para emitir. --}}
-                            {{-- Fechas ya planificadas (Confirmar OPA) pero todavia sin emitir: no
-                                 tienen monto ni forma de pago porque eso se define recien al
-                                 emitir cada una, en Carga de eCheq. --}}
-                            @foreach ($fechas_pendientes ?? [] as $fecha)
-                                <tr>
-                                    <td class="font-bold text-dark" style="font-size: 9px;">
-                                        Pendiente de emitir
-                                        <br>
-                                        <div style="margin-top: 3px;">
-                                            <span class="font-bold" style="font-size: 8px;">Fecha de Pago:</span>
-                                            <span class="text-blue" style="font-size: 8px;">{{ $fecha->fecha_probable_pago }}</span>
-                                        </div>
-                                    </td>
-                                    <td class="text-center font-bold">{{ $fecha->orden_cuotas }}</td>
-                                    <td class="text-right font-bold text-dark">
-                                        <span style="display: inline-block; min-width: 40px;
-                                                     border-bottom: 1px solid #94a3b8;">&nbsp;</span>
-                                    </td>
-                                </tr>
-                                @php $totalFilas2++; @endphp
-                            @endforeach
-
-                            @foreach ($instrumentos ?? [] as $inst)
-                                <tr>
-                                    <td class="font-bold text-dark" style="font-size: 9px;">
-                                        {{ $inst?->formaPago?->tipo_pago ?? 'eCheq' }}:
-                                        {{-- Un numero PROVISORIO no se imprime: lo puso el sistema
-                                             para no frenar la carga del pago, no es el del banco, y
-                                             en un papel que ve el prestador pasaria por real. Sale
-                                             la linea en blanco, como cuando todavia no hay numero.
-                                             (2026-09-23) --}}
-                                        @if (trim((string) $inst?->numero_echeq) !== '' && !$inst?->numero_provisorio)
-                                            {{ $inst->numero_echeq }}
-                                        @else
-                                            <span style="display: inline-block; min-width: 90px;
-                                                         border-bottom: 1px solid #94a3b8;">&nbsp;</span>
-                                        @endif
-                                        <br>
-                                        <span style="font-weight: normal; font-size: 8px; color: #64748b;">
-                                            {{ $inst?->bancoEmisor?->descripcion_banco }}
-                                        </span><br>
-                                        <div style="margin-top: 3px;">
-                                            <span class="font-bold" style="font-size: 8px;">Fecha de Pago:</span>
-                                            <span class="text-blue" style="font-size: 8px;">{{ $inst?->fecha_emision_echeq }}</span>
-                                            @if ($inst?->estadoInstrumento)
-                                                <span style="font-size: 8px; color: #64748b;">
-                                                    &middot; {{ $inst->estadoInstrumento->descripcion_estado }}
-                                                </span>
-                                            @endif
-                                        </div>
-                                    </td>
-                                    {{-- La cuota REAL del cronograma, no el indice del loop: con dos
-                                         abonos decia "1" y "2" sin importar que cuotas cubrian. --}}
-                                    <td class="text-center font-bold">{{ ($cuota_por_fecha ?? collect())[$inst?->id_fecha_probable] ?? $loop->iteration }}</td>
-                                    <td class="text-right font-bold text-dark">${{ number_format($inst?->monto_pago ?? 0, 2, ',', '.') }}</td>
-                                </tr>
-                                @php $totalFilas2++; @endphp
-                            @endforeach
-
-                            @foreach ($pagos as $item)
-                                {{-- Los pagosParciales del circuito nuevo (con id_estado_instrumento)
-                                     ya se listaron arriba en $instrumentos. Sin este filtro, un
-                                     eCheq salia dos veces: una vez por cada loop. Este bloque
-                                     queda solo para los pagosParciales VIEJOS, que no tienen
-                                     estado de instrumento. --}}
-                                @foreach ($item->pagosParciales->whereNull('id_estado_instrumento') as $pagosP)
-                                <tr>
-                                    <td class="font-bold text-dark" style="font-size: 9px;">
-                                       {{ $pagosP?->formaPago?->tipo_pago }}{{ $pagosP?->num_cheque ? ': '.$pagosP->num_cheque : '' }}<br>
-                                        <span style="font-weight: normal; font-size: 8px; color: #64748b;">{{ $item->cuenta?->nombre_cuenta }}</span><br>
-                                        <div style="margin-top: 3px;">
-                                            <span class="font-bold" style="font-size: 8px;">Fecha de Pago:</span> 
-                                            <span class="text-blue" style="font-size: 8px;">{{ $pagosP?->fecha_confirma_pago }}</span>
-                                        </div>
-                                    </td>
-                                    <td class="text-center font-bold">{{ ($cuota_por_fecha ?? collect())[$pagosP?->id_fecha_probable] ?? $loop->iteration }}</td>
-                                    <td class="text-right font-bold text-dark">${{ number_format($pagosP?->monto_pago ?? 0, 2, ',', '.') }}</td>
-                                </tr>
-                                @php $totalFilas2++; @endphp
-                                @endforeach
-
-
-                                @if ($item?->id_forma_pago == 1)
-                                <tr>
-                                    <td colspan="3" style="background-color: #f8fafc; padding: 6px;">
-                                        <div class="font-bold text-dark" style="font-size: 9px;">DESTINATARIO (DEPÓSITO/TRANSF)</div>
-                                        <div style="font-size: 9px; color: #475569; margin-top: 2px;">
-                                            CUIT: {{ $cuit_proveedor }} <br>
-                                            CBU: {{ $cbu_proveedor }}
-                                        </div>
-                                    </td>
-                                </tr>
-                                @php $totalFilas2++; @endphp
-                                @else
-                                    @for ($i = 0; $i < 3; $i++)
-                                    <tr><td colspan="3" style="height: 18px;"></td></tr>
-                                    @endfor
-                                    @php $totalFilas2 += 3; @endphp
-                                @endif
-                            @endforeach
-
-                            @while ($totalFilas2 < $maxFilasTarget)
-                            <tr><td style="height: 18px;"></td><td></td><td></td></tr>
-                            @php $totalFilas2++; @endphp
-                            @endwhile
-
-                            {{-- Esta columna lista los valores entregados, asi que cierra con la
-                                 SUMA DE ESAS FILAS y con lo que queda. Antes repetia el "total a
-                                 pagar" de la columna de facturas: debajo de una lista de pagos por
-                                 $70.000 decia $78.960, que no era la suma de nada de lo de arriba.
-                                 Y arrastraba una fila de "Débito", que es una deduccion de la
-                                 factura y ya figura en la columna izquierda. (2026-09-10) --}}
-                            <tr class="total-row">
-                                <td colspan="2" class="text-right">Entregado:</td>
-                                <td class="text-right">${{ number_format($total_entregado ?? 0, 2, ',', '.') }}</td>
-                            </tr>
-                            <tr class="total-final-row" style="background-color: #065933;">
-                                <td colspan="2" class="text-right" style="background-color: #065933;">Restante:</td>
-                                <td class="text-right" style="background-color: #065933;">${{ number_format($total_restante ?? 0, 2, ',', '.') }}</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
-            </td>
-        </tr>
+            {{-- Totales. Izquierda: débito y lo que se paga (monto_pagable: lo imputado con tope
+                 en neto - débito). Derecha: la SUMA de los valores entregados y lo que queda —no
+                 repite el total a pagar, que no es la suma de nada de esa columna (2026-09-10). --}}
+            <tr class="total-row">
+                <td colspan="2" class="op-l1 text-right text-red">Débito:</td>
+                <td class="op-l3 text-right text-red">${{ number_format($debito ?? 0, 2, ',', '.') }}</td>
+                <td class="sep"></td>
+                <td colspan="2" class="op-l1 text-right">Entregado:</td>
+                <td class="op-l3 text-right">${{ number_format($total_entregado ?? 0, 2, ',', '.') }}</td>
+            </tr>
+            <tr class="total-final-row">
+                <td colspan="2" class="text-right">Total a Pagar:</td>
+                <td class="text-right">${{ number_format($monto_pagable ?? (($total ?? 0) - ($debito ?? 0)), 2, ',', '.') }}</td>
+                <td class="sep"></td>
+                <td colspan="2" class="text-right" style="background-color: #065933;">Restante:</td>
+                <td class="text-right" style="background-color: #065933;">${{ number_format($total_restante ?? 0, 2, ',', '.') }}</td>
+            </tr>
+        </tbody>
     </table>
 
     <!-- Footer: Observaciones y Detalle de Débitos -->

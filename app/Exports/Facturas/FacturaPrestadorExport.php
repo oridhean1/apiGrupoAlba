@@ -25,8 +25,11 @@ class FacturaPrestadorExport implements FromCollection, WithHeadings, ShouldAuto
     public function collection()
     {
         //
-        $sql = "SELECT vwm.cuit, vwm.razon_social, vwm.comprobante, vwm.refacturacion, 
-                vwm.delegacion, vwm.periodo, ma.articulo, 
+        // Desde el cambio de carga de facturación (08/2026) el detalle guarda en id_articulo el id de
+        // la imputación contable elegida, no un artículo. Los comprobantes anteriores siguen teniendo
+        // un id de artículo, así que se resuelve el nombre contra las dos tablas.
+        $sql = "SELECT vwm.cuit, vwm.razon_social, vwm.comprobante, vwm.refacturacion,
+                vwm.delegacion, vwm.periodo, COALESCE(imp.imputacion, ma.articulo) AS articulo,
                 tfd.cantidad, tfd.precio_neto, tfd.subtotal, tfd.monto_iva,                
                 COALESCE(tfdi.total_impuestos, 0) AS total_impuestos, tfd.total_importe,
                 vwm.fecha_comprobante, vwm.fecha_registra, vwm.total_aprobado, vwm.total_facturado,
@@ -37,7 +40,8 @@ class FacturaPrestadorExport implements FromCollection, WithHeadings, ShouldAuto
             SELECT id_factura, SUM(importe) AS total_impuestos FROM tb_facturacion_detalle_impuesto GROUP BY id_factura
         ) tfdi ON tfdi.id_factura = vwm.id_factura
         LEFT JOIN tb_facturacion_detalle_descuento tfdd ON tfdd.id_factura = vwm.id_factura
-        LEFT JOIN vw_matriz_articulos ma ON ma.id_articulo = tfd.id_articulo";
+        LEFT JOIN vw_matriz_articulos ma ON ma.id_articulo = tfd.id_articulo
+        LEFT JOIN tb_cont_imputacion_prestadores_cuenta_contable imp ON imp.id_imputacion_cuenta_contable = tfd.id_articulo";
 
         $params = [];
         $where = [];

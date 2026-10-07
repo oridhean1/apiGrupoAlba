@@ -69,6 +69,9 @@ Route::group([
     Route::get('getDetallePlan/{id}', [App\Http\Controllers\PadronController::class, 'getDetalleTipoPlanPadron']);
     Route::get('getIdDetallePlan/{id}', [App\Http\Controllers\PadronController::class, 'getIdTipoPlanPadron']);
     Route::get('getExportPadron', [App\Http\Controllers\PadronController::class, 'exportPadron']);
+    Route::get('getHistoricoOrigen/{dni}', [App\Http\Controllers\afiliados\Services\HistoricoPadronController::class, 'getHistoricoOrigen']);
+    Route::get('getPeriodosFotoPadron', [App\Http\Controllers\afiliados\Services\HistoricoPadronController::class, 'getPeriodosFoto']);
+    Route::get('getExportFotoPadron', [App\Http\Controllers\afiliados\Services\HistoricoPadronController::class, 'exportFotoPadron']);
     Route::get('getUserPadron', [App\Http\Controllers\PadronController::class, 'getUserDni']);
     Route::post('postUserUpdate', [App\Http\Controllers\PadronController::class, 'postActualizarUser']);
     Route::get('getListCredencial/{estado}', [App\Http\Controllers\PadronController::class, 'getListPadroncredencial']);
@@ -244,6 +247,8 @@ Route::group([
     Route::get('getPadronComercialFamiliar/{cuit_titular}', [App\Http\Controllers\PadronComercialController::class, 'getPadronComercialFamiliar']);
     Route::get('getDniPadronComercial', [App\Http\Controllers\PadronComercialController::class, 'getDniPadronComercial']);
     Route::get('getExportPadron', [App\Http\Controllers\PadronComercialController::class, 'exportPadronComercial']);
+    Route::get('getMovimientosProgramados', [App\Http\Controllers\afiliados\Services\MovimientoProgramadoController::class, 'getListarMovimientos']);
+    Route::post('saveTraspasoProgramado', [App\Http\Controllers\afiliados\Services\MovimientoProgramadoController::class, 'postSaveTraspaso']);
 });
 
 Route::group([
@@ -451,6 +456,7 @@ Route::group([
     'middleware' => ['jwt.verify'],
     'prefix' => '/v1/prestador'
 ], function () {
+    Route::get('exportar-excel', [App\Http\Controllers\mantenimiento\PrestadoresController::class, 'exportarExcelPrestadores']);
     Route::get('buscar-prestador', [App\Http\Controllers\prestadores\PrestadoresController::class, 'srvFilterDataPadronPrestador']);
     Route::get('listarRegimenGanancia', [App\Http\Controllers\prestadores\TipoEfectorController::class, 'getTipoRegimenGanancia']);
     Route::get('listarPrestadorTipoPago', [App\Http\Controllers\prestadores\TipoEfectorController::class, 'getTipoPrestadorPago']);

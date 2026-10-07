@@ -12,7 +12,7 @@ class RazonSocialController extends RoutingController
     //
     public function getListaRazonSocial()
     {
-        return RazonSocialModelo::where('activo',1)->get();
+        return RazonSocialModelo::where('activo', 1)->get();
     }
 
     public function saveRazonSocial(Request $request)
@@ -26,7 +26,7 @@ class RazonSocialController extends RoutingController
         } else {
             RazonSocialModelo::create([
                 'razon_social' => $request->razon_social,
-                'estado' => 1
+                'activo' => 1
             ]);
             return response()->json(['message' => 'Razón Social registrado correctamente'], 200);
         }
@@ -34,7 +34,7 @@ class RazonSocialController extends RoutingController
 
     public function updateEstado(Request $request)
     {
-        RazonSocialModelo::where('id_razon', $request->id)->update(['estado' => $request->activo,]);
+        RazonSocialModelo::where('id_razon', $request->id)->update(['activo' => $request->activo,]);
         return response()->json(['message' => 'Estado cambiado correctamente'], 200);
     }
 

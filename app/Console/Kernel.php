@@ -17,6 +17,12 @@ class Kernel extends ConsoleKernel
     {
         $schedule->command('insert:monthly-deuda')->monthlyOn(18, '01:00');
         $schedule->command('deudas:actualizar-intereses')->daily();
+        $schedule->command('afiliados:aplicar-movimientos-programados')
+            ->monthlyOn(1, '01:00')
+            ->timezone('America/Argentina/Buenos_Aires');
+        $schedule->command('afiliados:foto-padron-mensual')
+            ->lastDayOfMonth('23:50')
+            ->timezone('America/Argentina/Buenos_Aires');
 
     }
 

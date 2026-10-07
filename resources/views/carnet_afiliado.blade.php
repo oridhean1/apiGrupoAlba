@@ -99,7 +99,11 @@
         @if ($padron->activo == 1)
         <div class="contenedor">
             <div class="img">
-                @if (str_contains(env('EMPRESA_RAZON_SOCIAL', ''), 'VAREADORES') || str_contains(env('EMPRESA_RAZON_SOCIAL', ''), 'OSV'))
+                @php
+                    $razonSocial = strtoupper(config('app.empresa_razon_social'));
+                    $isOsv = str_contains($razonSocial, 'VAREADORES') || str_contains($razonSocial, 'OSV');
+                @endphp
+                @if ($isOsv)
                     <img src="{{ storage_path('app/public/images/osvsalud.jpg') }}" width="750" height="500" style="max-width: none; max-height: none;">
                 @elseif ($padron->id_locatario == 1)
                     <img src="{{ storage_path('app/public/images/BONSALUD.png') }}">
@@ -112,7 +116,6 @@
                 @endif
                 
                 @php
-                    $isOsv = str_contains(env('EMPRESA_RAZON_SOCIAL', ''), 'VAREADORES') || str_contains(env('EMPRESA_RAZON_SOCIAL', ''), 'OSV');
                     $isAlba = !$isOsv && $padron->id_locatario > 3;
                 @endphp
                 <div class="{{ $isOsv ? 'osv' : ($isAlba ? 'alba' : 'datos') }}" >
@@ -120,9 +123,13 @@
                     <p class="filial">FILIACIÓN:<b class="parentezco">
                             {{ $padron['tipoParentesco']['parentesco'] ?? 'Titular' }} </b></p>
                     <p class="cuil">N° DE AFILIADO:<b> {{ $dniTitular . ' /0' . $padron->correlativo }} </b></p>
-                    <!-- <p class="plan">TIPO PLAN:<b> {{ $padron->detalleplan[0]->addplan->tipo ?? $tipoPrincipal }} </b>  -->
                     <p class="cuil">DNI:<b> {{ $padron->dni }} </b></p>
-                    <p class="plan">TIPO PLAN:<b> PLAN ÚNICO </b>
+                    @php
+                        $tipoPlanMostrar = $isOsv 
+                            ? ($padron->origen->detalle_comercial_origen ?? $padron->detalleplan[0]->addplan->tipo ?? $tipoPrincipal)
+                            : 'PLAN ÚNICO';
+                    @endphp
+                    <p class="plan">TIPO PLAN:<b> {{ $tipoPlanMostrar }} </b></p>
                     @if(!$isOsv)
                     <p class="plan">OBRA SOCIAL:<b> {{ $padron->origen->detalle_comercial_origen ?? 'DESCONOCIDO' }} </b>
                     </p>

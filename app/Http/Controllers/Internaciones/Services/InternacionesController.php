@@ -20,7 +20,7 @@ class InternacionesController  extends Controller
 
     public function getObtenerInternacionId(InternacionesRepository $repoInternacion, Request $request)
     {
-        $data = $repoInternacion->findByPrestacionInternacionId($request->id);
+        $data = $repoInternacion->findByPrestacionInternacionId($request->id, $request->cod_prestacion);
         return response()->json($data);
     }
 

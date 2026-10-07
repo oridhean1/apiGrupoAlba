@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\Tesoreria\TesEntidadesBancariasEntity;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
+use Illuminate\Support\Facades\Cache;
 
 class EntidadesBancariasController extends Controller
 {
@@ -28,6 +29,8 @@ class EntidadesBancariasController extends Controller
 
     public function saveEntidadBancaria(Request $request)
     {
+        // El listado de bancos de Tesorería se cachea (TesCuentaCatalogoRepository), hay que invalidarlo
+        Cache::forget('catalog_tes_bancos');
 
         if ($request->id_entidad_bancaria != '') {
             $query = TesEntidadesBancariasEntity::where('id_entidad_bancaria', $request->id_entidad_bancaria)->first();
@@ -47,6 +50,7 @@ class EntidadesBancariasController extends Controller
     public function updateEstado(Request $request)
     {
         TesEntidadesBancariasEntity::where('id_entidad_bancaria', $request->id)->update(['vigente' => $request->activo,]);
+        Cache::forget('catalog_tes_bancos');
         return response()->json(['message' => 'Estado cambiado correctamente'], 200);
     }
 }

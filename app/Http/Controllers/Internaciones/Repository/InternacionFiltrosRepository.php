@@ -17,15 +17,20 @@ class InternacionFiltrosRepository
             "tipoInternacion",
             "tipoHabitacion",
             "afiliado.obrasocial",
+            // "Obra Social" del comprobante = tb_comercial_origen.detalle_comercial_origen,
+            // que el Jasper rpt_internaciones.jrxml traia como $F{origen}. (T-00001125)
+            "afiliado.origen",
             "categoria",
             "especialidad",
             "tipoEgreso",
             "tipoDiagnostico",
             "usuario",
             "estadoPrestacion",
-            "internacion",
+            "internacion.datosTramite.tramite",
+            "auditorias.usuario",
+            "prestaciones_principales.datosTramite.tramite",
             "autorizacion.detalle_prestacion.practica",
-            "autorizacion.internacion",
+            "autorizacion.internacion.datosTramite.tramite",
             "recien_nacido.autorizacion.detalle_prestacion.practica"
         ];
     }

@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\mantenimiento;
 
+use App\Exports\Prestadores\PrestadoresListadoExport;
 use App\Http\Controllers\Prestadores\repository\ImputacionesPrestadoreRepository;
 use App\Http\Controllers\prestadores\repository\PrestadorRepository;
 use App\Models\prestadores\DatosBancariosPrestadorEntity;
@@ -10,9 +11,47 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Routing\Controller;
 use Illuminate\Support\Facades\Auth;
+use Maatwebsite\Excel\Facades\Excel;
 
 class PrestadoresController extends Controller
 {
+    public function exportarExcelPrestadores(Request $request)
+    {
+        try {
+            $query = PrestadorEntity::with(["tipoPrestador", "tipoImpuesto", "tipoIva", "localidad", "datosBancarios", "usuario"]);
+
+            if (!empty($request->search) && empty($request->prestador)) {
+                $query->where(function ($q) use ($request) {
+                    $q->where("cuit", 'LIKE', $request->search . '%')
+                      ->orWhere('razon_social', 'LIKE', '%' . $request->search . '%')
+                      ->orWhere('nombre_fantasia', 'LIKE', '%' . $request->search . '%');
+                });
+            } else if (empty($request->search) && !empty($request->prestador)) {
+                $query->where("cod_tipo_prestador", $request->prestador);
+            } else if (!empty($request->search) && !empty($request->prestador)) {
+                $query->where("cod_tipo_prestador", $request->prestador)
+                      ->where(function ($q) use ($request) {
+                          $q->where("cuit", 'LIKE', $request->search . '%')
+                            ->orWhere('razon_social', 'LIKE', '%' . $request->search . '%')
+                            ->orWhere('nombre_fantasia', 'LIKE', '%' . $request->search . '%');
+                      });
+            }
+
+            $dataLista = $query->orderByDesc("cod_prestador")->get();
+
+            $filename = 'listado_prestadores_' . date('Y-m-d_H-i-s') . '.xlsx';
+
+            return Excel::download(
+                new PrestadoresListadoExport($dataLista),
+                $filename
+            );
+        } catch (\Throwable $th) {
+            return response()->json([
+                'code' => $th->getCode(),
+                'message' => $th->getMessage()
+            ], 500);
+        }
+    }
     public function getConsultarPrestadores(Request $request)
     {
         try {

@@ -67,7 +67,7 @@ class AfiliadoCredencialController extends Controller
         $now = new \DateTime();
         $fecha_inicio = $now->format('Y-m-d');
         $fecha_final = $now->modify('last day of this month')->format('Y-m-d');
-        $grupal = AfiliadoPadronEntity::with('detalleplan.addplan', 'tipoParentesco')->where('id', $request->id_padron)->get();
+        $grupal = AfiliadoPadronEntity::with('detalleplan.addplan', 'tipoParentesco', 'origen')->where('id', $request->id_padron)->get();
         if ($grupal) {
             $pdf = Pdf::loadView('carnet_afiliado', ["data" => $grupal, "f_inicio" => $fecha_inicio, "f_fin" => $fecha_final]);
             $pdf->setPaper('A4', 'landscape');

@@ -125,6 +125,8 @@ return [
 
     'cipher' => 'AES-256-CBC',
 
+    'empresa_razon_social' => env('EMPRESA_RAZON_SOCIAL', ''),
+
     /*
     |--------------------------------------------------------------------------
     | Autoloaded Service Providers

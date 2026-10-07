@@ -558,6 +558,19 @@ class TestOrdenPagoRepository
         return TesOrdenPagoEntity::find($idOpa);
     }
 
+    /**
+     * Tipo de beneficiario (PRESTADOR/PROVEEDOR) de una OPA, tomado del DETALLE. (T-00000830)
+     *
+     * No usar la cabecera: la columna tiene DEFAULT 'PROVEEDOR' y las OPAs agrupadas se creaban
+     * sin cargarla, así que el pago generado desde ellas caía en Pagos Proveedores aunque la OPA
+     * fuera de un prestador. Se cae a la cabecera solo si la OPA quedó sin detalle.
+     */
+    public function findByTipoFacturaOpa($idOpa)
+    {
+        return TesOrdenPagoDetalleEntity::where('id_orden_pago', $idOpa)->value('tipo_factura')
+            ?? TesOrdenPagoEntity::where('id_orden_pago', $idOpa)->value('tipo_factura');
+    }
+
     public function findByIdFacturaEnProcesoOrPendiente($factura, $montoFactura)
     {
         // $idEstados = is_array([1, 4]);
@@ -1031,6 +1044,17 @@ class TestOrdenPagoRepository
     }
 
     /**
+     * Viene de main (R-00000444), donde devolvía siempre `false` ("el negocio permite modificar
+     * incluso confirmados"). En el merge del 2026-10-07 se decidió que prevalece la regla del
+     * circuito de pagos: una OPA con plata cobrada NO se toca. Se mantiene el nombre porque lo
+     * llaman partes de main, pero con el control real.
+     */
+    public function tienePagosVivosConfirmados($idOpa): bool
+    {
+        return $this->tienePagosConfirmados($idOpa);
+    }
+
+    /**
      * Genera una OPA a partir de una o varias facturas seleccionadas.
      *
      * Hasta el 2026-08-13 asumía que toda factura seleccionada YA tenía su OPA (creada
@@ -1459,7 +1483,7 @@ class TestOrdenPagoRepository
             ->whereIn('id_orden_pago', function ($q) {
                 $q->select('id_orden_pago')
                     ->from('tb_tes_orden_pago')
-                    ->where('id_estado_orden_pago', self::ESTADO_OPA_PENDIENTE);
+                    ->whereIn('id_estado_orden_pago', [self::ESTADO_OPA_PENDIENTE, self::ESTADO_OPA_EN_PROCESO, 5]);
             })
             ->get();
         $idOrdenesExistentes = $detalleExistente->pluck('id_orden_pago')->unique()->values()->toArray();
@@ -1471,7 +1495,7 @@ class TestOrdenPagoRepository
             ->whereIn('id_orden_pago', function ($q) {
                 $q->select('id_orden_pago')
                     ->from('tb_tes_orden_pago')
-                    ->whereNotIn('id_estado_orden_pago', [self::ESTADO_OPA_PENDIENTE, self::ESTADO_OPA_RECHAZADO]);
+                    ->whereNotIn('id_estado_orden_pago', [self::ESTADO_OPA_PENDIENTE, self::ESTADO_OPA_EN_PROCESO, 5, self::ESTADO_OPA_RECHAZADO]);
             })
             ->get();
         if ($opasNoAgrupables->isNotEmpty()) {
@@ -1522,11 +1546,17 @@ class TestOrdenPagoRepository
         // ->all() + collect(): Eloquent\Collection::merge() asume que fusiona modelos (usa
         // getKey() en cada item) y explota si le pasás strings, aunque map() ya los haya
         // convertido — hay que salir a una Collection plana antes de mezclar.
+        //
+        // El tipo de las OPAs existentes sale de su DETALLE, no de la cabecera: las agrupadas
+        // viejas quedaron con la cabecera en 'PROVEEDOR' por el DEFAULT de la columna y
+        // volver a agruparlas daba "distintos proveedores/prestadores" en falso. (T-00000830)
+        $tipoPorOpa = $detalleExistente->groupBy('id_orden_pago')->map(fn($g) => $g->first()->tipo_factura);
         $opasExistentesTodas = TesOrdenPagoEntity::whereIn('id_orden_pago', $idOrdenesExistentes)->get();
         $beneficiarios = collect(
-            $opasExistentesTodas->map(function ($o) {
-                $id = $o->tipo_factura === 'PROVEEDOR' ? $o->id_proveedor : $o->id_prestador;
-                return $o->tipo_factura . ':' . $id;
+            $opasExistentesTodas->map(function ($o) use ($tipoPorOpa) {
+                $tipo = $tipoPorOpa[$o->id_orden_pago] ?? $o->tipo_factura;
+                $id = $tipo === 'PROVEEDOR' ? $o->id_proveedor : $o->id_prestador;
+                return $tipo . ':' . $id;
             })->all()
         )->merge(
             $facturasDb->map(function ($f) {
@@ -1582,10 +1612,16 @@ class TestOrdenPagoRepository
 
         $esAgrupada = $idFacturas->count() > 1;
 
-        // Mismo criterio que la validación de beneficiario de más arriba: el tipo lo decide
-        // `id_tipo_factura == 16`, nunca "cuál de los dos campos no es null".
+        // Tipo de beneficiario de la cabecera. Combina los dos arreglos del mismo problema (si no se
+        // carga explícito, la columna cae en su DEFAULT 'PROVEEDOR' y el pago aparece en Pagos
+        // Proveedores siendo de un prestador): primero la orden existente, después el detalle
+        // (T-00000830, main) y por último la factura, por `id_tipo_factura == 16` —nunca por "cuál de
+        // los dos campos no es null"—.
+        $detalleRef = $detalleExistente->first();
         $tipoBeneficiario = $opaExistente->tipo_factura
+            ?? ($detalleRef->tipo_factura ?? null)
             ?? (($facturasDb->first()->id_tipo_factura ?? null) == 16 ? 'PROVEEDOR' : 'PRESTADOR');
+        $tipoFactura = $tipoBeneficiario;
 
         // El total sale del DETALLE (existente + a crear), nunca de sumar cabeceras: si alguna
         // venía con el monto desincronizado, sumarlas propagaba el error. (2026-08-11)
@@ -1717,6 +1753,15 @@ class TestOrdenPagoRepository
 
         // Guarda ESTRICTA: más abajo la OPA origen se borra físicamente si queda vacía, así que
         // bloquea cualquier pago registrado, confirmado o no. (criterio precisado 2026-09-03)
+        // Y la orden DESTINO tampoco puede tener plata cobrada (lo controlaba main, R-00000444).
+        if ($this->tienePagosConfirmados($getOpa->id_orden_pago)) {
+            return [
+                'success' => false,
+                'message' => 'No se puede agrupar esta factura: la orden de pago ' . $getOpa->num_orden_pago
+                    . ' ya tiene pagos confirmados.'
+            ];
+        }
+
         if ($this->tieneAlgunPago($opa->id_orden_pago)) {
             return [
                 'success' => false,
@@ -1757,6 +1802,24 @@ class TestOrdenPagoRepository
 
             // El monto se recalcula desde el detalle en vez de acumularse con `+=`. (2026-08-11)
             $this->recalcularMontoDesdeDetalle($getOpa->id_orden_pago);
+
+            // Sincronizar la boleta con el nuevo total de la orden (viene de main, R-00000444), pero
+            // SOLO si no hay plata cobrada: con pagos confirmados la orden no se toca (regla del
+            // circuito, prevaleció en el merge del 2026-10-07). Así una boleta con cronograma y sin
+            // plata no queda con un monto desfasado de la orden.
+            foreach ([[$opa->id_orden_pago, $quedanEnOrigen > 0], [$getOpa->id_orden_pago, true]] as [$idSync, $aplica]) {
+                if (!$aplica || !$this->tieneAlgunPago($idSync) || $this->tienePagosConfirmados($idSync)) {
+                    continue;
+                }
+                $boleta = TesPagoEntity::where('id_orden_pago', $idSync)
+                    ->where('id_estado_orden_pago', '!=', self::ESTADO_OPA_RECHAZADO)->first();
+                if ($boleta) {
+                    $nuevoMonto = TesOrdenPagoEntity::find($idSync)->monto_orden_pago;
+                    $boleta->monto_pago = $nuevoMonto;
+                    $boleta->monto_opa = $nuevoMonto;
+                    $boleta->save();
+                }
+            }
 
             return $detalleCreado;
         });
@@ -1845,6 +1908,17 @@ class TestOrdenPagoRepository
                 $firstDetalle->save();
             }
             $this->recalcularMontoDesdeDetalle($opa->id_orden_pago);
+            
+            // Sincronizar el pago no confirmado con el nuevo monto reducido
+            if ($this->tienePagosVivos($opa->id_orden_pago)) {
+                $pago = TesPagoEntity::where('id_orden_pago', $opa->id_orden_pago)->where('id_estado_orden_pago', '!=', self::ESTADO_OPA_RECHAZADO)->first();
+                if ($pago) {
+                    $nuevoMonto = TesOrdenPagoEntity::find($opa->id_orden_pago)->monto_orden_pago;
+                    $pago->monto_pago = $nuevoMonto;
+                    $pago->monto_opa = $nuevoMonto;
+                    $pago->save();
+                }
+            }
         }
 
         return $newopa;
