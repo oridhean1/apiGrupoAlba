@@ -490,7 +490,13 @@ class TesPagosRepository
                     // todavía no lo debitó. `montoPagadoOpa()` cuenta por esta fecha, así que
                     // setearla acá haría que la orden figure PAGADA con plata que no salió. Se
                     // completa al acreditar (`marcarAcreditado`), que es cuando el banco debita.
-                    'fecha_confirma_pago' => $esDiferido ? null : $pagos->fecha_confirma_pago,
+                    //
+                    // Una transferencia se paga el día que se CONFIRMA, no en la fecha de su cuota:
+                    // la del front (`$pagos->fecha_confirma_pago`) es la del cronograma y se usa
+                    // arriba solo para saber a qué cuota corresponde (queda en `id_fecha_probable`).
+                    // Antes una transferencia confirmada hoy quedaba "pagada" el día de la cuota,
+                    // con el asiento y el banco de hoy. (2026-10-06)
+                    'fecha_confirma_pago' => $esDiferido ? null : $this->fechaActual->toDateString(),
                     'id_forma_pago' => $pagos->id_forma_pago,
                     'monto_pago' => $pagos->monto_pago,
                     'monto_opa' => $pagos->monto_opa,

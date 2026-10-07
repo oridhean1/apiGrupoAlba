@@ -94,6 +94,15 @@ try {
     $r[] = ($bancos->count() === 2);
     echo $ok(end($r));
 
+    echo "--- 3b: la transferencia queda pagada HOY, no en la fecha de la cuota ---\n";
+    // El modal manda la fecha de la cuota (2026-10-01 / 02); esa sirve para saber a qué cuota
+    // corresponde, pero la fecha de pago es la de la confirmación. (2026-10-06)
+    $hoy = \Carbon\Carbon::now('America/Argentina/Buenos_Aires')->toDateString();
+    $fechas = $abonos->map(fn($a) => substr((string) $a->fecha_confirma_pago, 0, 10))->all();
+    echo "  fechas de pago: " . implode(', ', $fechas) . " (esperado {$hoy})\n";
+    $r[] = (count($fechas) === 2 && count(array_filter($fechas, fn($f) => $f === $hoy)) === 2);
+    echo $ok(end($r));
+
     echo "--- 4: la cuenta de la boleta NO se pisa con null cuando el modal no la manda ---\n";
     $boleta->refresh();
     echo "  cuenta de la boleta: " . var_export($boleta->id_cuenta_bancaria, true)
