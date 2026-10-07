@@ -389,7 +389,9 @@ class TesInstrumentoPagoController extends Controller
             $data = $this->repository->listarEmitidos(
                 $request->query('id_banco'),
                 $request->query('numero_opa'),
-                $request->query('id_razon')
+                $request->query('id_razon'),
+                // Filtros agregados el 2026-10-06.
+                $request->only(['tipo', 'beneficiario', 'numero_echeq', 'estado', 'desde', 'hasta'])
             );
             return response()->json($data, 200);
         } catch (\Exception $e) {

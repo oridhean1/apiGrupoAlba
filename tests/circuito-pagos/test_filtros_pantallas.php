@@ -165,6 +165,39 @@ if ($e0) {
     }
     $f = $em(['id_razon' => '2']);
     $caso('ECHEQ por razón social (sin errores)', is_array($f), count($f) . ' filas');
+
+    // Filtros agregados el 2026-10-06
+    foreach (['PRESTADOR', 'PROVEEDOR'] as $tp) {
+        $f = $em(['tipo' => $tp]);
+        $caso("ECHEQ tipo {$tp}", count($f) === 0 || $todas($f, fn($x) => $x['tipo_factura'] === $tp), count($f) . ' filas');
+    }
+    $benef = fn($x) => $x['pago']['opa']['prestador'] ?? $x['pago']['opa']['proveedor'] ?? [];
+    $cuitE = $benef($x0)['cuit'] ?? null;
+    if ($cuitE) {
+        $f = $em(['beneficiario' => $cuitE]);
+        $caso('ECHEQ por beneficiario (CUIT)', $todas($f, fn($x) => ($benef($x)['cuit'] ?? '') == $cuitE), count($f) . ' filas');
+        $nom = trim(mb_substr($benef($x0)['razon_social'] ?? '', 0, 6));
+        $f = $em(['beneficiario' => $nom]);
+        $caso("ECHEQ por beneficiario (nombre \"{$nom}\")", $todas($f, fn($x) => $contiene($benef($x)['razon_social'] ?? '', $nom)), count($f) . ' filas');
+    }
+    $conNum = collect($e0)->first(fn($x) => !empty($x['numero_echeq']) && !$x['numero_provisorio']);
+    if ($conNum) {
+        $f = $em(['numero_echeq' => $conNum['numero_echeq']]);
+        $caso('ECHEQ por N° de eCheq', $todas($f, fn($x) => str_contains((string) $x['numero_echeq'], (string) $conNum['numero_echeq'])), count($f) . ' filas');
+    }
+    $f = $em(['estado' => 'por_acreditar']);
+    $caso('ECHEQ estado por acreditar', count($f) === 0 || $todas($f, fn($x) => $x['id_estado_instrumento'] == 3), count($f) . ' filas');
+    $f = $em(['estado' => 'acreditado']);
+    $caso('ECHEQ estado acreditado', count($f) === 0 || $todas($f, fn($x) => $x['id_estado_instrumento'] == 4), count($f) . ' filas');
+    $f = $em(['estado' => 'sin_numero']);
+    $caso('ECHEQ estado sin número del banco', count($f) === 0 || $todas($f, fn($x) => $x['id_estado_instrumento'] == 3 && (empty($x['numero_echeq']) || $x['numero_provisorio'])), count($f) . ' filas');
+    $fe = $x0['fecha_emision_echeq'] ?? null;
+    if ($fe) {
+        $f = $em(['desde' => $fe, 'hasta' => $fe]);
+        $caso("ECHEQ por fecha de pago ({$fe})", $todas($f, fn($x) => substr((string) $x['fecha_emision_echeq'], 0, 10) === $fe), count($f) . ' filas');
+        $f = $em(['desde' => $fe]);
+        $caso('ECHEQ solo "desde"', $todas($f, fn($x) => substr((string) $x['fecha_emision_echeq'], 0, 10) >= $fe), count($f) . ' filas');
+    }
 }
 
 // ================================================================ Anticipos

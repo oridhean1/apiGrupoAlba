@@ -1604,8 +1604,22 @@ class TesInstrumentoPagoRepository
      * Se incluyen los ACREDITADOS de los últimos días para que quede a la vista lo recién
      * confirmado y se pueda rechazar si el eCheq vuelve después.
      */
-    public function listarEmitidos($idBanco = null, $numeroOpa = null, $idRazon = null)
+    /**
+     * @param array $extra Filtros agregados el 2026-10-06 (la pantalla tenía solo banco, OPA y
+     *                     razón social): tipo (PRESTADOR | PROVEEDOR), beneficiario (nombre o CUIT), numero_echeq, estado
+     *                     (por_acreditar | acreditado | sin_numero), desde / hasta (fecha de pago).
+     */
+    public function listarEmitidos($idBanco = null, $numeroOpa = null, $idRazon = null, array $extra = [])
     {
+        $beneficiario = trim((string) ($extra['beneficiario'] ?? ''));
+        $cuit = preg_replace('/\D/', '', $beneficiario);
+        $numeroEcheq = trim((string) ($extra['numero_echeq'] ?? ''));
+        $estado = $extra['estado'] ?? null;
+        $desde = $extra['desde'] ?? null;
+        $hasta = $extra['hasta'] ?? null;
+        $tipo = in_array($extra['tipo'] ?? null, ['PRESTADOR', 'PROVEEDOR'], true) ? $extra['tipo'] : null;
+
+
         return TesPagosParciales::query()
             ->select([
                 'tb_tes_pago_parcial.id_pago_parcial',
@@ -1642,6 +1656,35 @@ class TesInstrumentoPagoRepository
             ->whereIn('tb_tes_pago_parcial.id_estado_instrumento', [self::EMITIDO, self::ACREDITADO])
             ->when(!is_null($idBanco), fn($q) => $q->where('tb_tes_pago_parcial.id_banco_emisor', $idBanco))
             ->tap(fn($q) => $this->filtrarPorOpaYRazon($q, $numeroOpa, $idRazon, 'tb_tes_orden_pago.num_orden_pago', 'tb_tes_orden_pago.id_orden_pago'))
+            // Beneficiario: el de la orden (prestador o proveedor), por nombre o CUIT.
+            ->when($beneficiario !== '', function ($q) use ($beneficiario, $cuit) {
+                $q->where(function ($w) use ($beneficiario, $cuit) {
+                    foreach (['prestador' => ['tb_prestador', 'cod_prestador', 'id_prestador'],
+                              'proveedor' => ['tb_proveedor', 'cod_proveedor', 'id_proveedor']] as [$tabla, $pk, $fk]) {
+                        $w->orWhereExists(function ($e) use ($tabla, $pk, $fk, $beneficiario, $cuit) {
+                            $e->select(DB::raw(1))->from($tabla)
+                                ->whereColumn("{$tabla}.{$pk}", "tb_tes_orden_pago.{$fk}")
+                                ->where(function ($b) use ($tabla, $beneficiario, $cuit) {
+                                    $b->where("{$tabla}.razon_social", 'LIKE', "%{$beneficiario}%");
+                                    if (strlen($cuit) >= 5) {
+                                        $b->orWhere("{$tabla}.cuit", 'LIKE', "%{$cuit}%");
+                                    }
+                                });
+                        });
+                    }
+                });
+            })
+            // Prestadores / Proveedores, como el selector de Generar OPA (2026-10-06).
+            ->when($tipo, fn($q) => $q->where('tb_tes_orden_pago.tipo_factura', $tipo))
+            ->when($numeroEcheq !== '', fn($q) => $q->where('tb_tes_pago_parcial.numero_echeq', 'LIKE', "%{$numeroEcheq}%"))
+            ->when($estado === 'por_acreditar', fn($q) => $q->where('tb_tes_pago_parcial.id_estado_instrumento', self::EMITIDO))
+            ->when($estado === 'acreditado', fn($q) => $q->where('tb_tes_pago_parcial.id_estado_instrumento', self::ACREDITADO))
+            ->when($estado === 'sin_numero', fn($q) => $q->where('tb_tes_pago_parcial.id_estado_instrumento', self::EMITIDO)
+                ->where(fn($w) => $w->where('tb_tes_pago_parcial.numero_provisorio', 1)
+                    ->orWhereNull('tb_tes_pago_parcial.numero_echeq')
+                    ->orWhere('tb_tes_pago_parcial.numero_echeq', '')))
+            ->when(!empty($desde), fn($q) => $q->whereDate('tb_tes_pago_parcial.fecha_emision_echeq', '>=', $desde))
+            ->when(!empty($hasta), fn($q) => $q->whereDate('tb_tes_pago_parcial.fecha_emision_echeq', '<=', $hasta))
             ->with(['bancoEmisor', 'cuentaBancaria', 'estadoInstrumento', 'pago.opa.proveedor', 'pago.opa.prestador'])
             // Los que todavía esperan acreditación van primero: son los que requieren acción.
             ->orderBy('tb_tes_pago_parcial.id_estado_instrumento')
