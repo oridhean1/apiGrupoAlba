@@ -82,13 +82,17 @@ try {
     // La fecha de acreditacion sale de un periodo REAL, no se inventa: el asiento 2 se imputa al
     // periodo de ESA fecha y si no existe el sistema corta (a proposito: no se puede asentar en
     // un periodo inexistente). Los periodos de esta base llegan hasta 2026-09-30.
-    $fechaAcredita = \Carbon\Carbon::parse($periodoHoy->periodo_fin)->toDateString();
+    // El PRIMER dia del periodo (antes el ultimo): acreditar a futuro ahora se rechaza, y sigue
+    // siendo una fecha distinta de hoy, que es lo que necesita el caso 6b. (2026-10-06)
+    $fechaAcredita = min(\Carbon\Carbon::parse($periodoHoy->periodo_inicio)->toDateString(), \Carbon\Carbon::now('America/Argentina/Buenos_Aires')->toDateString());
     echo "acreditacion a usar: {$fechaAcredita} (periodo {$periodoHoy->id_periodo_contable})\n";
 
     // La fecha de acreditacion sale de un periodo REAL. No se inventa: el asiento 2 se imputa al
     // periodo de esa fecha, y si no existe el sistema corta (a proposito — no se puede asentar en
     // un periodo inexistente). Los periodos de esta base llegan hasta 2026-09-30.
-    $fechaAcredita = \Carbon\Carbon::parse($periodoHoy->periodo_fin)->toDateString();
+    // El PRIMER dia del periodo (antes el ultimo): acreditar a futuro ahora se rechaza, y sigue
+    // siendo una fecha distinta de hoy, que es lo que necesita el caso 6b. (2026-10-06)
+    $fechaAcredita = min(\Carbon\Carbon::parse($periodoHoy->periodo_inicio)->toDateString(), \Carbon\Carbon::now('America/Argentina/Buenos_Aires')->toDateString());
     echo "fecha de acreditacion a usar: {$fechaAcredita} (dentro del periodo {$periodoHoy->id_periodo_contable})\n";
 
     $pagable = $opaRepo->montoPagableOpa($opa->id_orden_pago);
@@ -208,6 +212,15 @@ try {
     $haberBco2 = (float) $lineas2->where('id_detalle_plan', $cta->plan_banco)->sum('monto_haber');
     echo "  DEBE diferidos={$plata($debeDif2)} | HABER banco={$plata($haberBco2)} (esperado {$plata($otraMitad)} cada uno)\n";
     $r[] = (abs($debeDif2 - $otraMitad) < 0.02 && abs($haberBco2 - $otraMitad) < 0.02);
+    echo $ok(end($r));
+
+    echo "--- 6b: el asiento 2 lleva la FECHA DE ACREDITACION, no la de hoy ---\n";
+    // Antes salía con la fecha del día y el período de la acreditación: fecha y período no
+    // coincidían si se acreditaba en otro mes. (2026-10-06)
+    $fechaAsi2 = (string) DB::table('tb_cont_asientos_contables')
+        ->where('id_asiento_contable', $evDebito->id_asiento_contable ?? 0)->value('fecha_asiento');
+    echo "  fecha del asiento={$fechaAsi2} (esperado {$fechaAcredita})\n";
+    $r[] = (substr($fechaAsi2, 0, 10) === $fechaAcredita);
     echo $ok(end($r));
 
     echo "--- 7: los dos asientos se cancelan sobre la cuenta de diferidos ---\n";

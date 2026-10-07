@@ -723,6 +723,12 @@ class AsientoContableRepository
             $datos['id_razon'] ?? null
         );
 
+        // El asiento va con la FECHA DE ACREDITACIÓN, no la de hoy: el período ya se resuelve con
+        // esa fecha, y `findByCrearAsiento` siempre pone la actual. Acreditar el 2/11 un eCheq
+        // debitado el 30/10 dejaba fecha de noviembre con período de octubre. (2026-10-06)
+        $asiento->fecha_asiento = Carbon::parse($fechaAcreditacion)->toDateString();
+        $asiento->save();
+
         $lineaDiferidos = $this->findByCrearDetalleAsiento([
             'id_asiento_contable'                => $asiento->id_asiento_contable,
             'id_cuenta_bancaria_cuenta_contable' => $cuentaDiferidos->id_cuenta_bancaria_cuenta_contable ?? null,

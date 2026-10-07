@@ -1,4 +1,6 @@
 <?php
+// 2026-10-06: acredita con la fecha de HOY. Acreditar a futuro ahora se rechaza (ver
+// test_acreditar_fecha_futura.php), y estos tests usaban fechas inventadas a futuro.
 // La guarda de "no acreditar sin pago confirmado" (2026-09-10) miraba la BOLETA, y eso dejaba un
 // agujero: una vez confirmada la boleta -por ejemplo con una transferencia-, cualquier eCheq
 // emitido DESPUES heredaba el permiso y se podia acreditar sin pasar por Confirmar Pago,
@@ -96,7 +98,7 @@ try {
 
     echo "--- 2: NO se puede acreditar, aunque la BOLETA este confirmada ---\n";
     try {
-        $inst->marcarAcreditado($echeq->id_pago_parcial, '2026-11-20', $opaRepo);
+        $inst->marcarAcreditado($echeq->id_pago_parcial, \Carbon\Carbon::now('America/Argentina/Buenos_Aires')->toDateString(), $opaRepo);
         echo "  NO fallo: acredito heredando el permiso de la boleta\n"; $r[] = false;
     } catch (\Throwable $e) {
         echo "  rechazado: {$e->getMessage()}\n";
@@ -131,7 +133,7 @@ try {
     $echeq->refresh();
     echo "  fecha_confirmado_en_pago=" . var_export($echeq->fecha_confirmado_en_pago, true) . "\n";
     try {
-        $inst->marcarAcreditado($echeq->id_pago_parcial, '2026-11-20', $opaRepo);
+        $inst->marcarAcreditado($echeq->id_pago_parcial, \Carbon\Carbon::now('America/Argentina/Buenos_Aires')->toDateString(), $opaRepo);
         $echeq->refresh();
         echo "  acreditado: estado_instrumento={$echeq->id_estado_instrumento} (esperado 4)\n";
         $r[] = ((int) $echeq->id_estado_instrumento === Inst::ACREDITADO);

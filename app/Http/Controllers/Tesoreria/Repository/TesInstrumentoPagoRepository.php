@@ -468,6 +468,17 @@ class TesInstrumentoPagoRepository
                 throw new \Exception('Solo se puede acreditar un eCheq que esté emitido.');
             }
 
+            // No se acredita a futuro: acreditar dice que el banco YA debitó, y con esa fecha se
+            // asienta. El front proponía la fecha en UTC (desde las 21 hs, "mañana") y el asiento
+            // quedaba fechado al día siguiente. (2026-10-06)
+            $hoy = \Carbon\Carbon::now('America/Argentina/Buenos_Aires')->toDateString();
+            if (\Carbon\Carbon::parse($fechaAcreditacion)->toDateString() > $hoy) {
+                throw new \Exception(
+                    'La fecha de acreditación (' . \Carbon\Carbon::parse($fechaAcreditacion)->format('d/m/Y')
+                    . ') es posterior a hoy. Se acredita cuando el banco ya debitó el eCheq.'
+                );
+            }
+
             // No se acredita un eCheq cuyo PAGO todavía no se confirmó.
             //
             // Acreditar dice que la plata salió del banco. Pero el asiento contable y el descuento

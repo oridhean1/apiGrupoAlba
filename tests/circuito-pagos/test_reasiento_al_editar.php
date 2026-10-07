@@ -1,4 +1,6 @@
 <?php
+// 2026-10-06: acredita con la fecha de HOY. Acreditar a futuro ahora se rechaza (ver
+// test_acreditar_fecha_futura.php), y estos tests usaban fechas inventadas a futuro.
 // Corregir un instrumento YA ASENTADO tiene que rehacer su asiento.
 //
 // Es la contrapartida obligatoria de haber abierto la edicion de un EMITIDO (2026-09-15). El
@@ -179,7 +181,7 @@ try {
     $echeq->id_estado_instrumento = Inst::EMITIDO;
     $echeq->save();
     $periodoHoy = $periodos->findByPeriodoContableActivoNow($cta->id_razon);
-    $inst->marcarAcreditado($echeq->id_pago_parcial, $periodoHoy->periodo_fin, $opaRepo);
+    $inst->marcarAcreditado($echeq->id_pago_parcial, \Carbon\Carbon::now('America/Argentina/Buenos_Aires')->toDateString(), $opaRepo);
     $pasivoFinal = $netoDe($echeq->id_pago_parcial, $cta->plan_diferido);
     echo "  pasivo en diferidos={$plata($pasivoFinal)} (esperado 0,00)\n";
     $r[] = (abs($pasivoFinal) < 0.02);

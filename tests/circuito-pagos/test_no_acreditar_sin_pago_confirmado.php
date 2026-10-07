@@ -1,4 +1,6 @@
 <?php
+// 2026-10-06: acredita con la fecha de HOY. Acreditar a futuro ahora se rechaza (ver
+// test_acreditar_fecha_futura.php), y estos tests usaban fechas inventadas a futuro.
 // Un eCheq podia recorrer TODO su ciclo dentro de Carga de eCheq —emitir, numero, confirmar
 // emision, acreditar— sin pasar nunca por Confirmar Pago. El problema: el asiento contable y el
 // descuento del saldo de la cuenta se hacen SOLO en `TesPagosController::getConfirmarPago`. No hay
@@ -79,7 +81,7 @@ try {
     [$b1, $a1] = $armar('2026-11-01', $opa, $pagable);
     echo "  boleta {$b1->id_pago} fecha_confirma_pago=" . var_export($b1->fecha_confirma_pago, true) . "\n";
     try {
-        $inst->marcarAcreditado($a1->id_pago_parcial, '2026-11-05', $opaRepo);
+        $inst->marcarAcreditado($a1->id_pago_parcial, \Carbon\Carbon::now('America/Argentina/Buenos_Aires')->toDateString(), $opaRepo);
         echo "  NO fallo: acredito sin pago confirmado\n"; $r[] = false;
     } catch (\Throwable $e) {
         echo "  rechazado: {$e->getMessage()}\n";
@@ -112,7 +114,7 @@ try {
     $b1->refresh();
     echo "  boleta confirmada=" . var_export($b1->fecha_confirma_pago, true) . "\n";
     try {
-        $inst->marcarAcreditado($a1->id_pago_parcial, '2026-11-05', $opaRepo);
+        $inst->marcarAcreditado($a1->id_pago_parcial, \Carbon\Carbon::now('America/Argentina/Buenos_Aires')->toDateString(), $opaRepo);
         $a1->refresh();
         echo "  acreditado: estado_instrumento={$a1->id_estado_instrumento} (esperado 4)\n";
         $r[] = ((int) $a1->id_estado_instrumento === Inst::ACREDITADO);

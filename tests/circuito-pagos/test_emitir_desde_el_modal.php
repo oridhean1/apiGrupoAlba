@@ -1,4 +1,6 @@
 <?php
+// 2026-10-06: acredita con la fecha de HOY. Acreditar a futuro ahora se rechaza (ver
+// test_acreditar_fecha_futura.php), y estos tests usaban fechas inventadas a futuro.
 // Etapa 1: el eCheq/cheque se emite desde el modal de Confirmar Pago, no desde una pestania aparte.
 // La pantalla de emision pedia exactamente los mismos tres datos que el modal ya pedia (monto,
 // forma de pago y cuenta de origen), asi que eran dos pantallas para un solo acto.
@@ -172,7 +174,7 @@ try {
     // de acreditacion lo frenaba, con razon.
     $inst->guardarBorradorNumero($echeq->id_pago_parcial, 'TEST-' . $echeq->id_pago_parcial);
     $echeq->refresh();
-    $inst->marcarAcreditado($echeq->id_pago_parcial, '2026-12-05', $opaRepo);
+    $inst->marcarAcreditado($echeq->id_pago_parcial, \Carbon\Carbon::now('America/Argentina/Buenos_Aires')->toDateString(), $opaRepo);
     $echeq->refresh();
     echo "  estado_instrumento={$echeq->id_estado_instrumento} fecha_confirma_pago=" . var_export($echeq->fecha_confirma_pago, true) . "\n";
     echo "  cobrado de la OPA=" . $plata($opaRepo->montoPagadoOpa($opa->id_orden_pago)) . "\n";
@@ -194,7 +196,7 @@ try {
     $provisorio->save();
 
     try {
-        $inst->marcarAcreditado($provisorio->id_pago_parcial, '2026-12-05', $opaRepo);
+        $inst->marcarAcreditado($provisorio->id_pago_parcial, \Carbon\Carbon::now('America/Argentina/Buenos_Aires')->toDateString(), $opaRepo);
         echo "  NO fallo: acredito con numero provisorio\n"; $r[] = false;
     } catch (\Throwable $e) {
         echo "  rechazado: {$e->getMessage()}\n";
@@ -209,7 +211,7 @@ try {
     echo "  numero=" . var_export($provisorio->numero_echeq, true)
         . " provisorio=" . var_export($provisorio->numero_provisorio, true) . "\n";
     try {
-        $inst->marcarAcreditado($provisorio->id_pago_parcial, '2026-12-05', $opaRepo);
+        $inst->marcarAcreditado($provisorio->id_pago_parcial, \Carbon\Carbon::now('America/Argentina/Buenos_Aires')->toDateString(), $opaRepo);
         $provisorio->refresh();
         echo "  estado_instrumento={$provisorio->id_estado_instrumento} (esperado " . Inst::ACREDITADO . ")\n";
         $r[] = ((int) $provisorio->id_estado_instrumento === Inst::ACREDITADO);
