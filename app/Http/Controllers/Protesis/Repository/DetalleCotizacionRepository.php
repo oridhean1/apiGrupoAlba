@@ -48,7 +48,33 @@ class DetalleCotizacionRepository
 
     public function findByDetalleCotizacion($idProtesis)
     {
-        return DB::table('vw_detalle_cotizacion_licitacion')
-            ->where('id_protesis', $idProtesis)->get();
+        return DB::table('tb_protesis_detalle as dtp')
+            ->join('tb_protesis_matriz_productos as pd', 'pd.id_producto', '=', 'dtp.id_producto')
+            ->join('tb_protesis_solicitar_presupuesto as pr', 'pr.id_protesis', '=', 'dtp.id_protesis')
+            ->leftJoin('tb_prestador as pre', 'pre.cod_prestador', '=', 'pr.cod_prestador')
+            ->leftJoin('tb_protesis_detalle_cotizacion as ct', function ($join) {
+                $join->on('ct.id_solicitud', '=', 'pr.id_solicitud')
+                    ->on('ct.id_detalle_producto_licitacion', '=', 'dtp.id_detalle');
+            })
+            ->where('dtp.id_protesis', $idProtesis)
+            ->select(
+                'dtp.id_detalle',
+                'dtp.id_protesis',
+                'dtp.id_producto',
+                'dtp.cantidad_solicita',
+                'pd.descripcion_producto',
+                'pr.id_solicitud',
+                'pr.cod_prestador',
+                'pr.archivo_cotizacion',
+                'pre.cuit',
+                'pre.razon_social',
+                'pre.nombre_fantasia',
+                'ct.id_cotizacion',
+                'ct.cantidad_autorizada',
+                'ct.monto_cotiza',
+                'ct.importe_total',
+                'ct.observaciones'
+            )
+            ->get();
     }
 }
