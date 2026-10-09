@@ -1215,6 +1215,8 @@ Route::group(
         Route::get('imputacion-fifo-opa/{id}', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getImputacionFifo']);  // Que facturas cubrio lo pagado
         Route::get('estado-pago-factura/{id}', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getEstadoPagoFactura']);  // Estado de pago real de una factura
         Route::post('anular-opa', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getAnularOpa']);  // Anula la OP sin reemplazarla; libera sus facturas
+        Route::get('opas-automaticas', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getOpasAutomaticas']);  // OPAs PENDIENTES creadas solas por el sistema viejo (modal de Generar OPA)
+        Route::post('anular-opas-automaticas', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getAnularOpasAutomaticas']);  // Anula en lote las OPAs automaticas; motivo precargado
         Route::post('anular-reemitir-opa', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getAnularYReemitir']);  // Anula y reemite dejando trazabilidad
         Route::get('cadena-reemplazos-opa/{id}', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getCadenaReemplazos']);  // Cadena de reemplazos de una OP
         Route::post('modificar-estado-opa', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getModificarEstado']);

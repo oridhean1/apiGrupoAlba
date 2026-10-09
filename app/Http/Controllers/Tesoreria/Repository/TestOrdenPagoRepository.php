@@ -26,6 +26,26 @@ class TestOrdenPagoRepository
     const ESTADO_OPA_PAGO_PARCIAL = 6;
     const ESTADO_OPA_CONSUMIDA = 7;    // anticipos (fase 3)
 
+    /**
+     * OPAs AUTOMÁTICAS: las que el sistema viejo creaba solo (al pasar la factura de prestador a
+     * Valorización Final, o al cargar la de proveedor) y quedaron PENDIENTES, sin cronograma.
+     * Traban la factura en Generar OPA. (2026-10-09)
+     *
+     * Las tres condiciones juntas, ninguna alcanza sola:
+     *  - PENDIENTE: el circuito nuevo nunca deja una orden ahí — Generar OPA exige cronograma y
+     *    la orden nace EN PROCESO (ver `procesarOpaAgrupada`).
+     *  - sin boleta: si alguien la confirmó con el flujo viejo ya tiene cronograma, y esa no es
+     *    "automática": la decidió una persona.
+     *  - antes del corte: el pase fue el 2026-10-07 (Alba) y la API de OSV se publicó el 10-08;
+     *    el corte cubre los dos con margen. Lo de después no puede ser automático.
+     *
+     * No se sabe si se pagaron por banco (el sistema viejo no lo registraba): por eso se anulan
+     * de a una o en lote a pedido de Tesorería, nunca solas.
+     */
+    const CORTE_OPAS_AUTOMATICAS = '2026-10-09 00:00:00';
+    const MOTIVO_ANULACION_OPA_AUTOMATICA =
+        'OPA automática previa al circuito de pagos: anulada para regenerarla desde Generar OPA.';
+
     private $user;
     private $fechaActual;
 
@@ -2052,6 +2072,150 @@ class TestOrdenPagoRepository
                 'anulada' => $opa->refresh(),
             ];
         });
+    }
+
+    /**
+     * Condición SQL de "OPA automática" sobre el alias `$alias` de tb_tes_orden_pago.
+     * Única fuente del criterio: la usan el listado del modal, la marca de Generar OPA y la
+     * revalidación al anular. Ver CORTE_OPAS_AUTOMATICAS.
+     */
+    public static function sqlOpaAutomatica(string $alias = 'o'): string
+    {
+        return "{$alias}.id_estado_orden_pago = " . self::ESTADO_OPA_PENDIENTE
+            . " AND {$alias}.fecha_genera < '" . self::CORTE_OPAS_AUTOMATICAS . "'"
+            . " AND NOT EXISTS (SELECT 1 FROM tb_tes_pago bol WHERE bol.id_orden_pago = {$alias}.id_orden_pago)";
+    }
+
+    public function esOpaAutomatica($idOpa): bool
+    {
+        return DB::table('tb_tes_orden_pago as o')
+            ->where('o.id_orden_pago', $idOpa)
+            ->whereRaw(self::sqlOpaAutomatica('o'))
+            ->exists();
+    }
+
+    /**
+     * Query base del listado de OPAs automáticas, con los filtros del modal.
+     *
+     * @param object $params tipo (PRESTADOR|PROVEEDOR), buscar (beneficiario, CUIT o N° de OPA),
+     *                       id_locatorio (razón social de las facturas)
+     */
+    private function queryOpasAutomaticas($params)
+    {
+        $query = DB::table('tb_tes_orden_pago as o')
+            ->leftJoin('tb_prestador as pr', 'pr.cod_prestador', '=', 'o.id_prestador')
+            ->leftJoin('tb_proveedor as pv', 'pv.cod_proveedor', '=', 'o.id_proveedor')
+            ->whereRaw(self::sqlOpaAutomatica('o'));
+
+        $tipo = strtoupper((string) ($params->tipo ?? ''));
+        if (in_array($tipo, ['PRESTADOR', 'PROVEEDOR'], true)) {
+            $query->where('o.tipo_factura', $tipo);
+        }
+
+        if (!empty($params->id_locatorio)) {
+            $query->whereExists(function ($q) use ($params) {
+                $q->select(DB::raw(1))
+                    ->from('tb_tes_orden_pago_detalle as d')
+                    ->join('tb_facturacion_datos as f', 'f.id_factura', '=', 'd.id_factura')
+                    ->whereColumn('d.id_orden_pago', 'o.id_orden_pago')
+                    ->where('f.id_locatorio', $params->id_locatorio);
+            });
+        }
+
+        if (!empty($params->buscar)) {
+            $txt = trim((string) $params->buscar);
+            $query->where(function ($q) use ($txt) {
+                $q->where('pr.razon_social', 'LIKE', "%{$txt}%")
+                    ->orWhere('pr.cuit', 'LIKE', "%{$txt}%")
+                    ->orWhere('pv.razon_social', 'LIKE', "%{$txt}%")
+                    ->orWhere('pv.cuit', 'LIKE', "%{$txt}%")
+                    ->orWhere('o.num_orden_pago', 'LIKE', "%{$txt}%");
+            });
+        }
+
+        return $query;
+    }
+
+    /** @return array{data: array, total: int, motivo: string} */
+    public function listarOpasAutomaticas($params): array
+    {
+        $query = $this->queryOpasAutomaticas($params);
+        $total = (clone $query)->count();
+
+        $page    = max(1, (int) ($params->page ?? 1));
+        $perPage = min(500, max(1, (int) ($params->per_page ?? 100)));
+
+        $data = $query->select([
+            'o.id_orden_pago',
+            'o.num_orden_pago',
+            'o.tipo_factura',
+            'o.fecha_genera',
+            'o.monto_orden_pago',
+            DB::raw('COALESCE(pr.razon_social, pv.razon_social) as beneficiario'),
+            DB::raw('COALESCE(pr.cuit, pv.cuit) as cuit'),
+            DB::raw("(SELECT GROUP_CONCAT(CONCAT(f.tipo_letra, ' ', f.sucursal, '-', f.numero) SEPARATOR ', ')
+                        FROM tb_tes_orden_pago_detalle d
+                        JOIN tb_facturacion_datos f ON f.id_factura = d.id_factura
+                       WHERE d.id_orden_pago = o.id_orden_pago) as facturas"),
+            DB::raw('(SELECT COUNT(*) FROM tb_tes_orden_pago_detalle d
+                       WHERE d.id_orden_pago = o.id_orden_pago) as cantidad_facturas'),
+            DB::raw('(SELECT rs.razon_social FROM tb_tes_orden_pago_detalle d
+                        JOIN tb_facturacion_datos f ON f.id_factura = d.id_factura
+                        JOIN tb_razones_sociales rs ON rs.id_razon = f.id_locatorio
+                       WHERE d.id_orden_pago = o.id_orden_pago LIMIT 1) as razon_social_empresa'),
+        ])
+            ->orderByDesc('o.fecha_genera')
+            ->orderByDesc('o.id_orden_pago')
+            ->skip(($page - 1) * $perPage)->take($perPage)
+            ->get()
+            ->map(function ($r) {
+                $r->monto_orden_pago = (float) $r->monto_orden_pago;
+                $r->cantidad_facturas = (int) $r->cantidad_facturas;
+                return $r;
+            });
+
+        return ['data' => $data->all(), 'total' => $total, 'motivo' => self::MOTIVO_ANULACION_OPA_AUTOMATICA];
+    }
+
+    /**
+     * Anula OPAs automáticas en lote: las elegidas (`ids`) o todas las que coinciden con el
+     * filtro del modal (`todas` = true).
+     *
+     * Cada una se revalida acá — que sea automática, y las guardas de `anularOpa()` — en vez de
+     * confiar en lo que mandó el front. Una que no pasa no frena a las demás: se informa.
+     * El motivo viene precargado; quién anula queda en `cod_usuario_rechaza` (lo pone anularOpa).
+     *
+     * @return array{anuladas: int, errores: array<int, array{num: ?string, message: string}>}
+     */
+    public function anularOpasAutomaticas($params): array
+    {
+        $motivo = trim((string) ($params->motivo ?? '')) ?: self::MOTIVO_ANULACION_OPA_AUTOMATICA;
+
+        $ids = !empty($params->todas)
+            ? $this->queryOpasAutomaticas($params)->pluck('o.id_orden_pago')->all()
+            : array_values(array_unique(array_map('intval', (array) ($params->ids ?? []))));
+
+        $anuladas = 0;
+        $errores  = [];
+
+        foreach ($ids as $id) {
+            if (!$this->esOpaAutomatica($id)) {
+                $num = TesOrdenPagoEntity::where('id_orden_pago', $id)->value('num_orden_pago');
+                $errores[] = ['num' => $num, 'message' => 'No es una OPA automática pendiente: no se anula desde acá.'];
+                continue;
+            }
+
+            $res = $this->anularOpa($id, $motivo);
+
+            if ($res['ok']) {
+                $anuladas++;
+            } else {
+                $num = TesOrdenPagoEntity::where('id_orden_pago', $id)->value('num_orden_pago');
+                $errores[] = ['num' => $num, 'message' => $res['message']];
+            }
+        }
+
+        return ['anuladas' => $anuladas, 'errores' => $errores];
     }
 
     public function anularYReemitir($idOpa, ?string $motivo = null): array

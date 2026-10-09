@@ -227,6 +227,15 @@ class FacturasOpaRepository
         $pagableSql = '(f.total_neto - COALESCE(f.total_debitado_liquidacion, 0))';
         $saldoSql   = "GREATEST({$pagableSql} - {$imputadoSql}, 0)";
 
+        // OPA AUTOMÁTICA (del sistema viejo) que traba la factura. Esas facturas se listan aunque
+        // no tengan saldo, para que Tesorería pueda anular la OPA desde acá y regenerarla. El
+        // criterio vive en un solo lugar: TestOrdenPagoRepository::sqlOpaAutomatica. (2026-10-09)
+        $opaAutoSql = '(SELECT MIN(oa.id_orden_pago)
+              FROM tb_tes_opa_factura pfa
+              JOIN tb_tes_orden_pago oa ON oa.id_orden_pago = pfa.id_orden_pago
+             WHERE pfa.id_factura = f.id_factura
+               AND ' . TestOrdenPagoRepository::sqlOpaAutomatica('oa') . ')';
+
         // LEFT y no INNER: hay facturas cuyo `id_prestador` no tiene fila en `tb_prestador`
         // (1 en Alba, 3 en OSV al 2026-09-12). Con INNER esas facturas desaparecían del listado
         // sin ningún aviso — el usuario no tenía forma de saber por qué una factura valorizada no
@@ -306,7 +315,7 @@ class FacturasOpaRepository
         }
 
         if (empty($params->incluir_sin_saldo)) {
-            $query->whereRaw("{$saldoSql} > 0.01");
+            $query->whereRaw("({$saldoSql} > 0.01 OR {$opaAutoSql} IS NOT NULL)");
         }
 
         $total = (int) (clone $query)->count(DB::raw('DISTINCT f.id_factura'));
@@ -338,6 +347,7 @@ class FacturasOpaRepository
             DB::raw("{$pagableSql} as monto_pagable"),
             DB::raw("{$imputadoSql} as monto_imputado"),
             DB::raw("ROUND({$saldoSql}, 2) as saldo_pendiente"),
+            DB::raw("{$opaAutoSql} as id_opa_automatica"),
         ])
             ->orderByDesc('f.periodo')
             ->orderByRaw('CAST(f.numero AS UNSIGNED) DESC');
@@ -354,7 +364,16 @@ class FacturasOpaRepository
             $f->monto_pagable = (float) $f->monto_pagable;
             $f->monto_imputado = (float) $f->monto_imputado;
             $f->saldo_pendiente = (float) $f->saldo_pendiente;
+            $f->id_opa_automatica = $f->id_opa_automatica ? (int) $f->id_opa_automatica : null;
             return $f;
+        });
+
+        // El número aparte, sobre la página ya cortada: hacerlo en el SELECT repetía la subconsulta.
+        $idsAuto = $data->pluck('id_opa_automatica')->filter()->unique()->values();
+        $nums = $idsAuto->isEmpty() ? collect() : DB::table('tb_tes_orden_pago')
+            ->whereIn('id_orden_pago', $idsAuto)->pluck('num_orden_pago', 'id_orden_pago');
+        $data->each(function ($f) use ($nums) {
+            $f->num_opa_automatica = $f->id_opa_automatica ? ($nums[$f->id_opa_automatica] ?? null) : null;
         });
 
         return ['data' => $data->all(), 'total' => $total];
