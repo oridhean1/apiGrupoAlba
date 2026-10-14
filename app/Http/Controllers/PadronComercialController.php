@@ -167,7 +167,55 @@ class PadronComercialController extends Controller
                 ->where('id_padron', $file->dni)->get();
             $file->id_tipo_plan = $plan;
             $file->familia = $familia;
+            $file->origen_tabla = 'comercial';
         }
+
+        // R-00000570: al buscar por texto, sumar los afiliados que existen solo en Afiliaciones (tb_padron).
+        // Se devuelven marcados con origen_tabla = 'afiliaciones' para que el front los muestre en solo lectura,
+        // ya que su id no pertenece a tb_padron_comercial. Sin estado de autorizacion, no aplican a ese filtro.
+        if (!empty($request->dni) && empty($request->id_estado_autorizacion)) {
+            $queryAfiliaciones = AfiliadoPadronEntity::with(['tipoParentesco', 'origen'])
+                ->where(function ($q) use ($request) {
+                    $q->where('dni', 'like', $request->dni . '%')
+                        ->orWhere('cuil_tit', 'like', '%' . $request->dni . '%')
+                        ->orWhere('cuil_benef', 'like', '%' . $request->dni . '%')
+                        ->orWhere('nombre', 'like', '%' . $request->dni . '%')
+                        ->orWhere('apellidos', 'like', '%' . $request->dni . '%');
+                })
+                ->whereNotIn('dni', PadronComercialModelo::select('dni')->whereNotNull('dni'));
+
+            if (!empty($request->persona)) {
+                $queryAfiliaciones->where('id_usuario', $request->persona);
+            }
+
+            if (!empty($request->desde) && !empty($request->hasta)) {
+                $queryAfiliaciones->whereBetween('fecha_carga', [
+                    $request->desde,
+                    $request->hasta
+                ]);
+            }
+
+            $afiliaciones = $queryAfiliaciones->limit(50)->get();
+
+            foreach ($afiliaciones as $file) {
+                $familia = AfiliadoPadronEntity::with(['tipoParentesco', 'origen'])
+                    ->where('cuil_tit', '=', $file->cuil_tit)->where('id', '!=', $file->id)->get();
+                foreach ($familia as $f_file) {
+                    $plan = AfiliadoDetalleTipoPlanEntity::with(['TipoPlan'])
+                        ->where('id_padron', $f_file->dni)->get();
+                    $f_file->id_tipo_plan = $plan;
+                    $f_file->origen_tabla = 'afiliaciones';
+                }
+                $plan = AfiliadoDetalleTipoPlanEntity::with(['TipoPlan'])
+                    ->where('id_padron', $file->dni)->get();
+                $file->id_tipo_plan = $plan;
+                $file->familia = $familia;
+                $file->origen_tabla = 'afiliaciones';
+            }
+
+            $datos = $datos->concat($afiliaciones);
+        }
+
         return response()->json($datos, 200);
     }
 
