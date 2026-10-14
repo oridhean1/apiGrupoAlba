@@ -732,6 +732,8 @@ class TesOrdenPagoController extends Controller
             "fechas_pendientes" => $fechasPendientes,
             "comprobante_provisorio" => $comprobanteProvisorio,
             "comprobante_nro" => $query?->num_orden_pago,
+            // NORMAL / ANTICIPO / APLICACION: el PDF de un anticipo tiene que decirlo (testeo 2026-10-14).
+            "tipo_opa" => $query?->tipo_opa,
             "fecha_emision" => $query?->fecha_emision,
             "cuit_proveedor" => $query?->proveedor ? $query?->proveedor?->cuit : $query?->prestador?->cuit,
             "nombre_proveedor" => $query?->proveedor ? $query?->proveedor?->razon_social : $query?->prestador?->razon_social,
@@ -834,6 +836,8 @@ class TesOrdenPagoController extends Controller
 
         $datos = [
             "comprobante_nro" => $query?->num_orden_pago,
+            // NORMAL / ANTICIPO / APLICACION: el PDF de un anticipo tiene que decirlo (testeo 2026-10-14).
+            "tipo_opa" => $query?->tipo_opa,
             "fecha_emision" => $query?->fecha_emision,
             "cuit_proveedor" => $query?->proveedor ? $query->proveedor->cuit : $query?->prestador->cuit,
             "nombre_proveedor" => $query?->proveedor ? $query->proveedor->razon_social : $query?->prestador->razon_social,
