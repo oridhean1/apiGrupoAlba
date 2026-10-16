@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\afiliados\Services;
 
 use App\Models\afiliado\AfiliadoMovimientoProgramadoEntity;
+use App\Models\afiliado\AfiliadoPadronEntity;
 use App\Models\ComercialOrigenModel;
 use App\Models\PadronComercialModelo;
 use Carbon\Carbon;
@@ -28,14 +29,16 @@ class MovimientoProgramadoController extends Controller
 
         $query = AfiliadoMovimientoProgramadoEntity::from('tb_afiliado_movimiento_programado as m')
             ->leftJoin('tb_padron_comercial as p', 'p.dni', '=', 'm.dni')
+            // R-00000570: afiliados que existen solo en Afiliaciones
+            ->leftJoin('tb_padron as pa', 'pa.dni', '=', 'm.dni')
             ->leftJoin('tb_comercial_origen as o', 'o.id_comercial_origen', '=', 'm.id_comercial_origen')
             ->leftJoin('tb_comercial_caja as c', 'c.id_comercial_caja', '=', 'm.id_comercial_caja')
             ->leftJoin('tb_usuarios as u', 'u.cod_usuario', '=', 'm.cod_usuario')
             ->select([
                 'm.*',
-                'p.nombre',
-                'p.apellidos',
-                'p.id_parentesco',
+                DB::raw('COALESCE(p.nombre, pa.nombre) as nombre'),
+                DB::raw('COALESCE(p.apellidos, pa.apellidos) as apellidos'),
+                DB::raw('COALESCE(p.id_parentesco, pa.id_parentesco) as id_parentesco'),
                 'o.detalle_comercial_origen',
                 'c.detalle_comercial_caja',
                 'u.nombre_apellidos as usuario'
@@ -81,7 +84,14 @@ class MovimientoProgramadoController extends Controller
             return response()->json(['message' => 'El origen seleccionado no corresponde a la caja indicada'], 500);
         }
 
+        // R-00000570: Comercial también lista afiliados que existen solo en Afiliaciones (tb_padron).
+        // Se usa la tabla donde está el afiliado, igual que el command que aplica el traspaso.
+        $modelo = PadronComercialModelo::class;
         $afiliado = PadronComercialModelo::where('dni', $request->dni)->first();
+        if (!$afiliado) {
+            $modelo = AfiliadoPadronEntity::class;
+            $afiliado = AfiliadoPadronEntity::where('dni', $request->dni)->first();
+        }
         if (!$afiliado) {
             return response()->json(['message' => 'No se encontró el afiliado'], 500);
         }
@@ -95,7 +105,7 @@ class MovimientoProgramadoController extends Controller
         // Mismo criterio que la baja: el titular arrastra a su grupo familiar activo, el familiar se traspasa solo
         $traspasoGrupo = $afiliado->id_parentesco == '00';
         if ($traspasoGrupo) {
-            $afiliados = PadronComercialModelo::where('cuil_tit', $afiliado->cuil_tit)
+            $afiliados = $modelo::where('cuil_tit', $afiliado->cuil_tit)
                 ->where('activo', 1)
                 ->where('id_comercial_origen', '!=', $request->id_comercial_origen)
                 ->get();
