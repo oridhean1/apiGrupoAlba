@@ -215,6 +215,17 @@
 
             <td width="40%" style="text-align: right; vertical-align: middle;">
                 <div style="font-size: 17px; font-weight: 800; color: #0f172a; margin-bottom: 8px; letter-spacing: 0.5px;">ORDEN DE PAGO</div>
+                {{-- El tipo se ve en la grilla pero no llegaba al documento: un anticipo impreso parecía
+                     una orden común mal cargada, sin comprobantes. (testeo 2026-10-14) --}}
+                @if(($tipo_opa ?? null) === 'ANTICIPO')
+                    <div style="margin-bottom: 8px;">
+                        <span style="display: inline-block; border: 2px solid #b45309; color: #b45309; font-weight: 800; font-size: 12px; padding: 3px 10px; border-radius: 4px; letter-spacing: 1px;">ANTICIPO</span>
+                    </div>
+                @elseif(($tipo_opa ?? null) === 'APLICACION')
+                    <div style="margin-bottom: 8px;">
+                        <span style="display: inline-block; border: 2px solid #1d4ed8; color: #1d4ed8; font-weight: 800; font-size: 11px; padding: 3px 10px; border-radius: 4px;">APLICACIÓN DE ANTICIPO</span>
+                    </div>
+                @endif
                 <div style="margin-bottom: 8px;">
                     <span class="badge">NRO: {{ substr($comprobante_nro, 4) }}</span>
                 </div>
@@ -290,7 +301,13 @@
     <table class="modern-table op-table">
         <thead>
             <tr class="op-card-title">
-                <th colspan="3" class="op-l1 op-l3" style="border-top: 3px solid #0f172a;">Aplicado a (Comprobantes)</th>
+                <th colspan="3" class="op-l1 op-l3" style="border-top: 3px solid #0f172a;">
+                    @if(($tipo_opa ?? null) === 'ANTICIPO')
+                        ANTICIPO a cuenta de facturas futuras (sin comprobantes)
+                    @else
+                        Aplicado a (Comprobantes)
+                    @endif
+                </th>
                 <th class="sep"></th>
                 <th colspan="3" class="op-l1 op-l3" style="border-top: 3px solid #388E3C;">Valores Entregados</th>
             </tr>

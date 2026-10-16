@@ -204,6 +204,53 @@ class TesOrdenPagoController extends Controller
     }
 
     /**
+     * GET /v1/tesoreria/opas-automaticas?tipo=&buscar=&id_locatorio=&page=&per_page=100
+     *
+     * OPAs que el sistema viejo creó solo y quedaron PENDIENTES sin cronograma (criterio en
+     * `TestOrdenPagoRepository::sqlOpaAutomatica`). Es el listado del modal de Generar OPA.
+     * Devuelve `{data, total, motivo}`; `motivo` es el texto precargado de la anulación.
+     */
+    public function getOpasAutomaticas(Request $request, TestOrdenPagoRepository $opa)
+    {
+        try {
+            return response()->json($opa->listarOpasAutomaticas($request));
+        } catch (\Throwable $th) {
+            return response()->json(['message' => $th->getMessage()], 500);
+        }
+    }
+
+    /**
+     * POST /v1/tesoreria/anular-opas-automaticas
+     * Body: { ids: [id_orden_pago...] }  ó  { todas: true, tipo?, buscar?, id_locatorio? }
+     *
+     * Anula en lote. Cada OPA se revalida en el backend; las que no pasan se informan en
+     * `errores` sin frenar al resto.
+     */
+    public function getAnularOpasAutomaticas(Request $request, TestOrdenPagoRepository $opa)
+    {
+        try {
+            if (empty($request->todas) && empty($request->ids)) {
+                return response()->json(['message' => 'No se seleccionó ninguna orden de pago.'], 422);
+            }
+
+            // "Todas" pueden ser miles: cada anulación es corta, pero en serie superan el límite.
+            set_time_limit(0);
+
+            $res = $opa->anularOpasAutomaticas($request);
+
+            $msg = "Se anularon {$res['anuladas']} orden(es) de pago.";
+            if (count($res['errores'])) {
+                $msg .= ' ' . count($res['errores']) . ' no se pudieron anular.';
+            }
+
+            return response()->json(['message' => $msg] + $res);
+        } catch (\Throwable $th) {
+            Log::error('Error anulando OPAs automáticas: ' . $th->getMessage());
+            return response()->json(['message' => $th->getMessage()], 500);
+        }
+    }
+
+    /**
      * POST /v1/tesoreria/anular-reemitir-opa
      * Body: { id_orden_pago, motivo }
      *
@@ -685,6 +732,8 @@ class TesOrdenPagoController extends Controller
             "fechas_pendientes" => $fechasPendientes,
             "comprobante_provisorio" => $comprobanteProvisorio,
             "comprobante_nro" => $query?->num_orden_pago,
+            // NORMAL / ANTICIPO / APLICACION: el PDF de un anticipo tiene que decirlo (testeo 2026-10-14).
+            "tipo_opa" => $query?->tipo_opa,
             "fecha_emision" => $query?->fecha_emision,
             "cuit_proveedor" => $query?->proveedor ? $query?->proveedor?->cuit : $query?->prestador?->cuit,
             "nombre_proveedor" => $query?->proveedor ? $query?->proveedor?->razon_social : $query?->prestador?->razon_social,
@@ -787,6 +836,8 @@ class TesOrdenPagoController extends Controller
 
         $datos = [
             "comprobante_nro" => $query?->num_orden_pago,
+            // NORMAL / ANTICIPO / APLICACION: el PDF de un anticipo tiene que decirlo (testeo 2026-10-14).
+            "tipo_opa" => $query?->tipo_opa,
             "fecha_emision" => $query?->fecha_emision,
             "cuit_proveedor" => $query?->proveedor ? $query->proveedor->cuit : $query?->prestador->cuit,
             "nombre_proveedor" => $query?->proveedor ? $query->proveedor->razon_social : $query?->prestador->razon_social,
