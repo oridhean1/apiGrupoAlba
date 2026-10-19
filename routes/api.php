@@ -1564,6 +1564,17 @@ Route::group([
     Route::get('detalles-consumos-afiliado', [App\Http\Controllers\DashboardConsumo\Dashboard::class, 'getDetallesConsumosAfiliado']);
 });
 
+// R-00000601: Superdashboard para directivos (copia del de OSPF)
+Route::group([
+    'middleware' => ['jwt.verify'],
+    'prefix' => '/v1/superdashboard'
+], function () {
+    Route::get('finanzas', [App\Http\Controllers\Superdashboard\Services\SuperdashboardController::class, 'getFinanzas']);
+    Route::get('actividad', [App\Http\Controllers\Superdashboard\Services\SuperdashboardController::class, 'getActividad']);
+    Route::get('analisis', [App\Http\Controllers\Superdashboard\Services\SuperdashboardController::class, 'getAnalisis']);
+    Route::get('proyecciones', [App\Http\Controllers\Superdashboard\Services\SuperdashboardController::class, 'getProyecciones']);
+});
+
 
 Route::group([
     'middleware' => ['jwt.verify'],
