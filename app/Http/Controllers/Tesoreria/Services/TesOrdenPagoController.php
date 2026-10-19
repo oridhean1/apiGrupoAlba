@@ -722,7 +722,29 @@ class TesOrdenPagoController extends Controller
             $razonEmisora = DB::table('tb_razones_sociales')->where('id_razon', $query->id_razon)->first();
         }
 
+        // Anticipos en el comprobante (reclamo "Incidencias Anticipos", 2026-10-19). Sólo cambia lo
+        // impreso: los montos de la orden quedan como están.
+        //  - ANTICIPO: a qué facturas se aplicó y cuánto les queda.
+        //  - NORMAL: los anticipos ya aplicados a sus facturas, como valor entregado, para que la
+        //    factura figure por su total y se vea quién cubrió la diferencia.
+        $antRepo = app(TesAnticipoRepository::class);
+        $aplicacionesAnticipo = [];
+        $anticiposAplicados = [];
+
+        if ($query?->tipo_opa === TesAnticipoRepository::TIPO_ANTICIPO) {
+            $aplicacionesAnticipo = $antRepo->aplicacionesParaComprobante($query->id_orden_pago);
+        } elseif ($query?->tipo_opa !== TesAnticipoRepository::TIPO_APLICACION) {
+            $anticiposAplicados = $antRepo->anticiposAplicadosAFacturas(
+                ($query?->opadetalle ?? collect())->pluck('id_factura')->filter()->unique()->values()->all()
+            );
+        }
+
+        $totalAnticipos = round(array_sum(array_column($anticiposAplicados, 'monto')), 2);
+
         $datos = [
+            "aplicaciones_anticipo" => $aplicacionesAnticipo,
+            "anticipos_aplicados" => $anticiposAplicados,
+            "total_anticipos" => $totalAnticipos,
             "razon_emisora" => $razonEmisora,
             "cuota_por_fecha" => $cuotaPorFecha,
             "monto_pagable" => round($montoPagable, 2),

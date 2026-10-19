@@ -159,6 +159,86 @@ class TesAnticipoRepository
     }
 
     /**
+     * Las facturas a las que se aplicó un anticipo, para imprimirlas en su comprobante.
+     *
+     * El PDF del anticipo salía con la tabla vacía: la traza anticipo → factura vive en la OP de
+     * APLICACION, que nadie imprime. Ahora el anticipo muestra a qué factura fue a parar y cuánto
+     * le queda a esa factura después del anticipo. Reclamo "Incidencias Anticipos" (2026-10-19).
+     *
+     * @return array<int, array{detalle: TesOrdenPagoDetalleEntity, monto: float, resta: float}>
+     */
+    public function aplicacionesParaComprobante($idAnticipo): array
+    {
+        $idsAplicacion = TesOrdenPagoEntity::where('id_opa_anticipo', $idAnticipo)
+            ->where('tipo_opa', self::TIPO_APLICACION)
+            ->where('id_estado_orden_pago', '!=', TestOrdenPagoRepository::ESTADO_OPA_RECHAZADO)
+            ->pluck('id_orden_pago');
+
+        if ($idsAplicacion->isEmpty()) {
+            return [];
+        }
+
+        $saldos = new FacturasOpaRepository();
+
+        return TesOrdenPagoDetalleEntity::with('detallefc')
+            ->whereIn('id_orden_pago', $idsAplicacion)
+            ->get()
+            ->groupBy('id_factura')
+            ->map(function ($lineas) use ($saldos) {
+                $monto = round((float) $lineas->sum('monto_factura'), 2);
+                $fc = $lineas->first()->detallefc;
+
+                return [
+                    'detalle' => $lineas->first(),
+                    'monto'   => $monto,
+                    // Lo que le falta a la factura DESPUÉS de este anticipo, la cubra o no otra
+                    // orden: es lo que quien lee el anticipo quiere saber.
+                    'resta'   => round(max(0, $saldos->pagableFactura($fc) - $monto), 2),
+                ];
+            })
+            ->values()
+            ->all();
+    }
+
+    /**
+     * Anticipos aplicados a las facturas de una orden NORMAL, para mostrarlos en su comprobante.
+     *
+     * La orden por el resto de una factura salía por $60.000 de una de $65.000 sin decir quién
+     * cubrió la diferencia. Esto NO cambia el monto de la orden (subirlo contaría el anticipo dos
+     * veces en saldo, cuenta corriente y asientos): sólo alimenta el PDF. (2026-10-19)
+     *
+     * @return array<int, array{id_factura: int, num_anticipo: string, fecha: ?string, monto: float}>
+     */
+    public function anticiposAplicadosAFacturas(array $idsFacturas, $excluirOpa = null): array
+    {
+        if (empty($idsFacturas)) {
+            return [];
+        }
+
+        return DB::table('tb_tes_orden_pago_detalle as d')
+            ->join('tb_tes_orden_pago as ap', 'ap.id_orden_pago', '=', 'd.id_orden_pago')
+            ->join('tb_tes_orden_pago as an', 'an.id_orden_pago', '=', 'ap.id_opa_anticipo')
+            ->whereIn('d.id_factura', $idsFacturas)
+            ->where('ap.tipo_opa', self::TIPO_APLICACION)
+            ->where('ap.id_estado_orden_pago', '!=', TestOrdenPagoRepository::ESTADO_OPA_RECHAZADO)
+            ->when(!is_null($excluirOpa), fn($q) => $q->where('ap.id_orden_pago', '!=', $excluirOpa))
+            ->groupBy('d.id_factura', 'an.id_orden_pago', 'an.num_orden_pago', 'ap.fecha_emision')
+            ->get([
+                'd.id_factura',
+                'an.num_orden_pago as num_anticipo',
+                'ap.fecha_emision as fecha',
+                DB::raw('SUM(d.monto_factura) as monto'),
+            ])
+            ->map(fn($r) => [
+                'id_factura'   => (int) $r->id_factura,
+                'num_anticipo' => $r->num_anticipo,
+                'fecha'        => $r->fecha,
+                'monto'        => round((float) $r->monto, 2),
+            ])
+            ->all();
+    }
+
+    /**
      * Aplica saldo de un anticipo a un conjunto de facturas.
      *
      * Crea una OP de tipo APLICACION que imputa a esas facturas y apunta al anticipo. **No crea
