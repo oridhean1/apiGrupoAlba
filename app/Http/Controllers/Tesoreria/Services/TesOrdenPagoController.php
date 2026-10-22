@@ -693,16 +693,6 @@ class TesOrdenPagoController extends Controller
             $montoPagable = max(0, (float) ($query?->monto_orden_pago ?? 0) - $debito);
         }
 
-        // El débito impreso es lo imputado menos lo que se paga, así las filas (que ahora muestran
-        // lo imputado, no el total de cada factura) cierran con el total. Con una orden de
-        // facturas enteras da lo mismo que antes. (2026-10-06)
-        $imputado = (float) ($query?->opadetalle ?? collect())->sum(
-            fn($d) => $d->monto_factura ?? ($d->detallefc->total_neto ?? 0)
-        );
-        if ($imputado > 0) {
-            $debito = max(0, round($imputado - $montoPagable, 2));
-        }
-
         $totalEntregado = $instrumentos->sum(fn($i) => (float) $i->monto_pago)
             + ($query?->pagos ?? collect())
                 ->flatMap(fn($p) => $p->pagosParciales ?? collect())
@@ -740,6 +730,21 @@ class TesOrdenPagoController extends Controller
         }
 
         $totalAnticipos = round(array_sum(array_column($anticiposAplicados, 'monto')), 2);
+
+        // El débito impreso es lo que suman las filas menos lo que se paga, así cierran con el
+        // total. Las filas muestran el total de la factura cuando la orden la cubre entera
+        // (`importeFacturaEnOrden`), y ahí el débito sale completo: con la imputación neta daba
+        // $0 (T-00001229, 2026-10-22). Con una imputación parcial, lo imputado. (2026-10-06)
+        $anticipoPorFactura = [];
+        foreach ($anticiposAplicados as $ap) {
+            $anticipoPorFactura[$ap['id_factura']] = ($anticipoPorFactura[$ap['id_factura']] ?? 0) + $ap['monto'];
+        }
+        $importeFilas = (float) ($query?->opadetalle ?? collect())->sum(
+            fn($d) => TestOrdenPagoRepository::importeFacturaEnOrden($d, (float) ($anticipoPorFactura[$d->id_factura] ?? 0))
+        );
+        if ($importeFilas > 0) {
+            $debito = max(0, round($importeFilas - $montoPagable - $totalAnticipos, 2));
+        }
 
         $datos = [
             "aplicaciones_anticipo" => $aplicacionesAnticipo,

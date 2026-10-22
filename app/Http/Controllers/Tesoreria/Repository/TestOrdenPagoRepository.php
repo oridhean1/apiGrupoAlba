@@ -768,6 +768,25 @@ class TestOrdenPagoRepository
     }
 
     /**
+     * Importe con el que se MUESTRA una factura en el comprobante de la orden (sólo papel).
+     *
+     * Desde el 2026-09-12 la imputación se guarda neta de débito, así que una OPA por la factura
+     * entera mostraba el neto y el débito daba $0: el total de la factura no figuraba en ningún
+     * lado (T-00001229, OPA-20261022-14538). Si la orden cubre lo que queda por pagar de la
+     * factura (con los anticipos aplicados), se muestra su total y el débito sale entero en la
+     * resta; si es una imputación parcial, lo imputado —repartir el débito sería arbitrario.
+     * Las filas viejas cargadas en bruto dan lo mismo que antes.
+     */
+    public static function importeFacturaEnOrden($detalle, float $anticipo = 0): float
+    {
+        $neto = (float) ($detalle?->detallefc?->total_neto ?? 0);
+        $debito = (float) ($detalle?->detallefc?->total_debitado_liquidacion ?? 0);
+        $imputado = ($detalle?->monto_factura !== null ? (float) $detalle->monto_factura : $neto) + $anticipo;
+
+        return $imputado >= $neto - $debito - 0.01 ? max($imputado, $neto) : $imputado;
+    }
+
+    /**
      * Razón social (entidad pagadora del grupo) a la que pertenece una OPA.
      *
      * No es una columna propia de la orden: sale de sus facturas

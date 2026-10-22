@@ -365,10 +365,11 @@
                 @php
                     // Lo IMPUTADO a esta factura en esta orden, no su total: con una imputación
                     // parcial las filas no sumaban al total a pagar. (2026-10-06)
+                    // Si la orden cubre la factura entera, su TOTAL: el débito va en la resta de
+                    // abajo (T-00001229, 2026-10-22).
                     $netoFc = (float) ($item?->detallefc?->total_neto ?? 0);
-                    $imputadoFc = $item?->monto_factura !== null ? (float) $item->monto_factura : $netoFc;
                     $anticipoFc = (float) ($anticipoPorFactura[$item?->id_factura] ?? 0);
-                    $imputadoFc += $anticipoFc;
+                    $imputadoFc = \App\Http\Controllers\Tesoreria\Repository\TestOrdenPagoRepository::importeFacturaEnOrden($item, $anticipoFc);
                 @endphp
                 <td class="op-l1" style="font-size: 9px;">
                     <strong class="text-dark">FAC{{ $item?->detallefc?->tipo_letra }} {{ $item?->detallefc?->sucursal }}-{{ str_pad($item?->detallefc?->numero, 8, '0', STR_PAD_LEFT) }}</strong><br>
