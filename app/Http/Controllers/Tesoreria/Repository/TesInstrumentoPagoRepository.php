@@ -1504,7 +1504,14 @@ class TesInstrumentoPagoRepository
      *   `fecha_emision_echeq` viene nula en casi todos. Sin fecha en ninguna de las dos el pago
      *   todavía no está definido y no corresponde llevarlo al banco.
      */
-    public function listarPagosAEmitir($idBanco = null, $numeroOpa = null, $idRazon = null)
+    /**
+     * @param \Illuminate\Http\Request|null $filtrosGrilla Los filtros de la grilla de Pagos
+     *        (estado, fechas, beneficiario, N° factura/OPA, razón social, imputación, urgentes,
+     *        tipo). Con ellos el listado trae sólo las boletas que la grilla muestra, y las
+     *        fechas se aplican además a la cuota de cada fila. Antes sólo se aplicaba la razón
+     *        social y el Excel traía pagos que no tenían nada que ver con lo filtrado. (2026-10-23)
+     */
+    public function listarPagosAEmitir($idBanco = null, $numeroOpa = null, $idRazon = null, $filtrosGrilla = null)
     {
         $bancoResuelto = DB::raw('COALESCE(pp.id_banco_emisor, cb.id_entidad_bancaria)');
         $fechaResuelta = DB::raw('COALESCE(fp.fecha_probable_pago, pp.fecha_emision_echeq)');
@@ -1536,6 +1543,15 @@ class TesInstrumentoPagoRepository
             })
             ->when(!is_null($idBanco), fn($q) => $q->where($bancoResuelto, $idBanco))
             ->tap(fn($q) => $this->filtrarPorOpaYRazon($q, $numeroOpa, $idRazon, 'o.num_orden_pago', 'o.id_orden_pago'))
+            ->when(!is_null($filtrosGrilla), function ($q) use ($filtrosGrilla, $fechaResuelta) {
+                $q->whereIn('p.id_pago', (new TesPagosRepository())->idsPagoFiltroPrincipal($filtrosGrilla));
+                if (!empty($filtrosGrilla->desde)) {
+                    $q->whereDate($fechaResuelta, '>=', $filtrosGrilla->desde);
+                }
+                if (!empty($filtrosGrilla->hasta)) {
+                    $q->whereDate($fechaResuelta, '<=', $filtrosGrilla->hasta);
+                }
+            })
             ->select([
                 'pp.id_pago_parcial',
                 'o.id_orden_pago',
@@ -1588,7 +1604,10 @@ class TesInstrumentoPagoRepository
                 'metodo_pago'    => $esEcheq ? 'ECHEQ' : 'TRANSFERENCIA',
                 // El CBU es la cuenta DESTINO y sólo aplica a la transferencia. En un eCheq no
                 // corresponde: si viniera cargado sería un dato inconsistente del origen.
-                'cbu'            => $esEcheq ? '' : (($esProveedor ? $f->proveedor_cbu : $f->prestador_cbu) ?: ''),
+                // Una transferencia sin CBU no se puede emitir: se marca en vez de dejar la celda
+                // vacía, que se leía como un error del archivo. El dato falta en la ficha bancaria
+                // del beneficiario (la mayoría de los proveedores no la tiene cargada). (2026-10-23)
+                'cbu'            => $esEcheq ? '' : (trim((string) ($esProveedor ? $f->proveedor_cbu : $f->prestador_cbu)) ?: 'SIN CBU CARGADO'),
                 'monto'          => (float) $f->monto_pago,
                 'fecha_pago'     => $f->fecha_pago,
                 'observaciones'  => $f->observaciones_opa ?: ($f->observaciones_pago ?: ''),

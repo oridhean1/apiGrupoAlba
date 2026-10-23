@@ -420,7 +420,8 @@ class TesInstrumentoPagoController extends Controller
                     $this->repository,
                     $request->query('id_banco'),
                     $request->query('numero_opa'),
-                    $request->query('id_razon')
+                    $request->query('id_razon'),
+                    $this->filtrosGrilla($request)
                 ),
                 'pagos-a-emitir.xlsx'
             );
@@ -443,13 +444,23 @@ class TesInstrumentoPagoController extends Controller
                 $this->repository->listarPagosAEmitir(
                     $request->query('id_banco'),
                     $request->query('numero_opa'),
-                    $request->query('id_razon')
+                    $request->query('id_razon'),
+                    $this->filtrosGrilla($request)
                 )
             );
         } catch (\Exception $e) {
             Log::error('Error listar pagos a emitir: ' . $e->getMessage());
             return response()->json(['message' => 'Error al obtener los pagos a emitir'], 500);
         }
+    }
+
+    /**
+     * Las pantallas de Pagos mandan los filtros de su grilla (con `tipo` PRESTADOR / PROVEEDOR)
+     * para que "Pagos a emitir" traiga lo mismo que se ve. Sin `tipo`, no hay filtros de grilla.
+     */
+    private function filtrosGrilla(Request $request): ?Request
+    {
+        return $request->filled('tipo') ? $request : null;
     }
 
     public function exportarExcelPendientes(Request $request)

@@ -111,7 +111,6 @@ class TesPagosRepository
     {
         $jquery = "";
         $tipoRelacion = $params->tipo === 'PROVEEDOR' ? 'proveedor' : 'prestador';
-        $tipoFactura = $params->tipo === 'PROVEEDOR' ? 'PROVEEDOR' : 'PRESTADOR';
 
         $jquery = TesPagoEntity::with([
             'estado',
@@ -140,6 +139,55 @@ class TesPagosRepository
             'detalleopa.detallefc',
             'detalleopa.detallefc.razonSocial'
         ]);
+
+        $this->aplicarFiltrosPrincipales($jquery, $params);
+
+        // Orden: por la fecha en que se paga, de la más próxima a la más lejana. Es el orden de
+        // trabajo — lo que vence primero, primero.
+        //
+        // Ordenaba por `tb_tes_pago.fecha_probable_pago`, que para las boletas del circuito nuevo
+        // viene SIEMPRE en NULL: desde que el cronograma se define al crear la orden, las fechas
+        // se escriben en `tb_tes_fecha_probable_pago` y esa columna quedó sin llenarse. Resultado:
+        // el orden no ordenaba y lo recién cargado caía al fondo del listado, en la última página.
+        // Reportado porque un anticipo recién pagado "no aparecía". (2026-09-25)
+        //
+        // Se toma la primera fecha del cronograma y, si la boleta no tiene, la columna vieja o la
+        // fecha de registro — así ninguna queda sin criterio y ninguna se va al fondo por NULL.
+        $jquery->orderByRaw(
+            'COALESCE('
+                . '(SELECT MIN(fp.fecha_probable_pago) FROM tb_tes_fecha_probable_pago fp'
+                . '  WHERE fp.id_pago = tb_tes_pago.id_pago),'
+                . ' tb_tes_pago.fecha_probable_pago,'
+                . ' DATE(tb_tes_pago.fecha_registra)'
+            . ') ASC'
+        );
+
+        $boletas = $jquery->get();
+
+        $this->agregarMontoPagable($boletas);
+
+        return $boletas;
+    }
+
+    /**
+     * Los `id_pago` que muestra la grilla de Pagos con estos filtros, como subconsulta.
+     *
+     * Lo usa "Pagos a emitir" para que el Excel traiga exactamente lo que el operador está
+     * filtrando en pantalla, con los mismos criterios y sin una copia de ellos que diverja.
+     * (2026-10-23)
+     */
+    public function idsPagoFiltroPrincipal($params)
+    {
+        $jquery = TesPagoEntity::query()->select('tb_tes_pago.id_pago');
+        $this->aplicarFiltrosPrincipales($jquery, $params);
+        return $jquery;
+    }
+
+    /** Filtros de la grilla de Pagos (Prestador / Proveedor). `$params` es el Request. */
+    private function aplicarFiltrosPrincipales($jquery, $params): void
+    {
+        $tipoRelacion = $params->tipo === 'PROVEEDOR' ? 'proveedor' : 'prestador';
+        $tipoFactura = $params->tipo === 'PROVEEDOR' ? 'PROVEEDOR' : 'PRESTADOR';
 
         $jquery->where('tipo_factura', $tipoFactura);
 
@@ -234,32 +282,6 @@ class TesPagosRepository
                 $query->where('id_tipo_factura', '=', (int) $params->id_tipo);
             });
         }
-
-        // Orden: por la fecha en que se paga, de la más próxima a la más lejana. Es el orden de
-        // trabajo — lo que vence primero, primero.
-        //
-        // Ordenaba por `tb_tes_pago.fecha_probable_pago`, que para las boletas del circuito nuevo
-        // viene SIEMPRE en NULL: desde que el cronograma se define al crear la orden, las fechas
-        // se escriben en `tb_tes_fecha_probable_pago` y esa columna quedó sin llenarse. Resultado:
-        // el orden no ordenaba y lo recién cargado caía al fondo del listado, en la última página.
-        // Reportado porque un anticipo recién pagado "no aparecía". (2026-09-25)
-        //
-        // Se toma la primera fecha del cronograma y, si la boleta no tiene, la columna vieja o la
-        // fecha de registro — así ninguna queda sin criterio y ninguna se va al fondo por NULL.
-        $jquery->orderByRaw(
-            'COALESCE('
-                . '(SELECT MIN(fp.fecha_probable_pago) FROM tb_tes_fecha_probable_pago fp'
-                . '  WHERE fp.id_pago = tb_tes_pago.id_pago),'
-                . ' tb_tes_pago.fecha_probable_pago,'
-                . ' DATE(tb_tes_pago.fecha_registra)'
-            . ') ASC'
-        );
-
-        $boletas = $jquery->get();
-
-        $this->agregarMontoPagable($boletas);
-
-        return $boletas;
     }
 
     /**
