@@ -1655,6 +1655,11 @@ class TesInstrumentoPagoRepository
                 'tb_tes_pago_parcial.id_pago_parcial',
                 'tb_tes_pago_parcial.id_pago',
                 'tb_tes_pago_parcial.numero_echeq',
+                // El cheque fisico guarda su numero en `num_cheque`, y la forma de pago no
+                // venia: la pantalla lo mostraba como un eCheq sin numero y con Forma vacia.
+                // (2026-10-23)
+                'tb_tes_pago_parcial.num_cheque',
+                'tb_tes_pago_parcial.id_forma_pago',
                 // El numero lo puso el sistema para no frenar la carga del pago: todavia no
                 // es el del banco. `marcarAcreditado` corta si esta en 1, asi que el front lo
                 // necesita para no ofrecer un boton que va a rebotar. Faltaba en el select y
@@ -1706,7 +1711,8 @@ class TesInstrumentoPagoRepository
             })
             // Prestadores / Proveedores, como el selector de Generar OPA (2026-10-06).
             ->when($tipo, fn($q) => $q->where('tb_tes_orden_pago.tipo_factura', $tipo))
-            ->when($numeroEcheq !== '', fn($q) => $q->where('tb_tes_pago_parcial.numero_echeq', 'LIKE', "%{$numeroEcheq}%"))
+            ->when($numeroEcheq !== '', fn($q) => $q->where(fn($w) => $w->where('tb_tes_pago_parcial.numero_echeq', 'LIKE', "%{$numeroEcheq}%")
+                ->orWhere('tb_tes_pago_parcial.num_cheque', 'LIKE', "%{$numeroEcheq}%")))
             ->when($estado === 'por_acreditar', fn($q) => $q->where('tb_tes_pago_parcial.id_estado_instrumento', self::EMITIDO))
             ->when($estado === 'acreditado', fn($q) => $q->where('tb_tes_pago_parcial.id_estado_instrumento', self::ACREDITADO))
             ->when($estado === 'sin_numero', fn($q) => $q->where('tb_tes_pago_parcial.id_estado_instrumento', self::EMITIDO)
@@ -1715,7 +1721,7 @@ class TesInstrumentoPagoRepository
                     ->orWhere('tb_tes_pago_parcial.numero_echeq', '')))
             ->when(!empty($desde), fn($q) => $q->whereDate('tb_tes_pago_parcial.fecha_emision_echeq', '>=', $desde))
             ->when(!empty($hasta), fn($q) => $q->whereDate('tb_tes_pago_parcial.fecha_emision_echeq', '<=', $hasta))
-            ->with(['bancoEmisor', 'cuentaBancaria', 'estadoInstrumento', 'pago.opa.proveedor', 'pago.opa.prestador'])
+            ->with(['bancoEmisor', 'cuentaBancaria', 'estadoInstrumento', 'formaPago', 'pago.opa.proveedor', 'pago.opa.prestador'])
             // Los que todavía esperan acreditación van primero: son los que requieren acción.
             ->orderBy('tb_tes_pago_parcial.id_estado_instrumento')
             ->orderBy('tb_tes_pago_parcial.fecha_emision_echeq')
