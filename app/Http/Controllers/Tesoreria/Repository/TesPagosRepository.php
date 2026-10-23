@@ -834,15 +834,92 @@ class TesPagosRepository
             ->get();
     }
 
-    public function findByCargarComprobantePago($archivo, $idPago)
+    public function findByCargarComprobantePago($archivo, $idPago, $idFechaProbable = null)
     {
         return TestDetalleComprobantesPagoEntity::create([
             'id_pago' => $idPago,
+            'id_fecha_probable' => $idFechaProbable,
             'nombre_archivo' => $archivo,
             'fecha_registra' => $this->fechaActual,
             'cod_usuario_registra' => $this->user->cod_usuario,
             'estado' => '1'
         ]);
+    }
+
+    /**
+     * A qué fecha del cronograma va cada comprobante que se está subiendo, o el motivo por el que
+     * no se puede adjuntar. Devuelve `[ [idFecha|null, ...], null ]` o `[ null, 'mensaje' ]`.
+     *
+     * El comprobante es lo que saca un pago de "Pagos a emitir" (2026-10-23), así que no se acepta
+     * a ciegas:
+     *
+     * - **La fecha tiene que ser de esta boleta.** Si no viene y la boleta tiene una sola fecha, es
+     *   esa. Si tiene varias y no se dijo cuál, se corta: adivinar sacaría del Excel otra cuota.
+     *   Una boleta sin cronograma (anticipo, circuito viejo) guarda el comprobante sin fecha.
+     * - **La fecha tiene que tener un pago cargado**, y cada eCheq su número real (no provisorio) y
+     *   cada transferencia su N° de operación. Un comprobante sobre un pago sin número lo sacaría
+     *   del Excel y quedaría un instrumento que nadie puede acreditar ni conciliar.
+     *
+     * Se llama DESPUÉS de `findByConfirmarPago()` (que guarda los números cargados en el modal) y
+     * ANTES de escribir los archivos en disco, que el rollback no borra.
+     */
+    public function fechasDeComprobantes($idPago, array $fechasPedidas, int $cantidad): array
+    {
+        $fechasBoleta = DB::table('tb_tes_fecha_probable_pago')
+            ->where('id_pago', $idPago)
+            ->pluck('id_fecha_probable')
+            ->map(fn($id) => (int) $id)
+            ->all();
+
+        $resueltas = [];
+        for ($i = 0; $i < $cantidad; $i++) {
+            $pedida = $fechasPedidas[$i] ?? null;
+            $pedida = ($pedida === null || $pedida === '') ? null : (int) $pedida;
+
+            if (empty($fechasBoleta)) {
+                $resueltas[] = null;
+                continue;
+            }
+            if (is_null($pedida)) {
+                if (count($fechasBoleta) !== 1) {
+                    return [null, 'Indicá a qué fecha de pago corresponde cada comprobante.'];
+                }
+                $pedida = $fechasBoleta[0];
+            }
+            if (!in_array($pedida, $fechasBoleta, true)) {
+                return [null, 'El comprobante está asignado a una fecha que no es de esta orden.'];
+            }
+            $resueltas[] = $pedida;
+        }
+
+        foreach (array_unique($resueltas, SORT_REGULAR) as $idFecha) {
+            $pagos = DB::table('tb_tes_pago_parcial')
+                ->where('id_pago', $idPago)
+                ->when(!is_null($idFecha), fn($q) => $q->where('id_fecha_probable', $idFecha))
+                ->where(fn($w) => $w->whereNull('id_estado_instrumento')
+                    ->orWhereNotIn('id_estado_instrumento', [TesInstrumentoPagoRepository::RECHAZADO, TesInstrumentoPagoRepository::ANULADO]))
+                ->get(['id_forma_pago', 'numero_echeq', 'numero_provisorio', 'num_cheque']);
+
+            $fecha = is_null($idFecha) ? null
+                : DB::table('tb_tes_fecha_probable_pago')->where('id_fecha_probable', $idFecha)->value('fecha_probable_pago');
+            $deLaFecha = $fecha ? ' del ' . date('d/m/Y', strtotime($fecha)) : '';
+
+            if ($pagos->isEmpty()) {
+                return [null, "La fecha{$deLaFecha} todavía no tiene un pago cargado: cargá el pago antes de adjuntar el comprobante."];
+            }
+            foreach ($pagos as $p) {
+                $forma = (int) $p->id_forma_pago;
+                if ($forma === TesInstrumentoPagoRepository::FORMA_PAGO_ECHEQ
+                    && (trim((string) $p->numero_echeq) === '' || (int) $p->numero_provisorio === 1)) {
+                    return [null, "Cargá el número real del eCheq{$deLaFecha} antes de adjuntar el comprobante."];
+                }
+                if ($forma === TesInstrumentoPagoRepository::FORMA_PAGO_TRANSFERENCIA && trim((string) $p->num_cheque) === '') {
+                    return [null, "Cargá el N° de operación de la transferencia{$deLaFecha} antes de adjuntar el comprobante."];
+                }
+            }
+        }
+
+        return [$resueltas, null];
     }
 
     public function findByDeleteComprobantePago($idPago)

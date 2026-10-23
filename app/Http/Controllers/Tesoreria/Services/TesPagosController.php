@@ -202,9 +202,25 @@ class TesPagosController extends Controller
             }
 
             //@SUBIR DETALLE DE COMPROBANTES
+            // Un comprobante por fecha del cronograma, y sólo sobre pagos con su número cargado:
+            // es lo que saca el pago de "Pagos a emitir". Se valida antes de escribir a disco.
+            // (2026-10-23)
+            $cantidadArchivos = $request->hasFile('archivos') ? count($request->file('archivos')) : 0;
+            $fechasArchivos = [];
+            if ($cantidadArchivos > 0) {
+                [$fechasArchivos, $motivo] = $pago->fechasDeComprobantes(
+                    $params->id_pago,
+                    (array) ($params->archivos_fechas ?? []),
+                    $cantidadArchivos
+                );
+                if ($motivo) {
+                    DB::rollBack();
+                    return response()->json(['message' => $motivo], 422);
+                }
+            }
             $arrayArchivos = $storage->findByCargaMasivaArchivos("COMP" . $params->id_pago . $params->num_pago, 'tesoreria/comprobantes_pago', $request);
-            foreach ($arrayArchivos as $key) {
-                $pago->findByCargarComprobantePago($key['nombre'], $params->id_pago);
+            foreach ($arrayArchivos as $i => $key) {
+                $pago->findByCargarComprobantePago($key['nombre'], $params->id_pago, $fechasArchivos[$i] ?? null);
             }
 
             // @CONFIRMAMOS LA OPA || **PAGO ANTICIPADO**

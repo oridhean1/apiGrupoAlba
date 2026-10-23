@@ -14,6 +14,8 @@ class TestDetalleComprobantesPagoEntity extends Model
     public $timestamps = false;
     protected $fillable = [
         'id_pago',
+        // Fecha del cronograma que cubre. NULL = comprobante viejo, cubre toda la boleta. (2026-10-23)
+        'id_fecha_probable',
         'nombre_archivo',
         'fecha_registra',
         'cod_usuario_registra',
