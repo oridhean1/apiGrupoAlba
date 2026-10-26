@@ -856,9 +856,9 @@ class TesPagosRepository
      * - **La fecha tiene que ser de esta boleta.** Si no viene y la boleta tiene una sola fecha, es
      *   esa. Si tiene varias y no se dijo cuál, se corta: adivinar sacaría del Excel otra cuota.
      *   Una boleta sin cronograma (anticipo, circuito viejo) guarda el comprobante sin fecha.
-     * - **La fecha tiene que tener un pago cargado**, y cada eCheq su número real (no provisorio) y
-     *   cada transferencia su N° de operación. Un comprobante sobre un pago sin número lo sacaría
-     *   del Excel y quedaría un instrumento que nadie puede acreditar ni conciliar.
+     * - **La fecha tiene que tener un pago cargado**, y cada eCheq su número real (no provisorio).
+     *   Un comprobante sobre un eCheq sin número lo sacaría del Excel y quedaría un instrumento que
+     *   nadie puede acreditar ni conciliar. La transferencia no lo necesita: el comprobante alcanza.
      *
      * Se llama DESPUÉS de `findByConfirmarPago()` (que guarda los números cargados en el modal) y
      * ANTES de escribir los archivos en disco, que el rollback no borra.
@@ -913,9 +913,8 @@ class TesPagosRepository
                     && (trim((string) $p->numero_echeq) === '' || (int) $p->numero_provisorio === 1)) {
                     return [null, "Cargá el número real del eCheq{$deLaFecha} antes de adjuntar el comprobante."];
                 }
-                if ($forma === TesInstrumentoPagoRepository::FORMA_PAGO_TRANSFERENCIA && trim((string) $p->num_cheque) === '') {
-                    return [null, "Cargá el N° de operación de la transferencia{$deLaFecha} antes de adjuntar el comprobante."];
-                }
+                // La transferencia no necesita número: su comprobante del home banking ya es la
+                // prueba de que salió (decidido con Pagos el 2026-10-23).
             }
         }
 

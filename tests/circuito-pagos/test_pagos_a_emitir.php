@@ -110,10 +110,10 @@ try {
             'id_estado_instrumento' => null,
             'num_cheque' => null,
         ]);
-        echo "--- 5c: transferencia sin N de operacion: aparece y no deja adjuntar ---\n";
+        echo "--- 5c: transferencia sin N de operacion: aparece y SI deja adjuntar (el comprobante alcanza) ---\n";
         [, $motivo] = $pagosRepo->fechasDeComprobantes($fila->id_pago, [$fila->id_fecha_probable], 1);
         echo "  {$motivo}\n";
-        $r[] = (bool) $motivo && $enListado()->where('metodo_pago', 'TRANSFERENCIA')->isNotEmpty();
+        $r[] = is_null($motivo) && $enListado()->where('metodo_pago', 'TRANSFERENCIA')->isNotEmpty();
         echo $ok(end($r));
 
         echo "--- 6: un abono ANULADO no se lleva al banco ---\n";
