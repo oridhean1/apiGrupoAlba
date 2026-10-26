@@ -282,6 +282,23 @@ class TesPagosRepository
                 $query->where('id_tipo_factura', '=', (int) $params->id_tipo);
             });
         }
+
+        // Período de las FACTURAS (desde/hasta, `AAAA-MM`): trae las órdenes que tienen al menos
+        // una factura en el rango. `periodo` es varchar(7) con ese formato en alba3 y osv2 (todas
+        // las filas), así que se compara como texto. Un anticipo no tiene facturas y queda afuera
+        // al usar este filtro. Lo pidió Pagos el 2026-10-26.
+        $periodoDesde = preg_match('/^\d{4}-\d{2}$/', (string) $params->periodo_desde) ? $params->periodo_desde : null;
+        $periodoHasta = preg_match('/^\d{4}-\d{2}$/', (string) $params->periodo_hasta) ? $params->periodo_hasta : null;
+        if ($periodoDesde || $periodoHasta) {
+            $jquery->whereHas('detalleopa.detallefc', function ($query) use ($periodoDesde, $periodoHasta) {
+                if ($periodoDesde) {
+                    $query->where('periodo', '>=', $periodoDesde);
+                }
+                if ($periodoHasta) {
+                    $query->where('periodo', '<=', $periodoHasta);
+                }
+            });
+        }
     }
 
     /**
