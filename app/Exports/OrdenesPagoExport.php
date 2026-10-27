@@ -8,10 +8,12 @@ use App\Models\Tesoreria\TesOrdenPagoEntity;
 use Illuminate\Support\Facades\DB;
 use Maatwebsite\Excel\Concerns\FromCollection;
 use Maatwebsite\Excel\Concerns\ShouldAutoSize;
+use Maatwebsite\Excel\Concerns\WithColumnFormatting;
 use Maatwebsite\Excel\Concerns\WithHeadings;
 use Maatwebsite\Excel\Concerns\WithStyles;
+use PhpOffice\PhpSpreadsheet\Style\NumberFormat;
 
-class OrdenesPagoExport implements FromCollection, WithHeadings, ShouldAutoSize, WithStyles
+class OrdenesPagoExport implements FromCollection, WithHeadings, ShouldAutoSize, WithStyles, WithColumnFormatting
 {
     /**
      * @return \Illuminate\Support\Collection
@@ -100,7 +102,8 @@ class OrdenesPagoExport implements FromCollection, WithHeadings, ShouldAutoSize,
                 'tipo_beneficiario' => $item->tipo_factura,
                 'beneficiario' => ($benef = $item->proveedor ?? $item->prestador) ? $benef->cuit . ' - ' . $benef->razon_social : '',
                 'proveedor' => $facturas->map(fn($f) => optional($f->razonSocial)->razon_social)->filter()->unique()->implode(' / '),
-                'monto' => $item->monto_orden_pago,
+                // Número, no texto: si llega como string Excel no le aplica el formato Contabilidad.
+                'monto' => (float) $item->monto_orden_pago,
                 'descripcion' => $item->observaciones,
                 'estado' => $item->estado->descripcion_estado,
                 'observaciones'=>$item->observaciones
@@ -161,10 +164,10 @@ class OrdenesPagoExport implements FromCollection, WithHeadings, ShouldAutoSize,
     private function importeCuota($cuota, int $cantidadCuotas, $montoOrden)
     {
         if (!is_null($cuota->monto_emitido)) {
-            return $cuota->monto_emitido;
+            return (float) $cuota->monto_emitido;
         }
 
-        return $cantidadCuotas === 1 ? $montoOrden : '';
+        return $cantidadCuotas === 1 ? (float) $montoOrden : '';
     }
 
     public function headings(): array
@@ -183,6 +186,18 @@ class OrdenesPagoExport implements FromCollection, WithHeadings, ShouldAutoSize,
             'DESCRIPCIÓN',
             'ESTADO',
             'OBSERVACIONES'
+        ];
+    }
+
+    /**
+     * Montos con formato Contabilidad (T-00001236). D = IMPORTE CUOTA, J = MONTO: si cambia el
+     * orden de headings(), ajustar estas letras.
+     */
+    public function columnFormats(): array
+    {
+        return [
+            'D' => NumberFormat::FORMAT_ACCOUNTING_USD,
+            'J' => NumberFormat::FORMAT_ACCOUNTING_USD,
         ];
     }
 
