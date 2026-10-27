@@ -667,8 +667,29 @@ class TesPagosRepository
 
                     // Mismo control que en el alta, para los abonos sin ciclo de instrumento
                     // (los anteriores al circuito, que igual pueden ser cheques).
+                    // Un eCheq sin ciclo de instrumento (cargado antes del circuito) también trae su
+                    // número en `numero_echeq`: si acá solo se guardaba `num_cheque`, el número
+                    // nunca llegaba y el comprobante se rechazaba por "eCheq sin número".
+                    // (2026-10-27, abono 524)
+                    $esEcheqFila = (int) $pagos->id_forma_pago === TesInstrumentoPagoRepository::FORMA_PAGO_ECHEQ;
+
+                    // No se pasa un abono de/a cheque o eCheq editando la fila. Este camino solo
+                    // cambia la columna: el abono quedaba eCheq sin ciclo de instrumento, sin número
+                    // provisorio, y con el asiento y el débito de la forma anterior. Así nació el
+                    // abono 524 (transferencia → eCheq). Se da de baja y se carga de nuevo.
+                    // (2026-10-27)
+                    if ((int) $pagos->id_forma_pago !== (int) $query->id_forma_pago
+                        && (TesInstrumentoPagoRepository::esFormaDiferida($pagos->id_forma_pago)
+                            || TesInstrumentoPagoRepository::esFormaDiferida($query->id_forma_pago))) {
+                        throw new \Exception(
+                            'No se puede cambiar la forma de pago de un abono ya cargado a o desde cheque/eCheq. '
+                                . 'Quitá el pago y cargalo de nuevo con la forma correcta.'
+                        );
+                    }
+                    $numeroEcheqFila = trim((string) ($pagos->numero_echeq ?? ''));
+
                     $instrumentos->exigirNumeroLibre(
-                        $pagos->num_cheque ?? null,
+                        $esEcheqFila ? ($numeroEcheqFila !== '' ? $numeroEcheqFila : null) : ($pagos->num_cheque ?? null),
                         $pagos->id_forma_pago,
                         $cuentaFila,
                         $query->id_pago_parcial
@@ -677,6 +698,12 @@ class TesPagosRepository
                     $query->id_forma_pago=$pagos->id_forma_pago;
                     $query->monto_pago=$pagos->monto_pago;
                     $query->num_cheque=$pagos->num_cheque;
+
+                    if ($esEcheqFila && $numeroEcheqFila !== '') {
+                        $query->numero_echeq = $numeroEcheqFila;
+                        $query->num_cheque = $numeroEcheqFila;
+                        $query->numero_provisorio = false;
+                    }
 
                     // La cuenta editada en la fila también se guarda. Si la fila no la trae, se
                     // deja la que el abono ya tenía: no se pisa con null.
