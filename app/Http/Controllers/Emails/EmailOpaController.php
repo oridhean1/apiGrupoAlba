@@ -20,6 +20,7 @@ use App\Http\Controllers\Contabilidad\Repository\ProveedorPlanesCuentaRepository
 use App\Http\Controllers\Contabilidad\Repository\FormaPagoCuentaContableRepository;
 use App\Http\Controllers\Utils\CorrelativosOspfRepository;
 use Illuminate\Support\Facades\App;
+use Illuminate\Support\Facades\DB;
 
 class EmailOpaController extends Controller
 {
@@ -42,7 +43,22 @@ class EmailOpaController extends Controller
             'cuit' => env('EMPRESA_CUIT', '30-00000000-0')
         ];
 
+        // Mismo criterio que el PDF de la orden (reclamo "Incidencias Anticipos", 2026-10-19): el
+        // anticipo dice a qué facturas se aplicó y la orden normal, qué anticipos cubrieron parte.
+        $antRepo = app(\App\Http\Controllers\Tesoreria\Repository\TesAnticipoRepository::class);
+        $aplicacionesAnticipo = $query->tipo_opa === 'ANTICIPO'
+            ? $antRepo->aplicacionesParaComprobante($query->id_orden_pago)
+            : [];
+        $anticiposAplicados = !in_array($query->tipo_opa, ['ANTICIPO', 'APLICACION'], true)
+            ? $antRepo->anticiposAplicadosAFacturas(
+                DB::table('tb_tes_orden_pago_detalle')->where('id_orden_pago', $query->id_orden_pago)
+                    ->pluck('id_factura')->filter()->unique()->values()->all()
+            )
+            : [];
+
         $datos = [
+            "aplicaciones_anticipo" => $aplicacionesAnticipo,
+            "anticipos_aplicados" => $anticiposAplicados,
             "comprobante_nro" => $query->num_orden_pago,
             // NORMAL / ANTICIPO / APLICACION: el PDF de un anticipo tiene que decirlo (testeo 2026-10-14).
             "tipo_opa" => $query->tipo_opa,

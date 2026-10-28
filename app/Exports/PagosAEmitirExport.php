@@ -25,19 +25,21 @@ class PagosAEmitirExport implements FromCollection, WithHeadings, ShouldAutoSize
     protected $idBanco;
     protected $numeroOpa;
     protected $idRazon;
+    protected $filtrosGrilla;
 
-    public function __construct(TesInstrumentoPagoRepository $repository, $idBanco = null, $numeroOpa = null, $idRazon = null)
+    public function __construct(TesInstrumentoPagoRepository $repository, $idBanco = null, $numeroOpa = null, $idRazon = null, $filtrosGrilla = null)
     {
-        $this->repository = $repository;
-        $this->idBanco    = $idBanco;
-        $this->numeroOpa  = $numeroOpa;
-        $this->idRazon    = $idRazon;
+        $this->repository    = $repository;
+        $this->idBanco       = $idBanco;
+        $this->numeroOpa     = $numeroOpa;
+        $this->idRazon       = $idRazon;
+        $this->filtrosGrilla = $filtrosGrilla;
     }
 
     public function collection()
     {
         return $this->repository
-            ->listarPagosAEmitir($this->idBanco, $this->numeroOpa, $this->idRazon)
+            ->listarPagosAEmitir($this->idBanco, $this->numeroOpa, $this->idRazon, $this->filtrosGrilla)
             ->map(fn($p) => [
                 'num_orden_pago' => $p->num_orden_pago,
                 'locatario'      => $p->locatario,

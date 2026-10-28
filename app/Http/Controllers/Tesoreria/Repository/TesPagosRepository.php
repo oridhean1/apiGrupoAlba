@@ -111,7 +111,6 @@ class TesPagosRepository
     {
         $jquery = "";
         $tipoRelacion = $params->tipo === 'PROVEEDOR' ? 'proveedor' : 'prestador';
-        $tipoFactura = $params->tipo === 'PROVEEDOR' ? 'PROVEEDOR' : 'PRESTADOR';
 
         $jquery = TesPagoEntity::with([
             'estado',
@@ -140,6 +139,55 @@ class TesPagosRepository
             'detalleopa.detallefc',
             'detalleopa.detallefc.razonSocial'
         ]);
+
+        $this->aplicarFiltrosPrincipales($jquery, $params);
+
+        // Orden: por la fecha en que se paga, de la más próxima a la más lejana. Es el orden de
+        // trabajo — lo que vence primero, primero.
+        //
+        // Ordenaba por `tb_tes_pago.fecha_probable_pago`, que para las boletas del circuito nuevo
+        // viene SIEMPRE en NULL: desde que el cronograma se define al crear la orden, las fechas
+        // se escriben en `tb_tes_fecha_probable_pago` y esa columna quedó sin llenarse. Resultado:
+        // el orden no ordenaba y lo recién cargado caía al fondo del listado, en la última página.
+        // Reportado porque un anticipo recién pagado "no aparecía". (2026-09-25)
+        //
+        // Se toma la primera fecha del cronograma y, si la boleta no tiene, la columna vieja o la
+        // fecha de registro — así ninguna queda sin criterio y ninguna se va al fondo por NULL.
+        $jquery->orderByRaw(
+            'COALESCE('
+                . '(SELECT MIN(fp.fecha_probable_pago) FROM tb_tes_fecha_probable_pago fp'
+                . '  WHERE fp.id_pago = tb_tes_pago.id_pago),'
+                . ' tb_tes_pago.fecha_probable_pago,'
+                . ' DATE(tb_tes_pago.fecha_registra)'
+            . ') ASC'
+        );
+
+        $boletas = $jquery->get();
+
+        $this->agregarMontoPagable($boletas);
+
+        return $boletas;
+    }
+
+    /**
+     * Los `id_pago` que muestra la grilla de Pagos con estos filtros, como subconsulta.
+     *
+     * Lo usa "Pagos a emitir" para que el Excel traiga exactamente lo que el operador está
+     * filtrando en pantalla, con los mismos criterios y sin una copia de ellos que diverja.
+     * (2026-10-23)
+     */
+    public function idsPagoFiltroPrincipal($params)
+    {
+        $jquery = TesPagoEntity::query()->select('tb_tes_pago.id_pago');
+        $this->aplicarFiltrosPrincipales($jquery, $params);
+        return $jquery;
+    }
+
+    /** Filtros de la grilla de Pagos (Prestador / Proveedor). `$params` es el Request. */
+    private function aplicarFiltrosPrincipales($jquery, $params): void
+    {
+        $tipoRelacion = $params->tipo === 'PROVEEDOR' ? 'proveedor' : 'prestador';
+        $tipoFactura = $params->tipo === 'PROVEEDOR' ? 'PROVEEDOR' : 'PRESTADOR';
 
         $jquery->where('tipo_factura', $tipoFactura);
 
@@ -235,31 +283,22 @@ class TesPagosRepository
             });
         }
 
-        // Orden: por la fecha en que se paga, de la más próxima a la más lejana. Es el orden de
-        // trabajo — lo que vence primero, primero.
-        //
-        // Ordenaba por `tb_tes_pago.fecha_probable_pago`, que para las boletas del circuito nuevo
-        // viene SIEMPRE en NULL: desde que el cronograma se define al crear la orden, las fechas
-        // se escriben en `tb_tes_fecha_probable_pago` y esa columna quedó sin llenarse. Resultado:
-        // el orden no ordenaba y lo recién cargado caía al fondo del listado, en la última página.
-        // Reportado porque un anticipo recién pagado "no aparecía". (2026-09-25)
-        //
-        // Se toma la primera fecha del cronograma y, si la boleta no tiene, la columna vieja o la
-        // fecha de registro — así ninguna queda sin criterio y ninguna se va al fondo por NULL.
-        $jquery->orderByRaw(
-            'COALESCE('
-                . '(SELECT MIN(fp.fecha_probable_pago) FROM tb_tes_fecha_probable_pago fp'
-                . '  WHERE fp.id_pago = tb_tes_pago.id_pago),'
-                . ' tb_tes_pago.fecha_probable_pago,'
-                . ' DATE(tb_tes_pago.fecha_registra)'
-            . ') ASC'
-        );
-
-        $boletas = $jquery->get();
-
-        $this->agregarMontoPagable($boletas);
-
-        return $boletas;
+        // Período de las FACTURAS (desde/hasta, `AAAA-MM`): trae las órdenes que tienen al menos
+        // una factura en el rango. `periodo` es varchar(7) con ese formato en alba3 y osv2 (todas
+        // las filas), así que se compara como texto. Un anticipo no tiene facturas y queda afuera
+        // al usar este filtro. Lo pidió Pagos el 2026-10-26.
+        $periodoDesde = preg_match('/^\d{4}-\d{2}$/', (string) $params->periodo_desde) ? $params->periodo_desde : null;
+        $periodoHasta = preg_match('/^\d{4}-\d{2}$/', (string) $params->periodo_hasta) ? $params->periodo_hasta : null;
+        if ($periodoDesde || $periodoHasta) {
+            $jquery->whereHas('detalleopa.detallefc', function ($query) use ($periodoDesde, $periodoHasta) {
+                if ($periodoDesde) {
+                    $query->where('periodo', '>=', $periodoDesde);
+                }
+                if ($periodoHasta) {
+                    $query->where('periodo', '<=', $periodoHasta);
+                }
+            });
+        }
     }
 
     /**
@@ -628,8 +667,29 @@ class TesPagosRepository
 
                     // Mismo control que en el alta, para los abonos sin ciclo de instrumento
                     // (los anteriores al circuito, que igual pueden ser cheques).
+                    // Un eCheq sin ciclo de instrumento (cargado antes del circuito) también trae su
+                    // número en `numero_echeq`: si acá solo se guardaba `num_cheque`, el número
+                    // nunca llegaba y el comprobante se rechazaba por "eCheq sin número".
+                    // (2026-10-27, abono 524)
+                    $esEcheqFila = (int) $pagos->id_forma_pago === TesInstrumentoPagoRepository::FORMA_PAGO_ECHEQ;
+
+                    // No se pasa un abono de/a cheque o eCheq editando la fila. Este camino solo
+                    // cambia la columna: el abono quedaba eCheq sin ciclo de instrumento, sin número
+                    // provisorio, y con el asiento y el débito de la forma anterior. Así nació el
+                    // abono 524 (transferencia → eCheq). Se da de baja y se carga de nuevo.
+                    // (2026-10-27)
+                    if ((int) $pagos->id_forma_pago !== (int) $query->id_forma_pago
+                        && (TesInstrumentoPagoRepository::esFormaDiferida($pagos->id_forma_pago)
+                            || TesInstrumentoPagoRepository::esFormaDiferida($query->id_forma_pago))) {
+                        throw new \Exception(
+                            'No se puede cambiar la forma de pago de un abono ya cargado a o desde cheque/eCheq. '
+                                . 'Quitá el pago y cargalo de nuevo con la forma correcta.'
+                        );
+                    }
+                    $numeroEcheqFila = trim((string) ($pagos->numero_echeq ?? ''));
+
                     $instrumentos->exigirNumeroLibre(
-                        $pagos->num_cheque ?? null,
+                        $esEcheqFila ? ($numeroEcheqFila !== '' ? $numeroEcheqFila : null) : ($pagos->num_cheque ?? null),
                         $pagos->id_forma_pago,
                         $cuentaFila,
                         $query->id_pago_parcial
@@ -638,6 +698,12 @@ class TesPagosRepository
                     $query->id_forma_pago=$pagos->id_forma_pago;
                     $query->monto_pago=$pagos->monto_pago;
                     $query->num_cheque=$pagos->num_cheque;
+
+                    if ($esEcheqFila && $numeroEcheqFila !== '') {
+                        $query->numero_echeq = $numeroEcheqFila;
+                        $query->num_cheque = $numeroEcheqFila;
+                        $query->numero_provisorio = false;
+                    }
 
                     // La cuenta editada en la fila también se guarda. Si la fila no la trae, se
                     // deja la que el abono ya tenía: no se pisa con null.
@@ -812,15 +878,91 @@ class TesPagosRepository
             ->get();
     }
 
-    public function findByCargarComprobantePago($archivo, $idPago)
+    public function findByCargarComprobantePago($archivo, $idPago, $idFechaProbable = null)
     {
         return TestDetalleComprobantesPagoEntity::create([
             'id_pago' => $idPago,
+            'id_fecha_probable' => $idFechaProbable,
             'nombre_archivo' => $archivo,
             'fecha_registra' => $this->fechaActual,
             'cod_usuario_registra' => $this->user->cod_usuario,
             'estado' => '1'
         ]);
+    }
+
+    /**
+     * A qué fecha del cronograma va cada comprobante que se está subiendo, o el motivo por el que
+     * no se puede adjuntar. Devuelve `[ [idFecha|null, ...], null ]` o `[ null, 'mensaje' ]`.
+     *
+     * El comprobante es lo que saca un pago de "Pagos a emitir" (2026-10-23), así que no se acepta
+     * a ciegas:
+     *
+     * - **La fecha tiene que ser de esta boleta.** Si no viene y la boleta tiene una sola fecha, es
+     *   esa. Si tiene varias y no se dijo cuál, se corta: adivinar sacaría del Excel otra cuota.
+     *   Una boleta sin cronograma (anticipo, circuito viejo) guarda el comprobante sin fecha.
+     * - **La fecha tiene que tener un pago cargado**, y cada eCheq su número real (no provisorio).
+     *   Un comprobante sobre un eCheq sin número lo sacaría del Excel y quedaría un instrumento que
+     *   nadie puede acreditar ni conciliar. La transferencia no lo necesita: el comprobante alcanza.
+     *
+     * Se llama DESPUÉS de `findByConfirmarPago()` (que guarda los números cargados en el modal) y
+     * ANTES de escribir los archivos en disco, que el rollback no borra.
+     */
+    public function fechasDeComprobantes($idPago, array $fechasPedidas, int $cantidad): array
+    {
+        $fechasBoleta = DB::table('tb_tes_fecha_probable_pago')
+            ->where('id_pago', $idPago)
+            ->pluck('id_fecha_probable')
+            ->map(fn($id) => (int) $id)
+            ->all();
+
+        $resueltas = [];
+        for ($i = 0; $i < $cantidad; $i++) {
+            $pedida = $fechasPedidas[$i] ?? null;
+            $pedida = ($pedida === null || $pedida === '') ? null : (int) $pedida;
+
+            if (empty($fechasBoleta)) {
+                $resueltas[] = null;
+                continue;
+            }
+            if (is_null($pedida)) {
+                if (count($fechasBoleta) !== 1) {
+                    return [null, 'Indicá a qué fecha de pago corresponde cada comprobante.'];
+                }
+                $pedida = $fechasBoleta[0];
+            }
+            if (!in_array($pedida, $fechasBoleta, true)) {
+                return [null, 'El comprobante está asignado a una fecha que no es de esta orden.'];
+            }
+            $resueltas[] = $pedida;
+        }
+
+        foreach (array_unique($resueltas, SORT_REGULAR) as $idFecha) {
+            $pagos = DB::table('tb_tes_pago_parcial')
+                ->where('id_pago', $idPago)
+                ->when(!is_null($idFecha), fn($q) => $q->where('id_fecha_probable', $idFecha))
+                ->where(fn($w) => $w->whereNull('id_estado_instrumento')
+                    ->orWhereNotIn('id_estado_instrumento', [TesInstrumentoPagoRepository::RECHAZADO, TesInstrumentoPagoRepository::ANULADO]))
+                ->get(['id_forma_pago', 'numero_echeq', 'numero_provisorio', 'num_cheque']);
+
+            $fecha = is_null($idFecha) ? null
+                : DB::table('tb_tes_fecha_probable_pago')->where('id_fecha_probable', $idFecha)->value('fecha_probable_pago');
+            $deLaFecha = $fecha ? ' del ' . date('d/m/Y', strtotime($fecha)) : '';
+
+            if ($pagos->isEmpty()) {
+                return [null, "La fecha{$deLaFecha} todavía no tiene un pago cargado: cargá el pago antes de adjuntar el comprobante."];
+            }
+            foreach ($pagos as $p) {
+                $forma = (int) $p->id_forma_pago;
+                if ($forma === TesInstrumentoPagoRepository::FORMA_PAGO_ECHEQ
+                    && (trim((string) $p->numero_echeq) === '' || (int) $p->numero_provisorio === 1)) {
+                    return [null, "Cargá el número real del eCheq{$deLaFecha} antes de adjuntar el comprobante."];
+                }
+                // La transferencia no necesita número: su comprobante del home banking ya es la
+                // prueba de que salió (decidido con Pagos el 2026-10-23).
+            }
+        }
+
+        return [$resueltas, null];
     }
 
     public function findByDeleteComprobantePago($idPago)

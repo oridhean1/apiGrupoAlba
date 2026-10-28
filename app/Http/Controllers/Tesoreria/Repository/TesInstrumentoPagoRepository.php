@@ -1479,32 +1479,32 @@ class TesInstrumentoPagoRepository
 
     /** Estados en los que una OP sigue viva y sus pagos pueden trabajarse. */
     /**
-     * "Pagos a emitir": lo que Pagos ya definió —monto y fecha— y todavía no se emitió en el banco.
+     * "Pagos a emitir": eCheq y transferencias cargados cuya fecha todavía no tiene comprobante.
      *
-     * Es el Excel que se lleva al banco o al home banking para emitir en tandas, por eso sale
-     * ordenado por BANCO EMISOR. Un pago desaparece de acá en cuanto se le carga el número.
+     * Es el Excel que Pagos lleva al banco o al home banking, ordenado por BANCO EMISOR para emitir
+     * en tandas. Un pago sale de acá cuando se adjunta el comprobante de su fecha.
      *
      * Criterios, y por qué:
      *
-     * - **Órdenes vivas** (`estadosOpaViva()`: PENDIENTE, APROBADO, EN PROCESO, PAGO PARCIAL). El
-     *   pedido dice "Pendiente o Parcialmente pagada", que en el catálogo de este sistema serían
-     *   sólo los estados 1 y 6 — pero desde que el cronograma se define al crear la orden, una
-     *   orden con pagos definidos queda en EN PROCESO (4), no en PENDIENTE. Filtrar literal dejaría
-     *   el listado casi vacío. Se toma la intención: toda orden que todavía debe plata.
+     * - **Sin comprobante** (desde el 2026-10-23, acordado con Pagos). Antes la condición era "sin
+     *   número" y sólo órdenes vivas; pero Pagos carga el pago, lo procesa y adjunta el comprobante
+     *   después, y hasta ahí lo quiere ver aunque ya tenga número o la orden quede PAGADA.
+     *   No se puede adjuntar comprobante sin número: lo valida `fechasDeComprobantes()`.
      *
-     * - **eCheq y transferencia solamente**, como pide el documento. El cheque no entra, y no es un
-     *   olvido: nace EMITIDO porque su número se conoce al librarlo (`estadoInicialDeInstrumento()`),
-     *   así que nunca está pendiente de emisión.
+     * - **eCheq y transferencia solamente**, como pide el documento. El cheque nace EMITIDO.
      *
-     * - **Sin número cargado.** Para el eCheq eso incluye el número PROVISORIO: lo puso el sistema
-     *   para no frenar la carga del pago, no es el del banco, y ese pago sigue estando por emitir.
-     *   Para la transferencia el dato va en `num_cheque`, que es la columna genérica.
+     * - **Sobre una fecha del cronograma**: el comprobante es por fecha. Los pagos del circuito
+     *   viejo no la tienen y quedan afuera (si no, entraban pagos de 2025 ya cerrados).
      *
-     * - **Con fecha.** Sale del cronograma (`fecha_probable_pago`), que es donde vive de verdad:
-     *   `fecha_emision_echeq` viene nula en casi todos. Sin fecha en ninguna de las dos el pago
-     *   todavía no está definido y no corresponde llevarlo al banco.
+     * - **Con fecha.** Sale del cronograma (`fecha_probable_pago`): `fecha_emision_echeq` viene
+     *   nula en casi todos.
+     *
+     * @param \Illuminate\Http\Request|null $filtrosGrilla Los filtros de la grilla de Pagos
+     *        (estado, fechas, beneficiario, N° factura/OPA, razón social, imputación, urgentes,
+     *        tipo). Con ellos el listado trae sólo las boletas que la grilla muestra, y las
+     *        fechas se aplican además a la cuota de cada fila. (2026-10-23)
      */
-    public function listarPagosAEmitir($idBanco = null, $numeroOpa = null, $idRazon = null)
+    public function listarPagosAEmitir($idBanco = null, $numeroOpa = null, $idRazon = null, $filtrosGrilla = null)
     {
         $bancoResuelto = DB::raw('COALESCE(pp.id_banco_emisor, cb.id_entidad_bancaria)');
         $fechaResuelta = DB::raw('COALESCE(fp.fecha_probable_pago, pp.fecha_emision_echeq)');
@@ -1519,23 +1519,40 @@ class TesInstrumentoPagoRepository
             ->leftJoin('tb_prestador as pres', 'pres.cod_prestador', '=', 'o.id_prestador')
             ->leftJoin('tb_proveedor_datos_bancarios as bprov', 'bprov.cod_proveedor', '=', 'o.id_proveedor')
             ->leftJoin('tb_datos_bancarios_prestador as bpres', 'bpres.cod_prestador', '=', 'o.id_prestador')
-            ->whereIn('o.id_estado_orden_pago', $this->estadosOpaViva())
+            // Criterio desde el 2026-10-23, acordado con Pagos: un pago está "a emitir" hasta que su
+            // fecha tiene el COMPROBANTE adjunto, tenga número o no. Pagos carga el pago, lo
+            // procesa, y adjunta el comprobante del banco después; hasta ahí lo quiere en el Excel.
+            // Por eso ya no se mira el estado de la orden (al procesar puede quedar PAGADA) ni el
+            // número. Que no se adjunte comprobante sin número lo cuida `fechasDeComprobantes()`.
+            ->whereNotIn('o.id_estado_orden_pago', [TestOrdenPagoRepository::ESTADO_OPA_RECHAZADO])
             ->where('p.id_estado_orden_pago', '!=', TestOrdenPagoRepository::ESTADO_OPA_RECHAZADO)
             ->whereIn('pp.id_forma_pago', [self::FORMA_PAGO_ECHEQ, self::FORMA_PAGO_TRANSFERENCIA])
             ->where(fn($w) => $w->whereNull('pp.id_estado_instrumento')
                 ->orWhereNotIn('pp.id_estado_instrumento', [self::RECHAZADO, self::ANULADO]))
             ->where('pp.monto_pago', '>', 0)
+            // Sólo pagos sobre una fecha del cronograma: el comprobante es por fecha. Los pagos
+            // del circuito viejo no tienen fecha y nunca se les pidió comprobante así; sin este
+            // corte entraban decenas de pagos de 2025 ya cerrados.
+            ->whereNotNull('pp.id_fecha_probable')
             ->whereNotNull($fechaResuelta)
-            ->where(function ($w) {
-                $w->where(fn($e) => $e->where('pp.id_forma_pago', self::FORMA_PAGO_ECHEQ)
-                    ->where(fn($x) => $x->whereNull('pp.numero_echeq')
-                        ->orWhere('pp.numero_echeq', '')
-                        ->orWhere('pp.numero_provisorio', 1)))
-                    ->orWhere(fn($t) => $t->where('pp.id_forma_pago', self::FORMA_PAGO_TRANSFERENCIA)
-                        ->where(fn($x) => $x->whereNull('pp.num_cheque')->orWhere('pp.num_cheque', '')));
-            })
+            // Comprobante vigente de ESA fecha, o uno viejo sin fecha que cubre toda la boleta.
+            ->whereNotExists(fn($c) => $c->select(DB::raw(1))
+                ->from('tb_test_pago_detalle_comprobantes as comp')
+                ->whereColumn('comp.id_pago', 'p.id_pago')
+                ->where(fn($e) => $e->whereNull('comp.estado')->orWhere('comp.estado', 1))
+                ->where(fn($f) => $f->whereColumn('comp.id_fecha_probable', 'pp.id_fecha_probable')
+                    ->orWhereNull('comp.id_fecha_probable')))
             ->when(!is_null($idBanco), fn($q) => $q->where($bancoResuelto, $idBanco))
             ->tap(fn($q) => $this->filtrarPorOpaYRazon($q, $numeroOpa, $idRazon, 'o.num_orden_pago', 'o.id_orden_pago'))
+            ->when(!is_null($filtrosGrilla), function ($q) use ($filtrosGrilla, $fechaResuelta) {
+                $q->whereIn('p.id_pago', (new TesPagosRepository())->idsPagoFiltroPrincipal($filtrosGrilla));
+                if (!empty($filtrosGrilla->desde)) {
+                    $q->whereDate($fechaResuelta, '>=', $filtrosGrilla->desde);
+                }
+                if (!empty($filtrosGrilla->hasta)) {
+                    $q->whereDate($fechaResuelta, '<=', $filtrosGrilla->hasta);
+                }
+            })
             ->select([
                 'pp.id_pago_parcial',
                 'o.id_orden_pago',
@@ -1588,7 +1605,10 @@ class TesInstrumentoPagoRepository
                 'metodo_pago'    => $esEcheq ? 'ECHEQ' : 'TRANSFERENCIA',
                 // El CBU es la cuenta DESTINO y sólo aplica a la transferencia. En un eCheq no
                 // corresponde: si viniera cargado sería un dato inconsistente del origen.
-                'cbu'            => $esEcheq ? '' : (($esProveedor ? $f->proveedor_cbu : $f->prestador_cbu) ?: ''),
+                // Una transferencia sin CBU no se puede emitir: se marca en vez de dejar la celda
+                // vacía, que se leía como un error del archivo. El dato falta en la ficha bancaria
+                // del beneficiario (la mayoría de los proveedores no la tiene cargada). (2026-10-23)
+                'cbu'            => $esEcheq ? '' : (trim((string) ($esProveedor ? $f->proveedor_cbu : $f->prestador_cbu)) ?: 'SIN CBU CARGADO'),
                 'monto'          => (float) $f->monto_pago,
                 'fecha_pago'     => $f->fecha_pago,
                 'observaciones'  => $f->observaciones_opa ?: ($f->observaciones_pago ?: ''),
@@ -1636,6 +1656,11 @@ class TesInstrumentoPagoRepository
                 'tb_tes_pago_parcial.id_pago_parcial',
                 'tb_tes_pago_parcial.id_pago',
                 'tb_tes_pago_parcial.numero_echeq',
+                // El cheque fisico guarda su numero en `num_cheque`, y la forma de pago no
+                // venia: la pantalla lo mostraba como un eCheq sin numero y con Forma vacia.
+                // (2026-10-23)
+                'tb_tes_pago_parcial.num_cheque',
+                'tb_tes_pago_parcial.id_forma_pago',
                 // El numero lo puso el sistema para no frenar la carga del pago: todavia no
                 // es el del banco. `marcarAcreditado` corta si esta en 1, asi que el front lo
                 // necesita para no ofrecer un boton que va a rebotar. Faltaba en el select y
@@ -1687,7 +1712,8 @@ class TesInstrumentoPagoRepository
             })
             // Prestadores / Proveedores, como el selector de Generar OPA (2026-10-06).
             ->when($tipo, fn($q) => $q->where('tb_tes_orden_pago.tipo_factura', $tipo))
-            ->when($numeroEcheq !== '', fn($q) => $q->where('tb_tes_pago_parcial.numero_echeq', 'LIKE', "%{$numeroEcheq}%"))
+            ->when($numeroEcheq !== '', fn($q) => $q->where(fn($w) => $w->where('tb_tes_pago_parcial.numero_echeq', 'LIKE', "%{$numeroEcheq}%")
+                ->orWhere('tb_tes_pago_parcial.num_cheque', 'LIKE', "%{$numeroEcheq}%")))
             ->when($estado === 'por_acreditar', fn($q) => $q->where('tb_tes_pago_parcial.id_estado_instrumento', self::EMITIDO))
             ->when($estado === 'acreditado', fn($q) => $q->where('tb_tes_pago_parcial.id_estado_instrumento', self::ACREDITADO))
             ->when($estado === 'sin_numero', fn($q) => $q->where('tb_tes_pago_parcial.id_estado_instrumento', self::EMITIDO)
@@ -1696,7 +1722,7 @@ class TesInstrumentoPagoRepository
                     ->orWhere('tb_tes_pago_parcial.numero_echeq', '')))
             ->when(!empty($desde), fn($q) => $q->whereDate('tb_tes_pago_parcial.fecha_emision_echeq', '>=', $desde))
             ->when(!empty($hasta), fn($q) => $q->whereDate('tb_tes_pago_parcial.fecha_emision_echeq', '<=', $hasta))
-            ->with(['bancoEmisor', 'cuentaBancaria', 'estadoInstrumento', 'pago.opa.proveedor', 'pago.opa.prestador'])
+            ->with(['bancoEmisor', 'cuentaBancaria', 'estadoInstrumento', 'formaPago', 'pago.opa.proveedor', 'pago.opa.prestador'])
             // Los que todavía esperan acreditación van primero: son los que requieren acción.
             ->orderBy('tb_tes_pago_parcial.id_estado_instrumento')
             ->orderBy('tb_tes_pago_parcial.fecha_emision_echeq')

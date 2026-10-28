@@ -275,9 +275,26 @@
     @php
         $filasIzq = is_iterable($facturas) ? array_values(is_array($facturas) ? $facturas : collect($facturas)->all()) : [];
 
+        // Un ANTICIPO no tiene facturas propias: la columna muestra a cuáles se aplicó después
+        // (reclamo "Incidencias Anticipos", 2026-10-19).
+        if (($tipo_opa ?? null) === 'ANTICIPO') {
+            $filasIzq = $aplicaciones_anticipo ?? [];
+        }
+
+        // Anticipos ya aplicados a cada factura de esta orden: la factura se imprime por su total
+        // y el anticipo va como valor entregado. Sólo papel, el monto de la orden no cambia.
+        $anticipoPorFactura = [];
+        foreach ($anticipos_aplicados ?? [] as $ap) {
+            $anticipoPorFactura[$ap['id_factura']] = ($anticipoPorFactura[$ap['id_factura']] ?? 0) + $ap['monto'];
+        }
+        $totalAnticipos = (float) ($total_anticipos ?? 0);
+
         // Columna derecha: cada renglón es una fila de "Valores Entregados", en el mismo orden que
         // tenía la tabla del circuito.
         $filasDer = [];
+        foreach ($anticipos_aplicados ?? [] as $ap) {
+            $filasDer[] = ['tipo' => 'anticipo', 'ap' => $ap];
+        }
         foreach ($fechas_pendientes ?? [] as $fecha) {
             $filasDer[] = ['tipo' => 'pendiente', 'fecha' => $fecha];
         }
@@ -302,7 +319,9 @@
         <thead>
             <tr class="op-card-title">
                 <th colspan="3" class="op-l1 op-l3" style="border-top: 3px solid #0f172a;">
-                    @if(($tipo_opa ?? null) === 'ANTICIPO')
+                    @if(($tipo_opa ?? null) === 'ANTICIPO' && !empty($aplicaciones_anticipo))
+                        ANTICIPO aplicado a (Comprobantes)
+                    @elseif(($tipo_opa ?? null) === 'ANTICIPO')
                         ANTICIPO a cuenta de facturas futuras (sin comprobantes)
                     @else
                         Aplicado a (Comprobantes)
@@ -329,12 +348,28 @@
             @endphp
             <tr>
                 {{-- Comprobantes --}}
-                @if ($item)
+                @if (is_array($item))
+                {{-- Factura a la que se aplicó este anticipo, con lo que le queda después. --}}
+                @php $fcAp = $item['detalle']?->detallefc; @endphp
+                <td class="op-l1" style="font-size: 9px;">
+                    <strong class="text-dark">FAC{{ $fcAp?->tipo_letra }} {{ $fcAp?->sucursal }}-{{ str_pad($fcAp?->numero, 8, '0', STR_PAD_LEFT) }}</strong><br>
+                    <span style="color: #64748b;">(LIQ Nº {{ $fcAp?->num_liquidacion }})</span>
+                    <div style="color: #64748b; font-size: 8px; margin-top: 2px;">
+                        Total factura: ${{ number_format((float) ($fcAp?->total_neto ?? 0), 2, ',', '.') }}
+                        &middot; Resta cubrir: ${{ number_format($item['resta'], 2, ',', '.') }}
+                    </div>
+                </td>
+                <td class="text-center font-bold">{{ $i + 1 }}</td>
+                <td class="op-l3 text-right font-bold text-dark">${{ number_format($item['monto'], 2, ',', '.') }}</td>
+                @elseif ($item)
                 @php
                     // Lo IMPUTADO a esta factura en esta orden, no su total: con una imputación
                     // parcial las filas no sumaban al total a pagar. (2026-10-06)
+                    // Si la orden cubre la factura entera, su TOTAL: el débito va en la resta de
+                    // abajo (T-00001229, 2026-10-22).
                     $netoFc = (float) ($item?->detallefc?->total_neto ?? 0);
-                    $imputadoFc = $item?->monto_factura !== null ? (float) $item->monto_factura : $netoFc;
+                    $anticipoFc = (float) ($anticipoPorFactura[$item?->id_factura] ?? 0);
+                    $imputadoFc = \App\Http\Controllers\Tesoreria\Repository\TestOrdenPagoRepository::importeFacturaEnOrden($item, $anticipoFc);
                 @endphp
                 <td class="op-l1" style="font-size: 9px;">
                     <strong class="text-dark">FAC{{ $item?->detallefc?->tipo_letra }} {{ $item?->detallefc?->sucursal }}-{{ str_pad($item?->detallefc?->numero, 8, '0', STR_PAD_LEFT) }}</strong><br>
@@ -353,6 +388,11 @@
                             parcial, de ${{ number_format($netoFc, 2, ',', '.') }}
                         </div>
                     @endif
+                    @if ($anticipoFc > 0)
+                        <div style="font-weight: normal; font-size: 7.5px; color: #b45309;">
+                            incluye anticipo ${{ number_format($anticipoFc, 2, ',', '.') }}
+                        </div>
+                    @endif
                 </td>
                 @else
                 <td class="op-l1" style="height: 18px;"></td><td></td><td class="op-l3"></td>
@@ -361,7 +401,21 @@
                 <td class="sep"></td>
 
                 {{-- Valores Entregados --}}
-                @if ($der && $der['tipo'] === 'pendiente')
+                @if ($der && $der['tipo'] === 'anticipo')
+                {{-- Anticipo pagado antes y aplicado a una factura de esta orden: no es plata nueva. --}}
+                <td class="op-l1 font-bold text-dark" style="font-size: 9px;">
+                    Anticipo aplicado<br>
+                    <span style="font-weight: normal; font-size: 8px; color: #64748b;">{{ $der['ap']['num_anticipo'] }}</span>
+                    @if ($der['ap']['fecha'])
+                    <div style="margin-top: 3px;">
+                        <span class="font-bold" style="font-size: 8px;">Aplicado:</span>
+                        <span class="text-blue" style="font-size: 8px;">{{ $der['ap']['fecha'] }}</span>
+                    </div>
+                    @endif
+                </td>
+                <td class="text-center font-bold">&mdash;</td>
+                <td class="op-l3 text-right font-bold text-dark">${{ number_format($der['ap']['monto'], 2, ',', '.') }}</td>
+                @elseif ($der && $der['tipo'] === 'pendiente')
                 {{-- Fecha planificada todavía sin emitir: sin monto ni forma de pago, que se
                      definen recién al pagar. --}}
                 <td class="op-l1 font-bold text-dark" style="font-size: 9px;">
@@ -433,11 +487,11 @@
                 <td class="op-l3 text-right text-red">${{ number_format($debito ?? 0, 2, ',', '.') }}</td>
                 <td class="sep"></td>
                 <td colspan="2" class="op-l1 text-right">Entregado:</td>
-                <td class="op-l3 text-right">${{ number_format($total_entregado ?? 0, 2, ',', '.') }}</td>
+                <td class="op-l3 text-right">${{ number_format(($total_entregado ?? 0) + $totalAnticipos, 2, ',', '.') }}</td>
             </tr>
             <tr class="total-final-row">
                 <td colspan="2" class="text-right">Total a Pagar:</td>
-                <td class="text-right">${{ number_format($monto_pagable ?? (($total ?? 0) - ($debito ?? 0)), 2, ',', '.') }}</td>
+                <td class="text-right">${{ number_format(($monto_pagable ?? (($total ?? 0) - ($debito ?? 0))) + $totalAnticipos, 2, ',', '.') }}</td>
                 <td class="sep"></td>
                 <td colspan="2" class="text-right" style="background-color: #065933;">Restante:</td>
                 <td class="text-right" style="background-color: #065933;">${{ number_format($total_restante ?? 0, 2, ',', '.') }}</td>
