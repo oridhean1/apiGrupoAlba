@@ -25,6 +25,10 @@ class TestOrdenPagoRepository
     const ESTADO_OPA_PAGADO    = 5;
     const ESTADO_OPA_PAGO_PARCIAL = 6;
     const ESTADO_OPA_CONSUMIDA = 7;    // anticipos (fase 3)
+    const ESTADO_OPA_IMPAGO    = 8;    // pagos cargados sin comprobante (2026-10-28)
+    // Desde esta fecha un pago se da por ejecutado sólo con comprobante. Lo confirmado antes (circuito
+    // viejo, sin abonos) se considera pagado aunque no lo tenga. Ver pagos:revertir-sin-comprobante.
+    const CORTE_COMPROBANTE_OBLIGATORIO = '2026-09-12';
 
     /**
      * OPAs AUTOMÁTICAS: las que el sistema viejo creaba solo (al pasar la factura de prestador a
@@ -869,21 +873,27 @@ class TestOrdenPagoRepository
             // `monto_pago` vacío (100 de 251 boletas con abonos lo tienen así), y caer al
             // `monto_opa` de respaldo reportaría el total de la orden como si estuviera cobrado.
             // (2026-09-04)
+            //
+            // ⚠️ Desde el 2026-10-28 cuenta lo EJECUTADO (`fecha_ejecucion`, se completa al subir
+            // el comprobante), no lo que tiene `fecha_confirma_pago`. Un pago cargado sin
+            // comprobante es planificación: está IMPAGO. Un eCheq ejecutado cuenta aunque el banco
+            // todavía no lo haya debitado (pedido del cliente, documento "Pagos Estados IMPAGO").
             $abonos = \App\Models\Tesoreria\TesPagosParciales::where('id_pago', $boleta->id_pago)->get();
 
             if ($abonos->isNotEmpty()) {
                 $total += (float) $abonos
-                    ->filter(fn($a) => !is_null($a->fecha_confirma_pago))
+                    ->filter(fn($a) => !is_null($a->fecha_ejecucion) && !self::abonoMuerto($a))
                     ->sum('monto_pago');
 
                 continue;
             }
 
-            // Sin abonos, vale la cabecera. El respaldo a `monto_opa` se mantiene porque en OSV
-            // la mayoría de los pagos viejos tiene `monto_pago` en null y sin él el estado
-            // derivado saldría mal.
-            $confirmada = (int) $boleta->id_estado_orden_pago === self::ESTADO_OPA_PAGADO
-                || !is_null($boleta->fecha_confirma_pago);
+            // Sin abonos, vale la cabecera: el circuito viejo registraba ahí el pago. Cuenta como
+            // pagada sólo si además tiene comprobante, mismo criterio que los abonos. El respaldo a
+            // `monto_opa` se mantiene porque en OSV la mayoría de los pagos viejos tiene
+            // `monto_pago` en null y sin él el estado derivado saldría mal.
+            $confirmada = $this->boletaCabeceraConfirmada($boleta)
+                && $this->boletaCabeceraEjecutada($boleta);
 
             if ($confirmada) {
                 $total += (float) ($boleta->monto_pago ?? $boleta->monto_opa ?? 0);
@@ -891,6 +901,72 @@ class TestOrdenPagoRepository
         }
 
         return $total;
+    }
+
+    private static function abonoMuerto($abono): bool
+    {
+        return in_array((int) $abono->id_estado_instrumento, [
+            TesInstrumentoPagoRepository::RECHAZADO,
+            TesInstrumentoPagoRepository::ANULADO,
+        ], true);
+    }
+
+    /** Boleta del circuito viejo (sin abonos) con el pago registrado en la cabecera. */
+    private function boletaCabeceraConfirmada($boleta): bool
+    {
+        return (int) $boleta->id_estado_orden_pago === self::ESTADO_OPA_PAGADO
+            || !is_null($boleta->fecha_confirma_pago);
+    }
+
+    /**
+     * Boleta del circuito viejo cuyo pago se da por ejecutado: tiene comprobante, o se confirmó
+     * antes del corte. Lo anterior al corte se pagó cuando el comprobante no se pedía, y revertirlo
+     * inflaría los saldos (decidido con el usuario, opción B, 2026-10-28).
+     */
+    private function boletaCabeceraEjecutada($boleta): bool
+    {
+        if ($this->boletaTieneComprobante($boleta->id_pago)) {
+            return true;
+        }
+
+        return !is_null($boleta->fecha_confirma_pago)
+            && substr((string) $boleta->fecha_confirma_pago, 0, 10) < self::CORTE_COMPROBANTE_OBLIGATORIO;
+    }
+
+    private function boletaTieneComprobante($idPago): bool
+    {
+        return DB::table('tb_test_pago_detalle_comprobantes')
+            ->where('id_pago', $idPago)
+            ->where('estado', '1')
+            ->exists();
+    }
+
+    /**
+     * ¿La orden tiene pagos CARGADOS que todavía no se ejecutaron? Es lo que la pone en IMPAGO:
+     * fecha, forma e importe definidos, sin comprobante. (2026-10-28)
+     */
+    public function tienePagosSinEjecutar($idOpa): bool
+    {
+        $boletas = TesPagoEntity::where('id_orden_pago', $idOpa)
+            ->where('id_estado_orden_pago', '!=', self::ESTADO_OPA_RECHAZADO)
+            ->get();
+
+        foreach ($boletas as $boleta) {
+            $abonos = \App\Models\Tesoreria\TesPagosParciales::where('id_pago', $boleta->id_pago)->get();
+
+            if ($abonos->isNotEmpty()) {
+                if ($abonos->contains(fn($a) => is_null($a->fecha_ejecucion) && !self::abonoMuerto($a))) {
+                    return true;
+                }
+                continue;
+            }
+
+            if ($this->boletaCabeceraConfirmada($boleta) && !$this->boletaCabeceraEjecutada($boleta)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -975,7 +1051,19 @@ class TestOrdenPagoRepository
             $tuvoAbonos = \App\Models\Tesoreria\TesPagosParciales::where('id_pago', $boleta->id_pago)
                 ->exists();
 
+            // Circuito viejo: el pago vive en la cabecera. Desde el 2026-10-28 está PAGADA sólo
+            // si tiene comprobante; si no, IMPAGO. Una cabecera sin pago registrado no se toca.
             if ($abonos->isEmpty() && !$tuvoAbonos) {
+                if ($this->boletaCabeceraConfirmada($boleta)) {
+                    $estado = $this->boletaCabeceraEjecutada($boleta)
+                        ? self::ESTADO_OPA_PAGADO
+                        : self::ESTADO_OPA_IMPAGO;
+
+                    if ((int) $boleta->id_estado_orden_pago !== $estado) {
+                        $boleta->id_estado_orden_pago = $estado;
+                        $boleta->save();
+                    }
+                }
                 continue;
             }
 
@@ -985,8 +1073,9 @@ class TestOrdenPagoRepository
                 continue;
             }
 
+            // Lo EJECUTADO (con comprobante), mismo criterio que `montoPagadoOpa()`. (2026-10-28)
             $cobrado = (float) $abonos
-                ->filter(fn($a) => !is_null($a->fecha_confirma_pago))
+                ->filter(fn($a) => !is_null($a->fecha_ejecucion))
                 ->sum('monto_pago');
 
             $aCentavos = fn($m) => (int) round(((float) $m) * 100);
@@ -995,6 +1084,9 @@ class TestOrdenPagoRepository
                 $estado = self::ESTADO_OPA_PAGADO;
             } elseif ($cobrado > 0.01) {
                 $estado = self::ESTADO_OPA_PAGO_PARCIAL;
+            } elseif ($abonos->isNotEmpty()) {
+                // Pagos cargados, ninguno con comprobante.
+                $estado = self::ESTADO_OPA_IMPAGO;
             } else {
                 // Nada cobrado, pero la boleta y su cronograma existen: EN PROCESO, igual que la
                 // orden. Antes esta rama era un `continue`, así que el estado sólo podía SUBIR —
@@ -1032,6 +1124,10 @@ class TestOrdenPagoRepository
             $nuevo = self::ESTADO_OPA_PAGADO;
         } elseif ($pagado > 0.01) {
             $nuevo = self::ESTADO_OPA_PAGO_PARCIAL;
+        } elseif ($opa->tipo_opa !== TesAnticipoRepository::TIPO_APLICACION
+            && $this->tienePagosSinEjecutar($idOpa)) {
+            // Pagos cargados, ninguno con comprobante: IMPAGO (2026-10-28).
+            $nuevo = self::ESTADO_OPA_IMPAGO;
         } elseif ($this->tieneAlgunPago($idOpa)) {
             // Sin plata cobrada todavía, pero la orden YA tiene su boleta y su cronograma: eso
             // es EN PROCESO, no PENDIENTE. Sin esta rama el recálculo devolvía la orden a

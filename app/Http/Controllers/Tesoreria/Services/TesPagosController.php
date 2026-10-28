@@ -170,43 +170,40 @@ class TesPagosController extends Controller
                 $monto_total = $monto_total + $monto_Validar;
             }
 
-            // Qué abonos YA habían entrado en un pago confirmado ANTES de esta llamada.
+            // ═══ Cargar un pago ≠ ejecutarlo (2026-10-28) ═══
             //
-            // Hay que leerlo acá: `findByConfirmarPago()` le pone `fecha_confirmado_en_pago` a
-            // todos los abonos que procesa, así que después ya no se distingue lo viejo de lo
-            // nuevo.
+            // Hasta acá, confirmar el pago debitaba la cuenta y generaba el asiento. Pero confirmar
+            // es cuando Pagos PLANIFICA: muchas veces todavía no sabe con qué va a pagar, y después
+            // cambiaba la forma de pago de algo ya asentado (abono 524). Desde ahora:
             //
-            // Sin esto, volver a entrar al pago y guardar rehacía el asiento ENTERO —con todos los
-            // abonos, incluidos los que ya estaban asentados— y quedaban dos asientos PAGO activos
-            // por la misma plata. Reportado sobre la boleta 3943 (asientos 779 y 780, identicos);
-            // hay 4 boletas mas asi en Alba y 1 en OSV, todas anteriores a este arreglo.
+            //   1. `findByConfirmarPago()` guarda la planificación: sin débito ni asiento.
+            //   2. Los comprobantes que se suben EJECUTAN los pagos de su fecha, con la fecha real
+            //      del pago: recién ahí se debita y se asienta.
             //
-            // Es el mismo problema en el retiro de la cuenta: un abono directo ya debitado se
-            // volvia a debitar. No salto antes porque los eCheq no mueven saldo al confirmar.
-            // (2026-09-16)
-            $abonosYaAsentados = DB::table('tb_tes_pago_parcial')
-                ->where('id_pago', $params->id_pago)
-                ->whereNotNull('fecha_confirmado_en_pago')
-                ->pluck('id_pago_parcial')
-                ->map(fn($id) => (int) $id)
-                ->all();
+            // Ver docs/circuito-pagos/plan-pago-ejecutado-con-comprobante.md.
 
-            // @CONFIRMAMOS EL PAGO || CONFIRMA MONTO
+            // @CONFIRMAMOS EL PAGO || GUARDA LA PLANIFICACIÓN
             $pagoDb = $pago->findByConfirmarPago($params);
 
             //@ELIMINAR COMPRANTES
+            // No se quita el comprobante que respalda pagos ya ejecutados. (2026-10-28)
             if ($params->archivos_eliminados) {
                 foreach ($params->archivos_eliminados as $archivo) {
+                    $motivo = $pago->motivoQueImpideQuitarComprobante($archivo->id_comprobante);
+                    if ($motivo) {
+                        DB::rollBack();
+                        return response()->json(['message' => $motivo], 422);
+                    }
                     $pago->findByDeleteComprobantePago($archivo->id_comprobante);
                 }
             }
 
             //@SUBIR DETALLE DE COMPROBANTES
-            // Un comprobante por fecha del cronograma, y sólo sobre pagos con su número cargado:
-            // es lo que saca el pago de "Pagos a emitir". Se valida antes de escribir a disco.
-            // (2026-10-23)
+            // Un comprobante por fecha del cronograma, y sólo sobre pagos con su número cargado.
+            // Se valida antes de escribir a disco. (2026-10-23)
             $cantidadArchivos = $request->hasFile('archivos') ? count($request->file('archivos')) : 0;
             $fechasArchivos = [];
+            $fechaRealPorFecha = [];
             if ($cantidadArchivos > 0) {
                 [$fechasArchivos, $motivo] = $pago->fechasDeComprobantes(
                     $params->id_pago,
@@ -217,11 +214,29 @@ class TesPagosController extends Controller
                     DB::rollBack();
                     return response()->json(['message' => $motivo], 422);
                 }
+
+                // Fecha real en que salió cada pago, una por comprobante. Sin ella, hoy.
+                $fechasPago = (array) ($params->archivos_fechas_pago ?? []);
+                foreach ($fechasArchivos as $i => $idFecha) {
+                    $fechaPago = trim((string) ($fechasPago[$i] ?? ''));
+                    if ($fechaPago !== '' && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $fechaPago)) {
+                        DB::rollBack();
+                        return response()->json(['message' => 'La fecha del pago no es válida.'], 422);
+                    }
+                    $clave = $idFecha ?? 'sin';
+                    if ($fechaPago !== '' && !isset($fechaRealPorFecha[$clave])) {
+                        $fechaRealPorFecha[$clave] = $fechaPago;
+                    }
+                }
             }
             $arrayArchivos = $storage->findByCargaMasivaArchivos("COMP" . $params->id_pago . $params->num_pago, 'tesoreria/comprobantes_pago', $request);
             foreach ($arrayArchivos as $i => $key) {
                 $pago->findByCargarComprobantePago($key['nombre'], $params->id_pago, $fechasArchivos[$i] ?? null);
             }
+
+            // @EJECUTAMOS LOS PAGOS CON COMPROBANTE
+            $ejecutados = $pago->ejecutarPagosConComprobante($params->id_pago, $fechaRealPorFecha);
+            $hoy = Carbon::now('America/Argentina/Buenos_Aires')->toDateString();
 
             // @CONFIRMAMOS LA OPA || **PAGO ANTICIPADO**
 
@@ -290,77 +305,54 @@ class TesPagosController extends Controller
                 }
             }
 
-            // @REGISTRAMOS EL RETIRO DE LA CUENTA BANCARIA
+            // @DÉBITO Y ASIENTO DE LO EJECUTADO
             //
-            // Se retira de la cuenta de CADA abono, no del total contra una sola. Desde
-            // 2026_09_06_100000 cada pago tiene su propia cuenta de origen: si una orden se pagó
-            // con $100 de Macro y $200 de BBVA, hay que sacar $100 de una y $200 de la otra, no
-            // $300 de cualquiera. Antes se retiraba todo de `$params->id_cuenta_bancaria`, que
-            // además ahora puede venir en null cuando el modal ya no la pide.
+            // Sólo lo que se acaba de ejecutar (comprobante subido), agrupado por FECHA REAL: cada
+            // grupo lleva su asiento con esa fecha y en el período de esa fecha, y su movimiento
+            // bancario con esa fecha. Un pago que salió hace dos semanas no queda fechado hoy.
             //
-            // Los abonos sin cuenta propia (emitidos antes del cambio) caen a la cuenta que vino
-            // en el request, que es el comportamiento viejo. Si no hay ninguna de las dos, no se
-            // mueve saldo: no se puede debitar una cuenta que no se sabe cuál es.
-            // ⚠️ Un cheque/eCheq NO mueve el saldo acá.
-            //
-            // Emitir el instrumento no saca plata del banco: eso pasa cuando el banco lo debita,
-            // o sea al acreditarlo. El retiro y el movimiento de esos abonos los hace
-            // `TesInstrumentoPagoRepository::marcarAcreditado()`, junto con su asiento. Así el
-            // saldo del sistema coincide con el extracto, que es lo que necesita la conciliación.
-            // (2026-09-12, decidido con el usuario)
-            //
-            // Igual entran en el DESGLOSE del asiento: ahí no se los ignora, se los manda contra la
-            // cuenta de pasivo en vez de contra el banco.
-            $montosPorCuenta = [];   // solo lo que sale YA: mueve saldo
-            $desgloseAsiento = [];   // todo, marcando qué porción es diferida
+            // Débito por la cuenta de CADA pago (una orden puede salir de dos bancos). Un
+            // cheque/eCheq no mueve saldo acá: eso pasa al acreditarlo (`marcarAcreditado`), y en
+            // el asiento va contra cheques diferidos, no contra el banco. (2026-09-12)
+            $grupos = [];   // fecha => ['cuentas' => [id => monto], 'desglose' => [...]]
 
-            $abonosVivos = $pago->findByPagosParcialesVivos($params->id_pago);
-
-            foreach ($abonosVivos as $abono) {
-                // Ya tiene su asiento y su retiro de una confirmación anterior. Volver a incluirlo
-                // duplicaría las dos cosas. Lo que se carga después —"cargar pago restante"— sí
-                // entra, y genera su propio asiento por el importe incremental.
-                if (in_array((int) $abono->id_pago_parcial, $abonosYaAsentados, true)) {
-                    continue;
-                }
-
+            foreach ($ejecutados as $e) {
+                $abono = $e['abono'];
                 $idCuentaAbono = $abono->id_cuenta_bancaria ?: $params->id_cuenta_bancaria;
 
-                // Sin cuenta no se puede debitar: la plata sale igual en el banco, pero el saldo
-                // del sistema no lo reflejaría y la diferencia aparecería después, sin rastro de
-                // por qué. Se corta con un mensaje en vez de dejarlo pasar en silencio.
+                // Sin cuenta no se puede debitar ni asentar: se corta en vez de dejar el pago
+                // ejecutado sin rastro en el banco.
                 if (empty($idCuentaAbono)) {
                     DB::rollBack();
                     return response()->json([
                         'message' => 'Uno de los pagos de esta orden no tiene cuenta de origen, '
                             . 'así que no se puede descontar el saldo. Indicá la cuenta bancaria '
-                            . 'para confirmar el pago.'
+                            . 'antes de subir el comprobante.'
                     ], 422);
                 }
 
-                $esDiferido = !is_null($abono->id_estado_instrumento);
-
-                $desgloseAsiento[] = [
+                $grupos[$e['fecha']]['desglose'][] = [
                     'id_cuenta_bancaria' => $idCuentaAbono,
                     'monto'              => (float) $abono->monto_pago,
-                    'diferido'           => $esDiferido,
+                    'diferido'           => $e['diferido'],
                     'id_pago_parcial'    => $abono->id_pago_parcial,
                 ];
 
-                if (!$esDiferido) {
-                    $montosPorCuenta[$idCuentaAbono] =
-                        ($montosPorCuenta[$idCuentaAbono] ?? 0) + (float) $abono->monto_pago;
+                if (!$e['diferido']) {
+                    $grupos[$e['fecha']]['cuentas'][$idCuentaAbono] =
+                        ($grupos[$e['fecha']]['cuentas'][$idCuentaAbono] ?? 0) + (float) $abono->monto_pago;
                 }
             }
 
-            // Un anticipo no tiene abonos: ahí se conserva el retiro por el total.
-            //
-            // Se mira `$abonosVivos`, NO `$desgloseAsiento`: si la boleta tiene abonos pero todos
-            // estaban asentados, el desglose queda vacío y este bloque armaría un asiento por el
-            // total de la orden — justo el duplicado que se viene a evitar.
-            if ($abonosVivos->isEmpty() && !empty($params->id_cuenta_bancaria)) {
-                $montosPorCuenta[$params->id_cuenta_bancaria] = $monto_total;
-                $desgloseAsiento[] = [
+            // Boleta del circuito viejo, sin abonos (un anticipo): se ejecuta entera cuando tiene
+            // comprobante y todavía no tiene su asiento.
+            $abonosVivos = $pago->findByPagosParcialesVivos($params->id_pago);
+            if ($abonosVivos->isEmpty() && !empty($params->id_cuenta_bancaria) && $monto_total > 0
+                && $cantidadArchivos > 0
+                && is_null($historialPagoRepository->obtenerAsientoVigentePago($params->id_pago))) {
+                $fechaBoleta = $fechaRealPorFecha['sin'] ?? (reset($fechaRealPorFecha) ?: $hoy);
+                $grupos[$fechaBoleta]['cuentas'][$params->id_cuenta_bancaria] = $monto_total;
+                $grupos[$fechaBoleta]['desglose'][] = [
                     'id_cuenta_bancaria' => $params->id_cuenta_bancaria,
                     'monto'              => (float) $monto_total,
                     'diferido'           => false,
@@ -368,22 +360,18 @@ class TesPagosController extends Controller
                 ];
             }
 
-            foreach ($montosPorCuenta as $idCuentaBancaria => $montoCuenta) {
-                $cuenta->findByRetiroCuenta($idCuentaBancaria, $montoCuenta);
-                // @REGISTRAMOS EL MOVIMIENTO DE LA CUENTA BANCARIA
-                $cuenta->findByRegistrarMovimiento($idCuentaBancaria, $montoCuenta, 'EGRESO', $params->id_pago, null, 'OPA');
+            foreach ($grupos as $fechaPago => $grupo) {
+                foreach (($grupo['cuentas'] ?? []) as $idCuentaBancaria => $montoCuenta) {
+                    $cuenta->findByRetiroCuenta($idCuentaBancaria, $montoCuenta);
+                    // @REGISTRAMOS EL MOVIMIENTO DE LA CUENTA BANCARIA, con la fecha real
+                    $cuenta->findByRegistrarMovimiento($idCuentaBancaria, $montoCuenta, 'EGRESO', $params->id_pago, null, 'OPA', $fechaPago);
+                }
             }
 
             // ============================================================
-            // CREAR ASIENTO CONTABLE AUTOMÁTICO DE PAGO
+            // ASIENTO CONTABLE AUTOMÁTICO DE PAGO — uno por fecha real
             // ============================================================
-            // Nada nuevo que asentar: todos los abonos vivos ya tenían su asiento. Pasa cada vez
-            // que se vuelve a abrir el pago y se guarda sin agregar nada —por ejemplo para cargar
-            // el número del eCheq—. Se sale sin tocar contabilidad en vez de emitir un asiento
-            // repetido. (2026-09-16)
-            $hayAlgoNuevoQueAsentar = !empty($desgloseAsiento);
-
-            if (!is_null($opaFactus) && $hayAlgoNuevoQueAsentar) {
+            if (!is_null($opaFactus) && !empty($grupos)) {
                 if (empty($params->id_razon)) {
                     DB::rollBack();
                     return response()->json([
@@ -391,12 +379,6 @@ class TesPagosController extends Controller
                     ], 422);
                 }
                 try {
-                    // Período mensual vigente que contiene la fecha actual (no el anual)
-                    $periodoContableActivo = $this->periodoContableRepositorio->findByPeriodoContableActivoNow($params->id_razon ?? null);
-                    if (is_null($periodoContableActivo)) {
-                        throw new \Exception("No se encontró un período contable mensual activo para la fecha actual para registrar el asiento contable del pago.");
-                    }
-
                     // Cargar relaciones de OPA — independiente de cuántas facturas tenga
                     $opaFactus->loadMissing(['proveedor', 'prestador']);
                     $proveedorPrestador = $opaFactus->proveedor ?? $opaFactus->prestador;
@@ -406,57 +388,73 @@ class TesPagosController extends Controller
                     // que crearAsientoPago clasificaba mal según cuál de los dos mirara.
                     $facturaDelPago = $facturaRepository->findById($opaFactus->id_factura);
 
-                    $datosPago = [
-                        'id_pago'            => $pagoDb->id_pago,
-                        'id_proveedor'       => $opaFactus->id_proveedor,
-                        'id_prestador'       => $opaFactus->id_prestador,
-                        'id_tipo_factura'    => $facturaDelPago->id_tipo_factura ?? null,
-                        'id_razon'           => $params->id_razon ?? null,
-                        'cuit'               => $proveedorPrestador->cuit ?? '',
-                        'nombre'             => $proveedorPrestador->razon_social ?? '',
-                        'numero_pago'        => 'PAGO-' . $pagoDb->num_pago,
-                        'fecha_registra'     => $pagoDb->fecha_registra,
-                        // La cuenta de la que sale la plata. Desde el 2026-09-09 el modal ya no
-                        // la pregunta —cada abono trae la suya—, asi que `$params` la trae vacia y
-                        // el asiento fallaba con "la cuenta bancaria no tiene una cuenta contable
-                        // asignada" aunque la cuenta si la tuviera. Se toma la del pago real.
-                        'id_cuenta_bancaria' => $params->id_cuenta_bancaria
-                            ?: (array_key_first($montosPorCuenta) ?? $pagoDb->id_cuenta_bancaria),
-                        // Desglose del HABER: una linea por cada porcion del pago, marcando cual
-                        // es diferida. Las directas van contra la cuenta banco; las de cheque/eCheq
-                        // contra la cuenta de pasivo, porque esa plata todavia no salio.
-                        'cuentas'            => $desgloseAsiento,
-                        // Lo que se asienta AHORA, no el total del request: en un pago restante el
-                        // desglose trae solo los abonos nuevos, y el DEBE tiene que coincidir con
-                        // el HABER o el asiento no balancea.
-                        'monto_total'        => round(array_sum(array_column($desgloseAsiento, 'monto')), 2),
-                    ];
+                    foreach ($grupos as $fechaPago => $grupo) {
+                        // Período mensual de la FECHA REAL del pago, no de hoy.
+                        $periodoContable = $this->periodoContableRepositorio->findByPeriodoContableEnFecha($fechaPago, $params->id_razon ?? null);
+                        if (is_null($periodoContable)) {
+                            throw new \Exception('No hay un período contable abierto para el '
+                                . Carbon::parse($fechaPago)->format('d/m/Y')
+                                . ', la fecha del pago. Abrilo en Contabilidad o revisá la fecha.');
+                        }
 
-                    $asiento = $asientoContableRepository->crearAsientoPago($datosPago, $periodoContableActivo->id_periodo_contable);
+                        $desglose = $grupo['desglose'];
+                        $primeraCuentaDirecta = array_key_first($grupo['cuentas'] ?? []);
 
-                    $historialPagoRepository->guardarHistorial(
-                        $pagoDb->id_pago,
-                        $asiento->id_asiento_contable,
-                        'ALTA',
-                        false,
-                        null,
-                        'Asiento contable creado automáticamente al confirmar el pago'
-                    );
+                        $datosPago = [
+                            'id_pago'            => $pagoDb->id_pago,
+                            'id_proveedor'       => $opaFactus->id_proveedor,
+                            'id_prestador'       => $opaFactus->id_prestador,
+                            'id_tipo_factura'    => $facturaDelPago->id_tipo_factura ?? null,
+                            'id_razon'           => $params->id_razon ?? null,
+                            'cuit'               => $proveedorPrestador->cuit ?? '',
+                            'nombre'             => $proveedorPrestador->razon_social ?? '',
+                            'numero_pago'        => 'PAGO-' . $pagoDb->num_pago,
+                            'fecha_registra'     => Carbon::parse($fechaPago)->format('d/m/Y'),
+                            'fecha_asiento'      => $fechaPago,
+                            'id_cuenta_bancaria' => $params->id_cuenta_bancaria
+                                ?: ($primeraCuentaDirecta ?? $desglose[0]['id_cuenta_bancaria'] ?? $pagoDb->id_cuenta_bancaria),
+                            // Desglose del HABER: una linea por pago, marcando cual es diferido.
+                            'cuentas'            => $desglose,
+                            'monto_total'        => round(array_sum(array_column($desglose, 'monto')), 2),
+                        ];
 
-                    // Y una fila por instrumento, con SU linea del asiento. Es lo que permite
-                    // revertir un solo eCheq cuando el banco lo rechaza, sin tocar las lineas de
-                    // los otros medios de pago del mismo asiento. (2026-09-12)
-                    foreach (($asiento->lineasDeInstrumento ?? []) as $idAbono => $idDetalle) {
+                        $asiento = $asientoContableRepository->crearAsientoPago($datosPago, $periodoContable->id_periodo_contable);
+
                         $historialPagoRepository->guardarHistorial(
                             $pagoDb->id_pago,
                             $asiento->id_asiento_contable,
-                            'EMISION',
+                            'ALTA',
                             false,
                             null,
-                            'Pasivo por instrumento diferido, pendiente de débito bancario',
-                            $idAbono,
-                            $idDetalle
+                            'Asiento contable creado automáticamente al ejecutar el pago (comprobante)'
                         );
+
+                        // Una fila por pago con SU línea del asiento: permite revertir un solo pago
+                        // (rechazo de un eCheq, anulación) sin tocar los demás del mismo asiento.
+                        foreach (($asiento->lineasDeInstrumento ?? []) as $idAbono => $idDetalle) {
+                            $historialPagoRepository->guardarHistorial(
+                                $pagoDb->id_pago,
+                                $asiento->id_asiento_contable,
+                                'EMISION',
+                                false,
+                                null,
+                                'Pasivo por instrumento diferido, pendiente de débito bancario',
+                                $idAbono,
+                                $idDetalle
+                            );
+                        }
+                        foreach (($asiento->lineasDirectas ?? []) as $idAbono => $idDetalle) {
+                            $historialPagoRepository->guardarHistorial(
+                                $pagoDb->id_pago,
+                                $asiento->id_asiento_contable,
+                                'EJECUCION',
+                                false,
+                                null,
+                                'Salida de fondos del pago',
+                                $idAbono,
+                                $idDetalle
+                            );
+                        }
                     }
 
                 } catch (\Exception $e) {
@@ -466,7 +464,6 @@ class TesPagosController extends Controller
                     ], 423);
                 }
             }
-
             // El estado de la ORDEN se deriva de lo efectivamente cobrado. Confirmar el pago
             // actualizaba la BOLETA pero nunca la orden, asi que quedaban diciendo cosas distintas:
             // la boleta en PAGO PARCIAL y la OPA todavia en EN PROCESO. Solo se recalculaba al
