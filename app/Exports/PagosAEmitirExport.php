@@ -3,10 +3,12 @@
 namespace App\Exports;
 
 use App\Http\Controllers\Tesoreria\Repository\TesInstrumentoPagoRepository;
+use Carbon\Carbon;
 use Maatwebsite\Excel\Concerns\FromCollection;
 use Maatwebsite\Excel\Concerns\ShouldAutoSize;
 use Maatwebsite\Excel\Concerns\WithHeadings;
 use Maatwebsite\Excel\Concerns\WithStyles;
+use PhpOffice\PhpSpreadsheet\Shared\Date;
 use PhpOffice\PhpSpreadsheet\Style\Fill;
 use PhpOffice\PhpSpreadsheet\Worksheet\Worksheet;
 
@@ -51,7 +53,9 @@ class PagosAEmitirExport implements FromCollection, WithHeadings, ShouldAutoSize
                 // no corresponde.
                 'cbu'            => $p->cbu,
                 'monto'          => $p->monto,
-                'fecha_pago'     => $p->fecha_pago,
+                // Fecha real de Excel (no texto) para que se pueda ordenar y filtrar; el formato
+                // DD-MM-AAAA se lo da styles(). (T-00001262)
+                'fecha_pago'     => $p->fecha_pago ? Date::PHPToExcel(Carbon::parse($p->fecha_pago)->startOfDay()) : null,
                 'observaciones'  => $p->observaciones,
             ]);
     }
@@ -87,6 +91,7 @@ class PagosAEmitirExport implements FromCollection, WithHeadings, ShouldAutoSize
         $sheet->getStyle('G:G')->getNumberFormat()->setFormatCode('@');
         $sheet->getStyle('C:C')->getNumberFormat()->setFormatCode('@');
         $sheet->getStyle('H:H')->getNumberFormat()->setFormatCode('#,##0.00');
+        $sheet->getStyle('I:I')->getNumberFormat()->setFormatCode('dd-mm-yyyy');
 
         return [];
     }
