@@ -527,6 +527,22 @@ class TesPagosController extends Controller
         }
     }
 
+    /**
+     * Anula UN pago ya ejecutado (con comprobante): contraasiento de su línea, devolución de lo
+     * debitado, y su fecha del cronograma queda libre para cargar el correcto. (2026-10-28)
+     */
+    public function getAnularPagoEjecutado(Request $request, TestOrdenPagoRepository $opa)
+    {
+        try {
+            (new \App\Http\Controllers\Tesoreria\Repository\TesAnulacionPagoRepository())
+                ->anularPagoEjecutado($request->id_pago_parcial, $request->motivo, $opa);
+
+            return response()->json(['message' => 'El pago se anuló: se revirtió su asiento y lo debitado volvió a la cuenta.']);
+        } catch (\Throwable $th) {
+            return response()->json(['message' => $th->getMessage()], 422);
+        }
+    }
+
     public function getVerAdjunto(ManejadorDeArchivosUtils $storageFile, Request $request)
     {
         $path = "tesoreria/comprobantes_pago/";

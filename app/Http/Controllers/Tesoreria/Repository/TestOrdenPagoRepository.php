@@ -199,9 +199,16 @@ class TestOrdenPagoRepository
                     TesInstrumentoPagoRepository::RECHAZADO,
                     TesInstrumentoPagoRepository::ANULADO,
                 ])
-                ->where(fn($q) => $q->whereNull('pn.numero_echeq')
-                    ->orWhere('pn.numero_echeq', '')
-                    ->orWhere('pn.numero_provisorio', 1))
+                // Cada forma guarda su número en su columna: el eCheq en `numero_echeq` (y puede ser
+                // provisorio), el cheque físico en `num_cheque`. Antes se miraba sólo la del eCheq
+                // y TODO cheque físico figuraba "sin N° del banco". (2026-10-29)
+                ->where(fn($q) => $q
+                    ->where(fn($e) => $e->where('pn.id_forma_pago', TesInstrumentoPagoRepository::FORMA_PAGO_ECHEQ)
+                        ->where(fn($n) => $n->whereNull('pn.numero_echeq')
+                            ->orWhere('pn.numero_echeq', '')
+                            ->orWhere('pn.numero_provisorio', 1)))
+                    ->orWhere(fn($c) => $c->where('pn.id_forma_pago', '!=', TesInstrumentoPagoRepository::FORMA_PAGO_ECHEQ)
+                        ->where(fn($n) => $n->whereNull('pn.num_cheque')->orWhere('pn.num_cheque', ''))))
                 ->selectRaw('count(*)')]);
 
         // Por el tipo de la ORDEN, que es lo que muestra la grilla. Antes se derivaba de las facturas
@@ -1087,6 +1094,11 @@ class TestOrdenPagoRepository
             } elseif ($abonos->isNotEmpty()) {
                 // Pagos cargados, ninguno con comprobante.
                 $estado = self::ESTADO_OPA_IMPAGO;
+            } elseif ($tuvoAbonos) {
+                // Tuvo pagos y se anularon o quitaron todos: vuelve a PENDIENTE, igual que una
+                // boleta recién creada (con su botón "Confirmar pago"). La ORDEN sigue EN PROCESO:
+                // ya tiene boleta y cronograma. (2026-10-29)
+                $estado = self::ESTADO_OPA_PENDIENTE;
             } else {
                 // Nada cobrado, pero la boleta y su cronograma existen: EN PROCESO, igual que la
                 // orden. Antes esta rama era un `continue`, así que el estado sólo podía SUBIR —
@@ -2093,27 +2105,11 @@ class TestOrdenPagoRepository
             return 'Esta orden de pago ya está anulada.';
         }
 
-        // Guarda 1: plata efectivamente pagada. Anular por debajo de un pago confirmado dejaría
-        // el movimiento bancario sin ninguna orden que lo respalde.
-        if ($this->tienePagosConfirmados($idOpa)) {
-            return 'No se puede anular: la orden tiene pagos confirmados.';
-        }
-
-        // Guarda 2: un eCheq ya emitido está circulando aunque todavía no se haya acreditado.
-        // Hay que rechazarlo o anularlo primero; anular la OP por debajo dejaría el papel suelto.
-        // Los eCheq son ABONOS de la boleta, no la boleta misma (ver 2026_09_04_100900).
-        $emitidos = \App\Models\Tesoreria\TesPagosParciales::whereIn(
-            'id_pago',
-            TesPagoEntity::where('id_orden_pago', $idOpa)->pluck('id_pago')
-        )->whereIn('id_estado_instrumento', [
-            TesInstrumentoPagoRepository::EMITIDO,
-            TesInstrumentoPagoRepository::ACREDITADO,
-        ])->count();
-
-        if ($emitidos > 0) {
-            return "No se puede anular: hay {$emitidos} eCheq ya emitido(s). "
-                . 'Primero hay que rechazarlos o anularlos.';
-        }
+        // Desde el 2026-10-28 una orden con pagos YA EJECUTADOS (PAGADO, PAGO PARCIAL, eCheq
+        // emitidos o acreditados) SÍ se anula: antes de darla de baja, `revertirPagosDeOpa()`
+        // contraasienta cada pago y devuelve lo debitado. Hasta acá las dos guardas que había
+        // ("tiene pagos confirmados" y "hay eCheq emitidos") lo impedían porque no había cómo
+        // revertir; el proceso documentado del cliente (punto 7) prevé anular cualquier orden.
 
         return null;
     }
@@ -2171,6 +2167,9 @@ class TestOrdenPagoRepository
             }
 
             $opa = TesOrdenPagoEntity::find($idOpa);
+
+            // Primero se revierte lo ejecutado: contraasiento y devolución de cada pago. (2026-10-28)
+            (new TesAnulacionPagoRepository())->revertirPagosDeOpa($idOpa, $motivo);
 
             $this->darDeBajaLoQueCuelgaDe($idOpa);
 
@@ -2358,6 +2357,9 @@ class TestOrdenPagoRepository
                         'message' => 'La orden de pago no tiene facturas: no hay nada que reemitir.',
                         'anulada' => null, 'nueva' => null];
             }
+
+            // 0) Lo ejecutado se revierte: contraasiento y devolución de cada pago. (2026-10-28)
+            (new TesAnulacionPagoRepository())->revertirPagosDeOpa($idOpa, $motivo);
 
             // 1) Los instrumentos que todavía no salieron, y las boletas, se dan de baja junto
             //    con la orden.

@@ -62,9 +62,16 @@ class TesPagoEntity extends Model
         return $this->hasOne(TesOrdenPagoEntity::class, 'id_orden_pago', 'id_orden_pago');
     }
 
+    /**
+     * Sólo los comprobantes VIGENTES (`estado = '1'`). Los dados de baja —quitados a mano o al
+     * anular el pago que respaldaban— quedan en la tabla como historia, pero no se muestran ni
+     * cuentan. Hasta el 2026-10-29 la relación los traía todos y un comprobante quitado seguía
+     * apareciendo en el modal y en "Ver comprobante".
+     */
     public function comprobantes()
     {
-        return $this->hasMany(TestDetalleComprobantesPagoEntity::class, 'id_pago', 'id_pago');
+        return $this->hasMany(TestDetalleComprobantesPagoEntity::class, 'id_pago', 'id_pago')
+            ->where('estado', '1');
     }
 
     public function pagosParciales()

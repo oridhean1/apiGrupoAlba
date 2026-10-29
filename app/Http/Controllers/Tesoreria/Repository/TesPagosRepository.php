@@ -411,6 +411,15 @@ class TesPagosRepository
             || !is_null($abono->fecha_confirma_pago);
     }
 
+    /** Cheque físico sin número: corta. El número está impreso en la chequera. (2026-10-29) */
+    private static function exigirNumeroDeCheque($idFormaPago, $numero): void
+    {
+        if ((int) $idFormaPago === TesInstrumentoPagoRepository::FORMA_PAGO_CHEQUE
+            && trim((string) $numero) === '') {
+            throw new \Exception('Falta el número del cheque: cargá el N° que figura en la chequera.');
+        }
+    }
+
     /**
      * Reemplaza el número de un eCheq (provisorio → real, o corrección) si la fila trae uno
      * distinto. No reasienta: el número no aparece en ninguna línea contable.
@@ -568,6 +577,12 @@ class TesPagosRepository
                 );
                 $esDiferido = !is_null($estadoInstrumento);
 
+                // El cheque físico trae su número impreso: se conoce al escribirlo, así que es
+                // obligatorio (el eCheq no: lo asigna el banco, por eso lleva provisorio). Sin esto
+                // se cargaban cheques sin número, imposibles de identificar al debitarse.
+                // (2026-10-29)
+                self::exigirNumeroDeCheque($pagos->id_forma_pago, $pagos->num_cheque ?? null);
+
                 if ($esDiferido) {
                     // La cuenta de origen tiene que ser de la razón social de la orden. Si el pago
                     // debita una cuenta de una razón y el asiento imputa la deuda en el plan de
@@ -690,6 +705,8 @@ class TesPagosRepository
 
                 $esEcheqNuevo = $formaNueva === TesInstrumentoPagoRepository::FORMA_PAGO_ECHEQ;
                 $numeroFila = trim((string) ($esEcheqNuevo ? ($pagos->numero_echeq ?? '') : ($pagos->num_cheque ?? '')));
+
+                self::exigirNumeroDeCheque($formaNueva, $numeroFila);
 
                 $instrumentos->exigirNumeroLibre(
                     $numeroFila !== '' ? $numeroFila : null,
@@ -907,6 +924,8 @@ class TesPagosRepository
                         . ' antes de adjuntar el comprobante.'
                 );
             }
+
+            self::exigirNumeroDeCheque($abono->id_forma_pago, $abono->num_cheque);
 
             $diferido = !is_null($abono->id_estado_instrumento);
 
