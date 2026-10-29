@@ -20,6 +20,9 @@ class TesPagosParciales extends Model
         // despues de que la boleta ya estaba confirmada heredaba el permiso de la boleta
         // y se podia acreditar sin pasar nunca por Confirmar Pago. Ver 2026_09_10_100000.
         'fecha_confirmado_en_pago',
+        // Fecha real en que salió el pago: se completa al subir su comprobante. NULL = cargado pero
+        // no ejecutado (IMPAGO). Ver 2026_10_28_100000.
+        'fecha_ejecucion',
         'id_forma_pago',
         'monto_pago',
         'id_usuario',

@@ -396,11 +396,63 @@ class TesPagosRepository
         return ($valor === '' || is_null($valor)) ? null : (int) $valor;
     }
 
+    /**
+     * Un pago CERRADO ya movió plata o contabilidad y no se edita ni se quita desde el modal.
+     *
+     * - `fecha_ejecucion`: se subió su comprobante (circuito desde 2026-10-28).
+     * - `fecha_confirmado_en_pago` / `fecha_confirma_pago`: se asentó al confirmar con el circuito
+     *   anterior, o el banco ya lo acreditó. Hasta que la fase 3 revierta los que no tienen
+     *   comprobante, tienen asiento y débito vivos.
+     */
+    public static function abonoCerrado($abono): bool
+    {
+        return !is_null($abono->fecha_ejecucion)
+            || !is_null($abono->fecha_confirmado_en_pago)
+            || !is_null($abono->fecha_confirma_pago);
+    }
+
+    /** Cheque físico sin número: corta. El número está impreso en la chequera. (2026-10-29) */
+    private static function exigirNumeroDeCheque($idFormaPago, $numero): void
+    {
+        if ((int) $idFormaPago === TesInstrumentoPagoRepository::FORMA_PAGO_CHEQUE
+            && trim((string) $numero) === '') {
+            throw new \Exception('Falta el número del cheque: cargá el N° que figura en la chequera.');
+        }
+    }
+
+    /**
+     * Reemplaza el número de un eCheq (provisorio → real, o corrección) si la fila trae uno
+     * distinto. No reasienta: el número no aparece en ninguna línea contable.
+     */
+    private function actualizarNumeroDeEcheq(TesPagosParciales $abono, $fila, TesInstrumentoPagoRepository $instrumentos): void
+    {
+        if ((int) $abono->id_forma_pago !== TesInstrumentoPagoRepository::FORMA_PAGO_ECHEQ) {
+            return;
+        }
+
+        $numeroNuevo = trim((string) ($fila->numero_echeq ?? ''));
+
+        if ($numeroNuevo === '' || $numeroNuevo === (string) $abono->numero_echeq) {
+            return;
+        }
+
+        $instrumentos->exigirNumeroLibre(
+            $numeroNuevo,
+            $abono->id_forma_pago,
+            $abono->id_cuenta_bancaria,
+            $abono->id_pago_parcial
+        );
+
+        $abono->numero_echeq = $numeroNuevo;
+        // `num_cheque` en sincronía: es la que leen las pantallas viejas y el comprobante.
+        $abono->num_cheque = $numeroNuevo;
+        $abono->numero_provisorio = false;
+    }
+
     public function findByConfirmarPago($params)
     {
 
         $pagosparciales = 0;
-        $estado = null;
         $pago = TesPagoEntity::find($params->id_pago);
 
         // Las guardas del instrumento (tope de sobrepago, razón social de la cuenta) viven en su
@@ -433,6 +485,34 @@ class TesPagosRepository
             ->keyBy('id_fecha_probable');
 
         $plan = $fechasBoleta->pluck('id_fecha_probable', 'fecha_probable_pago');
+
+        // ═══ "Quitar" un pago cargado (2026-10-28) ═══
+        //
+        // Cargar un pago es planificarlo: no mueve plata ni contabilidad hasta que se sube su
+        // comprobante. Por eso un pago que el modal ya no manda se BORRA, siempre que no esté
+        // cerrado. Uno cerrado (ejecutado, o asentado con el circuito anterior) tiene asiento y
+        // débito: borrarlo los dejaría colgados, así que se corta y se corrige anulándolo.
+        $idsEnLista = collect($params->lista_pagos)
+            ->pluck('id_pago_parcial')
+            ->filter(fn($id) => !empty($id))
+            ->map(fn($id) => (int) $id)
+            ->all();
+
+        $quitados = TesPagosParciales::where('id_pago', $pago->id_pago)
+            ->vivos()
+            ->whereNotIn('id_pago_parcial', $idsEnLista ?: [0])
+            ->get();
+
+        foreach ($quitados as $quitado) {
+            if (self::abonoCerrado($quitado)) {
+                throw new \Exception(sprintf(
+                    'El pago de $%s ya tiene su comprobante (o su asiento) y no se puede quitar. '
+                        . 'Para corregirlo hay que anularlo.',
+                    number_format((float) $quitado->monto_pago, 2, ',', '.')
+                ));
+            }
+            $quitado->delete();
+        }
 
         $ocupadas = TesPagosParciales::where('id_pago', $pago->id_pago)
             ->whereNotNull('id_fecha_probable')
@@ -497,6 +577,12 @@ class TesPagosRepository
                 );
                 $esDiferido = !is_null($estadoInstrumento);
 
+                // El cheque físico trae su número impreso: se conoce al escribirlo, así que es
+                // obligatorio (el eCheq no: lo asigna el banco, por eso lleva provisorio). Sin esto
+                // se cargaban cheques sin número, imposibles de identificar al debitarse.
+                // (2026-10-29)
+                self::exigirNumeroDeCheque($pagos->id_forma_pago, $pagos->num_cheque ?? null);
+
                 if ($esDiferido) {
                     // La cuenta de origen tiene que ser de la razón social de la orden. Si el pago
                     // debita una cuenta de una razón y el asiento imputa la deuda en el plan de
@@ -535,7 +621,10 @@ class TesPagosRepository
                     // arriba solo para saber a qué cuota corresponde (queda en `id_fecha_probable`).
                     // Antes una transferencia confirmada hoy quedaba "pagada" el día de la cuota,
                     // con el asiento y el banco de hoy. (2026-10-06)
-                    'fecha_confirma_pago' => $esDiferido ? null : $this->fechaActual->toDateString(),
+                    //
+                    // ⚠️ Desde el 2026-10-28 NINGÚN pago nace confirmado: la fecha la pone la
+                    // ejecución (subir el comprobante), con la fecha real del pago.
+                    'fecha_confirma_pago' => null,
                     'id_forma_pago' => $pagos->id_forma_pago,
                     'monto_pago' => $pagos->monto_pago,
                     'monto_opa' => $pagos->monto_opa,
@@ -558,8 +647,8 @@ class TesPagosRepository
                     'fecha_emision_echeq' => $esDiferido && !is_null($idFecha)
                         ? ($fechasBoleta[$idFecha]->fecha_probable_pago ?? null)
                         : null,
-                    // Este abono nace dentro de un pago confirmado.
-                    'fecha_confirmado_en_pago' => $this->fechaActual,
+                    // `fecha_confirmado_en_pago` ya no se completa (2026-10-28): marcaba "asentado
+                    // al confirmar" en el circuito anterior. Lo nuevo se cierra con `fecha_ejecucion`.
                 ]);
 
                 // Se hace DESPUES del insert porque el numero provisorio se arma con el id del
@@ -575,153 +664,95 @@ class TesPagosRepository
                     $ocupadas[$idFecha] = $nuevo->id_pago_parcial;
                 }
             }else{
-                $query=TesPagosParciales::find($pagos->id_pago_parcial);
+                $query = TesPagosParciales::find($pagos->id_pago_parcial);
 
-                // Un abono del circuito de eCheq NO se modifica desde acá.
+                // ═══ Editar un pago cargado (2026-10-28) ═══
                 //
-                // Se reconoce por tener `id_estado_instrumento`. Esos se gestionan en *Carga de
-                // eCheq*, que aplica las guardas del instrumento: solo se tocan antes de emitir,
-                // la cuenta tiene que ser de la razón social de la orden y el monto no puede
-                // pasarse del tope. Este camino no aplica ninguna, así que dejaba cambiarle la
-                // forma de pago, el monto o la cuenta a un eCheq que YA tenía número del banco.
+                // Mientras no se ejecuta (sin comprobante), un pago es planificación: se le puede
+                // cambiar todo —forma, cuenta, monto, número— porque no hay débito ni asiento que
+                // corregir. Lo pidió Pagos: al cargar la orden muchas veces no se sabe todavía con
+                // qué se va a pagar.
                 //
-                // Se saltean solo los campos que son del instrumento, y NO se corta con una
-                // excepción: el front manda la lista completa —los eCheq incluidos— así que
-                // rechazar la fila haría fallar la confirmación entera de una orden que tiene un
-                // eCheq emitido. La fecha y los montos de referencia se siguen actualizando, que
-                // es el comportamiento de siempre. (2026-09-09)
-                $esInstrumento = !is_null($query->id_estado_instrumento);
-
-                $query->fecha_registra=$this->fechaActual;
-
-                // ⚠️ A un INSTRUMENTO no se le toca la fecha de confirmación desde acá.
-                //
-                // `montoPagadoOpa()` cuenta como cobrado todo abono con `fecha_confirma_pago`, sin
-                // mirar el estado del instrumento. Setearla al confirmar el pago hacía que un eCheq
-                // apenas emitido —con la plata todavía en la cuenta— contara como cobrado y la orden
-                // pasara a PAGADO. Quedaron 5 abonos así en Alba (0 en OSV).
-                //
-                // La fecha del instrumento la pone `marcarAcreditado()`, que es el momento en que el
-                // banco efectivamente debita. Es además lo que `emitirPagoDeFecha` ya documentaba
-                // ("no nace confirmado: se confirma cuando el banco acredita") y este camino
-                // contradecía en silencio. (2026-09-12)
-                if (!$esInstrumento) {
-                    $query->fecha_confirma_pago=$pagos->fecha_confirma_pago;
-                }
-
-                $query->monto_opa=$pagos->monto_opa;
-                $query->id_usuario=$this->user->cod_usuario;
-                // Solo si viene: es un abono que YA pertenece a esta boleta, y tomar el id del
-                // request para reescribirlo no aporta nada. Si el payload no lo trae, la columna
-                // es NOT NULL y la confirmacion se cae con un 1048 en vez de guardar. (2026-09-16)
-                if (!empty($pagos->id_pago)) {
-                    $query->id_pago = $pagos->id_pago;
-                }
-
-                // Queda registrado que este abono entro en un pago confirmado. Es lo que habilita
-                // acreditarlo despues: un eCheq emitido sobre una boleta YA confirmada no hereda
-                // ese permiso, tiene que pasar por acá. (2026-09-10, OPA-1120)
-                $query->fecha_confirmado_en_pago = $this->fechaActual;
-
-                // ═══ El número del eCheq SÍ se edita desde acá ═══
-                //
-                // Es la única excepción a "un instrumento no se toca desde el pago", y existe
-                // porque reemplaza a la pantalla *Carga de eCheq › Sin número*, que se eliminó el
-                // 2026-09-15. Cuando el banco asigna el número definitivo, se reemplaza el
-                // provisorio acá mismo, sobre el pago ya cargado.
-                //
-                // No reasienta nada: el número no aparece en ninguna línea contable. Lo que sí hace
-                // es limpiar la marca de provisorio, que es lo que después permite saber cuáles
-                // siguen pendientes del banco.
-                if ($esInstrumento) {
-                    // El cheque trae su número en `num_cheque` y el eCheq en `numero_echeq`: las
-                    // dos formas son "instrumento", así que hay que mirar cuál es.
-                    $esEcheq = (int) $query->id_forma_pago === TesInstrumentoPagoRepository::FORMA_PAGO_ECHEQ;
-                    // `?? null` dentro de cada rama: si el payload no trae el campo, PHP tira un
-                    // warning que Laravel convierte en excepción (500). Sin número = no se cambia.
-                    $numeroNuevo = trim((string) ($esEcheq ? ($pagos->numero_echeq ?? '') : ($pagos->num_cheque ?? '')));
-                    $numeroActual = (string) ($esEcheq ? $query->numero_echeq : $query->num_cheque);
-
-                    if ($numeroNuevo !== '' && $numeroNuevo !== $numeroActual) {
-                        $instrumentos->exigirNumeroLibre(
-                            $numeroNuevo,
-                            $query->id_forma_pago,
-                            $query->id_cuenta_bancaria,
-                            $query->id_pago_parcial
-                        );
-
-                        if ($esEcheq) {
-                            $query->numero_echeq = $numeroNuevo;
-                            // `num_cheque` se mantiene en sincronía: es la columna que leen las
-                            // pantallas viejas y el comprobante de pago.
-                            $query->num_cheque = $numeroNuevo;
-                            $query->numero_provisorio = false;
-                        } else {
-                            $query->num_cheque = $numeroNuevo;
-                        }
+                // Un pago CERRADO (ejecutado, o asentado con el circuito anterior) no se toca: el
+                // front manda la lista completa, así que se lo saltea sin cortar. La única excepción
+                // es el número del eCheq de uno asentado pero sin comprobante (circuito anterior),
+                // que hace falta para poder subirle el comprobante y no aparece en ningún asiento.
+                if (self::abonoCerrado($query)) {
+                    if (is_null($query->fecha_ejecucion)) {
+                        $this->actualizarNumeroDeEcheq($query, $pagos, $instrumentos);
+                        $query->update();
                     }
+
+                    $pagosparciales += (float) $query->monto_pago;
+                    continue;
                 }
 
-                if (!$esInstrumento) {
-                    $cuentaFila = $this->cuentaDeLaFila($pagos) ?? $query->id_cuenta_bancaria;
+                $formaNueva = (int) ($pagos->id_forma_pago ?? $query->id_forma_pago);
+                $cuentaFila = $this->cuentaDeLaFila($pagos) ?? $query->id_cuenta_bancaria;
+                $montoNuevo = (float) ($pagos->monto_pago ?? $query->monto_pago);
 
-                    // Mismo control que en el alta, para los abonos sin ciclo de instrumento
-                    // (los anteriores al circuito, que igual pueden ser cheques).
-                    // Un eCheq sin ciclo de instrumento (cargado antes del circuito) también trae su
-                    // número en `numero_echeq`: si acá solo se guardaba `num_cheque`, el número
-                    // nunca llegaba y el comprobante se rechazaba por "eCheq sin número".
-                    // (2026-10-27, abono 524)
-                    $esEcheqFila = (int) $pagos->id_forma_pago === TesInstrumentoPagoRepository::FORMA_PAGO_ECHEQ;
+                // Mismas guardas que al cargarlo: razón social de la cuenta, tope de la orden (sin
+                // contarse a sí mismo) y número único.
+                if (TesInstrumentoPagoRepository::esFormaDiferida($formaNueva)) {
+                    $instrumentos->validarCuentaDeRazonSocial($cuentaFila, $pago->id_orden_pago, $opaRepo);
+                }
+                $limites = $instrumentos->validarTopeDeOpa(
+                    $pago->id_orden_pago,
+                    $montoNuevo,
+                    $query->id_pago_parcial,
+                    $opaRepo
+                );
 
-                    // No se pasa un abono de/a cheque o eCheq editando la fila. Este camino solo
-                    // cambia la columna: el abono quedaba eCheq sin ciclo de instrumento, sin número
-                    // provisorio, y con el asiento y el débito de la forma anterior. Así nació el
-                    // abono 524 (transferencia → eCheq). Se da de baja y se carga de nuevo.
-                    // (2026-10-27)
-                    if ((int) $pagos->id_forma_pago !== (int) $query->id_forma_pago
-                        && (TesInstrumentoPagoRepository::esFormaDiferida($pagos->id_forma_pago)
-                            || TesInstrumentoPagoRepository::esFormaDiferida($query->id_forma_pago))) {
-                        throw new \Exception(
-                            'No se puede cambiar la forma de pago de un abono ya cargado a o desde cheque/eCheq. '
-                                . 'Quitá el pago y cargalo de nuevo con la forma correcta.'
-                        );
-                    }
-                    $numeroEcheqFila = trim((string) ($pagos->numero_echeq ?? ''));
+                $esEcheqNuevo = $formaNueva === TesInstrumentoPagoRepository::FORMA_PAGO_ECHEQ;
+                $numeroFila = trim((string) ($esEcheqNuevo ? ($pagos->numero_echeq ?? '') : ($pagos->num_cheque ?? '')));
 
-                    $instrumentos->exigirNumeroLibre(
-                        $esEcheqFila ? ($numeroEcheqFila !== '' ? $numeroEcheqFila : null) : ($pagos->num_cheque ?? null),
-                        $pagos->id_forma_pago,
-                        $cuentaFila,
-                        $query->id_pago_parcial
-                    );
+                self::exigirNumeroDeCheque($formaNueva, $numeroFila);
 
-                    $query->id_forma_pago=$pagos->id_forma_pago;
-                    $query->monto_pago=$pagos->monto_pago;
-                    $query->num_cheque=$pagos->num_cheque;
+                $instrumentos->exigirNumeroLibre(
+                    $numeroFila !== '' ? $numeroFila : null,
+                    $formaNueva,
+                    $cuentaFila,
+                    $query->id_pago_parcial
+                );
 
-                    if ($esEcheqFila && $numeroEcheqFila !== '') {
-                        $query->numero_echeq = $numeroEcheqFila;
-                        $query->num_cheque = $numeroEcheqFila;
+                // Cambio de forma: el ciclo del instrumento sigue a la forma nueva. Antes este
+                // camino cambiaba solo la columna y dejaba un eCheq sin ciclo ni número (así nació
+                // el abono 524).
+                if ($formaNueva !== (int) $query->id_forma_pago) {
+                    $query->id_forma_pago = $formaNueva;
+                    $query->id_estado_instrumento = TesInstrumentoPagoRepository::estadoInicialDeInstrumento($formaNueva);
+
+                    if (!$esEcheqNuevo) {
+                        $query->numero_echeq = null;
                         $query->numero_provisorio = false;
                     }
-
-                    // La cuenta editada en la fila también se guarda. Si la fila no la trae, se
-                    // deja la que el abono ya tenía: no se pisa con null.
-                    $cuentaEditada = $this->cuentaDeLaFila($pagos);
-                    if (!is_null($cuentaEditada)) {
-                        $query->id_cuenta_bancaria = $cuentaEditada;
-                        $query->id_banco_emisor    = $this->bancoDeCuenta($cuentaEditada);
-                    }
                 }
-                $query->monto_restante=$pagos->monto_restante;
+
+                if ($esEcheqNuevo) {
+                    if ($numeroFila !== '' && $numeroFila !== (string) $query->numero_echeq) {
+                        $query->numero_echeq = $numeroFila;
+                        $query->num_cheque = $numeroFila;
+                        $query->numero_provisorio = false;
+                    }
+                } else {
+                    $query->num_cheque = $numeroFila !== '' ? $numeroFila : null;
+                }
+
+                $query->id_cuenta_bancaria = $cuentaFila;
+                $query->id_banco_emisor    = $this->bancoDeCuenta($cuentaFila);
+                $query->monto_pago         = $montoNuevo;
+                $query->monto_opa          = $pagos->monto_opa ?? $query->monto_opa;
+                $query->monto_restante     = $limites['restante'];
+                $query->fecha_registra     = $this->fechaActual;
+                $query->id_usuario         = $this->user->cod_usuario;
                 $query->update();
 
-                // Para el estado de la boleta cuenta lo que quedó GUARDADO, no lo que mandó el
-                // front: el monto de un abono del circuito de eCheq no se modifica acá, así que
-                // sumar el del request haría derivar el estado de un número que nunca se escribió.
-                $pagosparciales += $esInstrumento
-                    ? (float) $query->monto_pago
-                    : (float) $pagos->monto_pago;
+                // Pasó a eCheq sin número: lleva el provisorio, igual que al cargarlo.
+                if ($esEcheqNuevo) {
+                    TesInstrumentoPagoRepository::asignarNumeroProvisorio($query);
+                }
+
+                $pagosparciales += $montoNuevo;
             }
         }
         // Se compara contra lo PAGABLE (imputado menos débito de liquidación), no contra
@@ -774,15 +805,6 @@ class TesPagosRepository
             ));
         }
 
-        if ($aCentavos($pagosparciales) >= $aCentavos($pagable)) {
-            $estado = TestOrdenPagoRepository::ESTADO_OPA_PAGADO;
-        } elseif ($pagosparciales > 0) {
-            $estado = TestOrdenPagoRepository::ESTADO_OPA_PAGO_PARCIAL;
-        } else {
-            // Sin ningún abono (por ejemplo, un anticipo que todavía no se pagó): no se toca el
-            // estado previo de la boleta.
-            $estado = $pago->id_estado_orden_pago;
-        }
 
         // El string vacío no es un id: la columna es int y MySQL lo rechaza con
         // "1366 Incorrect integer value". Llega vacío cuando la orden ya tiene sus pagos emitidos
@@ -809,7 +831,8 @@ class TesPagosRepository
         $pago->fecha_confirma_pago = $this->fechaActual;
         $pago->id_forma_pago = 0;
         $pago->monto_pago = $params->anticipo == '1' ? $params->monto_anticipado : $params->monto_pago;
-        $pago->id_estado_orden_pago = $estado;
+        // El estado de la boleta ya no se fija acá: lo deriva `recalcularEstadoOpa()` de lo
+        // EJECUTADO (con comprobante), que corre después en el mismo request. (2026-10-28)
         $pago->anticipo = $params->anticipo;
         $pago->monto_anticipado = $params->monto_anticipado;
         $pago->num_cheque = $params->num_cheque;
@@ -825,20 +848,145 @@ class TesPagosRepository
 
         $pago->update();
 
-        // ═══ Confirmar el pago EMITE los instrumentos de la orden ═══
-        //
-        // Hasta el 2026-09-15 esto lo hacía `confirmarEmisionDeOpa()`, desde la pestaña *Carga de
-        // eCheq › Sin número*, que exigía tener el número del banco para dejar emitir. Esa pantalla
-        // se eliminó: el número puede ser provisorio y ya no frena nada.
-        //
-        // Confirmar el pago es el momento real en que Tesorería dice "esto sale", y es una sola
-        // acción por orden — así que conserva el "todos los eCheq juntos" que pedía el circuito.
-        //
-        // Importa el orden: va DESPUÉS de guardar la boleta, porque emitir es la consecuencia de
-        // que el pago quedó confirmado, no un paso previo.
-        $instrumentos->emitirInstrumentosDeBoleta($pago->id_pago);
+        // Confirmar ya no emite los eCheq (hasta el 2026-10-28 llamaba a
+        // `emitirInstrumentosDeBoleta`): un eCheq se emite al EJECUTARSE, cuando se sube su
+        // comprobante con el número real. Ver `ejecutarPagosConComprobante()`.
 
         return $pago;
+    }
+
+    /**
+     * EJECUTA los pagos de una boleta cuya fecha ya tiene comprobante (2026-10-28).
+     *
+     * Es el momento en que un pago sale de verdad: hasta acá era planificación. Por cada pago
+     * cargado, no cerrado, cuya fecha del cronograma tiene un comprobante vivo (o la boleta tiene
+     * un comprobante sin fecha, el formato anterior al 2026-10-23):
+     *
+     * - `fecha_ejecucion` = fecha real del pago (la que se indicó junto al comprobante; si no
+     *   vino, hoy).
+     * - Pago directo (transferencia, efectivo…): además `fecha_confirma_pago` = esa fecha.
+     * - eCheq: tiene que tener el número real del banco, y pasa a EMITIDO. Su `fecha_confirma_pago`
+     *   la sigue poniendo la acreditación, que es cuando el banco lo debita.
+     *
+     * Devuelve los pagos ejecutados para que el llamador debite y asiente. No mueve plata ni
+     * contabilidad por sí mismo.
+     *
+     * @param array $fechaRealPorFecha [id_fecha_probable|'sin' => 'Y-m-d']
+     * @return array<int, array{abono: TesPagosParciales, fecha: string, diferido: bool}>
+     */
+    public function ejecutarPagosConComprobante($idPago, array $fechaRealPorFecha): array
+    {
+        $hoy = $this->fechaActual->toDateString();
+
+        $comprobantes = DB::table('tb_test_pago_detalle_comprobantes')
+            ->where('id_pago', $idPago)
+            ->where('estado', '1')
+            ->pluck('id_fecha_probable');
+
+        if ($comprobantes->isEmpty()) {
+            return [];
+        }
+
+        $hayComprobanteDeBoleta = $comprobantes->contains(fn($f) => is_null($f));
+        $fechasConComprobante = $comprobantes->filter()->map(fn($f) => (int) $f)->all();
+
+        $ejecutados = [];
+
+        $abonos = TesPagosParciales::where('id_pago', $idPago)->vivos()->get();
+
+        foreach ($abonos as $abono) {
+            if (self::abonoCerrado($abono)) {
+                continue;
+            }
+
+            $idFecha = is_null($abono->id_fecha_probable) ? null : (int) $abono->id_fecha_probable;
+            $tieneComprobante = $hayComprobanteDeBoleta
+                || (!is_null($idFecha) && in_array($idFecha, $fechasConComprobante, true));
+
+            if (!$tieneComprobante) {
+                continue;
+            }
+
+            $fecha = $fechaRealPorFecha[$idFecha ?? 'sin'] ?? $fechaRealPorFecha['sin'] ?? $hoy;
+
+            if ($fecha > $hoy) {
+                throw new \Exception(
+                    'La fecha del pago (' . date('d/m/Y', strtotime($fecha)) . ') es posterior a hoy. '
+                        . 'Indicá la fecha en que el pago salió del banco.'
+                );
+            }
+
+            $esEcheq = (int) $abono->id_forma_pago === TesInstrumentoPagoRepository::FORMA_PAGO_ECHEQ;
+
+            if ($esEcheq && (trim((string) $abono->numero_echeq) === '' || $abono->numero_provisorio)) {
+                throw new \Exception(
+                    'Cargá el número real del eCheq de $' . number_format((float) $abono->monto_pago, 2, ',', '.')
+                        . ' antes de adjuntar el comprobante.'
+                );
+            }
+
+            self::exigirNumeroDeCheque($abono->id_forma_pago, $abono->num_cheque);
+
+            $diferido = !is_null($abono->id_estado_instrumento);
+
+            $abono->fecha_ejecucion = $fecha;
+
+            if ($diferido) {
+                if (in_array((int) $abono->id_estado_instrumento, [
+                    TesInstrumentoPagoRepository::BORRADOR,
+                    TesInstrumentoPagoRepository::PENDIENTE_EMISION,
+                ], true)) {
+                    $abono->id_estado_instrumento = TesInstrumentoPagoRepository::EMITIDO;
+                }
+            } else {
+                $abono->fecha_confirma_pago = $fecha;
+            }
+
+            $abono->save();
+
+            $ejecutados[] = ['abono' => $abono, 'fecha' => $fecha, 'diferido' => $diferido];
+        }
+
+        return $ejecutados;
+    }
+
+    /**
+     * ¿Se puede quitar este comprobante? No si es el que dejó ejecutados pagos de su fecha: el
+     * comprobante es la prueba de que salieron, y quitarlo dejaría débito y asiento sin respaldo.
+     * Si la fecha tiene otro comprobante vivo, sí. (2026-10-28)
+     */
+    public function motivoQueImpideQuitarComprobante($idComprobante): ?string
+    {
+        $comprobante = TestDetalleComprobantesPagoEntity::find($idComprobante);
+
+        if (is_null($comprobante)) {
+            return null;
+        }
+
+        $idFecha = $comprobante->id_fecha_probable;
+
+        $otroVivo = TestDetalleComprobantesPagoEntity::where('id_pago', $comprobante->id_pago)
+            ->where('estado', '1')
+            ->where('id_comprobante', '!=', $comprobante->id_comprobante)
+            ->where(fn($q) => is_null($idFecha)
+                ? $q->whereNull('id_fecha_probable')
+                : $q->where('id_fecha_probable', $idFecha)->orWhereNull('id_fecha_probable'))
+            ->exists();
+
+        if ($otroVivo) {
+            return null;
+        }
+
+        $ejecutados = TesPagosParciales::where('id_pago', $comprobante->id_pago)
+            ->vivos()
+            ->whereNotNull('fecha_ejecucion')
+            ->when(!is_null($idFecha), fn($q) => $q->where('id_fecha_probable', $idFecha))
+            ->exists();
+
+        return $ejecutados
+            ? 'Ese comprobante respalda pagos ya ejecutados (con su débito y su asiento), así que no '
+                . 'se puede quitar. Para corregir el pago hay que anularlo.'
+            : null;
     }
 
     public function findByAnularPago($id_pago, $observacion)

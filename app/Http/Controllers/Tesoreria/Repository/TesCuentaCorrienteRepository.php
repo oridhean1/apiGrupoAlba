@@ -496,9 +496,9 @@ class TesCuentaCorrienteRepository
                 foreach ($abonos as $a) {
 
                     $esInstrumento = !is_null($a->id_estado_instrumento);
-                    // Económico: el pago está imputado en cuanto entró en un pago confirmado (o,
-                    // para los abonos viejos, en cuanto tiene fecha de cobro).
-                    $imputado = !is_null($a->fecha_confirmado_en_pago) || !is_null($a->fecha_confirma_pago);
+                    // Económico: el pago está imputado en cuanto se EJECUTÓ (se subió su
+                    // comprobante). Un pago cargado sin comprobante es planificación. (2026-10-28)
+                    $imputado = !is_null($a->fecha_ejecucion);
                     // Financiero: la plata salió del banco. Para un instrumento eso es acreditarlo.
                     $salio = !is_null($a->fecha_confirma_pago);
 
@@ -518,7 +518,7 @@ class TesCuentaCorrienteRepository
                     $filas[] = [
                         'fecha'            => substr((string) ($criterio === self::CRITERIO_EMISION_OPA
                             ? ($op->fecha_emision ?? $op->fecha_genera)
-                            : ($a->fecha_confirmado_en_pago ?? $a->fecha_confirma_pago ?? $a->fecha_registra)), 0, 10),
+                            : ($a->fecha_ejecucion ?? $a->fecha_confirma_pago ?? $a->fecha_registra)), 0, 10),
                         'orden'            => 1,
                         'tipo'             => $esInstrumento ? 'INSTRUMENTO' : 'PAGO',
                         'id_orden_pago'    => $op->id_orden_pago,

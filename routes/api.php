@@ -1223,6 +1223,7 @@ Route::group(
         Route::post('generar-pago', [App\Http\Controllers\Tesoreria\Services\TesPagosController::class, 'getCrearPago']);
         Route::post('confirmar-pago', [App\Http\Controllers\Tesoreria\Services\TesPagosController::class, 'getConfirmarPago']);
         Route::post('anular-pago', [App\Http\Controllers\Tesoreria\Services\TesPagosController::class, 'getAnularPago']);
+        Route::post('anular-pago-ejecutado', [App\Http\Controllers\Tesoreria\Services\TesPagosController::class, 'getAnularPagoEjecutado']);  // Anula un pago con comprobante: contraasiento + devolución (2026-10-28)
         Route::post('operacion-manual', [App\Http\Controllers\Tesoreria\Services\TesOperacionesManualesController::class, 'getNuevaOperacion']);
         Route::post('operacion-manual-enlazar-factura', [App\Http\Controllers\Tesoreria\Services\TesOperacionesManualesController::class, 'getEnalazarFacturaObraSocial']);
         Route::post('procesar-conciliacion-bancaria', [App\Http\Controllers\Tesoreria\Services\TesConciliacionBancariaController::class, 'getProcesar']);

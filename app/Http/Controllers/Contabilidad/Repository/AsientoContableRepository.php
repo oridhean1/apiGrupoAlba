@@ -569,6 +569,13 @@ class AsientoContableRepository
             $idRazon
         );
 
+        // Fecha real del pago, si vino: el comprobante puede subirse días después de que el pago
+        // salió, y el período ya lo resolvió el llamador para esa fecha. (2026-10-28)
+        if (!empty($datosPago['fecha_asiento'])) {
+            $asiento->fecha_asiento = Carbon::parse($datosPago['fecha_asiento'])->toDateString();
+            $asiento->save();
+        }
+
         // DEBE — reduce el pasivo (proveedor/prestador a pagar)
         $this->findByCrearDetalleAsiento([
             'id_asiento_contable'               => $asiento->id_asiento_contable,
@@ -604,6 +611,7 @@ class AsientoContableRepository
         // `tb_cont_banco_cuenta_contable` tiene la columna `tipo`. (2026-09-12)
         $desglose = $this->normalizarDesglose($datosPago, $montoTotal);
         $lineasDeInstrumento = [];
+        $lineasDirectas = [];
 
         foreach ($desglose as $fila) {
             $idCuenta = $fila['id_cuenta_bancaria'];
@@ -657,9 +665,15 @@ class AsientoContableRepository
             if ($esDiferido && !empty($fila['id_pago_parcial'])) {
                 $lineasDeInstrumento[$fila['id_pago_parcial']] = $detalle->id_asiento_contable_detalle ?? null;
             }
+
+            // Y la de cada pago directo, para poder revertir un solo pago al anular. (2026-10-28)
+            if (!$esDiferido && !empty($fila['id_pago_parcial'])) {
+                $lineasDirectas[$fila['id_pago_parcial']] = $detalle->id_asiento_contable_detalle ?? null;
+            }
         }
 
         $asiento->lineasDeInstrumento = $lineasDeInstrumento;
+        $asiento->lineasDirectas = $lineasDirectas;
 
         return $asiento;
     }

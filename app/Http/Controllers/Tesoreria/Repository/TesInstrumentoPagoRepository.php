@@ -504,12 +504,14 @@ class TesInstrumentoPagoRepository
             // $500 que no cubría nada, y el sistema lo iba a dejar acreditar. Es el mismo error
             // que ya nos pasó con la razón social: validar la boleta en vez de cada abono.
             // (2026-09-10, ver 2026_09_10_100000)
-            if (is_null($abono->fecha_confirmado_en_pago)) {
+            //
+            // Desde el 2026-10-28 el asiento de emisión se genera al EJECUTAR el pago (subir su
+            // comprobante), así que la guarda mira `fecha_ejecucion`.
+            if (is_null($abono->fecha_ejecucion)) {
                 throw new \Exception(
-                    'Este eCheq todavía no se cargó en un pago, así que no se puede acreditar. '
-                        . 'Andá a Pagos, agregalo al pago de esta orden y confirmalo: ahí se '
-                        . 'valida que los montos cubran la orden, se genera el asiento contable y '
-                        . 'se descuenta el saldo de la cuenta. Después volvé a acreditarlo.'
+                    'Este eCheq todavía no tiene su comprobante en el pago, así que no se puede '
+                        . 'acreditar. Andá a Pagos, subí el comprobante del eCheq en el pago de esta '
+                        . 'orden (ahí se genera el asiento) y después acreditalo.'
                 );
             }
 
@@ -1685,7 +1687,8 @@ class TesInstrumentoPagoRepository
                 //
                 // Se mira el abono y NO la boleta: un eCheq emitido después de que la boleta ya
                 // estaba confirmada no hereda ese permiso. (2026-09-10, OPA-1120)
-                DB::raw('CASE WHEN tb_tes_pago_parcial.fecha_confirmado_en_pago IS NULL THEN 0 ELSE 1 END AS pago_confirmado'),
+                // Desde el 2026-10-28 "confirmado" = EJECUTADO (comprobante subido).
+                DB::raw('CASE WHEN tb_tes_pago_parcial.fecha_ejecucion IS NULL THEN 0 ELSE 1 END AS pago_confirmado'),
             ])
             ->join('tb_tes_pago', 'tb_tes_pago.id_pago', '=', 'tb_tes_pago_parcial.id_pago')
             ->join('tb_tes_orden_pago', 'tb_tes_orden_pago.id_orden_pago', '=', 'tb_tes_pago.id_orden_pago')
