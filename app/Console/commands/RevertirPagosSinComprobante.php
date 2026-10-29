@@ -42,7 +42,20 @@ class RevertirPagosSinComprobante extends Command
                             {--usuario= : cod_usuario que queda registrado en contraasientos y movimientos}
                             {--corte=2026-09-12 : lo confirmado antes de esta fecha se da por ejecutado, no se revierte}
                             {--database= : base a usar (por defecto la del .env)}
-                            {--ejecutar : aplica los cambios; sin esto es una simulación}';
+                            {--ejecutar : aplica los cambios; sin esto es una simulación}
+                            {--sql= : en simulación, escribe en este archivo el SQL que aplicaría (para correrlo en prod)}';
+
+    /**
+     * Tablas donde el comando inserta filas nuevas. El SQL generado lleva sus ids literales, así que
+     * sólo es válido si en prod el último id sigue siendo el de la copia: el script lo verifica
+     * antes de escribir nada.
+     */
+    private const TABLAS_CON_ALTA = [
+        'tb_cont_asientos_contables'          => 'id_asiento_contable',
+        'tb_cont_asientos_contables_detalle'  => 'id_asiento_contable_detalle',
+        'tb_cont_asientos_pago_historial'     => 'id_pago_asiento',
+        'tb_tes_movimiento_cuenta_bancaria'   => 'id_movimiento',
+    ];
 
     protected $description = 'Revierte débito y asiento de los pagos confirmados sin comprobante (pasan a IMPAGO).';
 
@@ -74,6 +87,49 @@ class RevertirPagosSinComprobante extends Command
         $mixtas = [];
         $viejas = [];
         $totales = ['revertidas' => 0, 'acreditados' => 0, 'contraasientos' => 0, 'devuelto' => 0.0];
+
+        // ── Captura del SQL para producción (en prod no se corren comandos: sólo SQL) ──
+        $archivoSql = $this->option('sql');
+        $sentencias = [];
+        $maximos = [];
+        if ($archivoSql) {
+            foreach (self::TABLAS_CON_ALTA as $tabla => $pk) {
+                $maximos[$tabla] = (int) DB::table($tabla)->max($pk);
+            }
+            $pdo = DB::getPdo();
+            DB::listen(function ($q) use (&$sentencias, $pdo) {
+                if (!preg_match('/^\s*(insert|update|delete)\b/i', $q->sql)) {
+                    return;
+                }
+                $sql = $q->sql;
+                foreach ($q->bindings as $b) {
+                    if (is_null($b)) {
+                        $v = 'NULL';
+                    } elseif (is_bool($b)) {
+                        $v = $b ? '1' : '0';
+                    } elseif (is_int($b) || is_float($b)) {
+                        $v = (string) $b;
+                    } elseif ($b instanceof \DateTimeInterface) {
+                        $v = $pdo->quote($b->format('Y-m-d H:i:s'));
+                    } else {
+                        $v = $pdo->quote((string) $b);
+                    }
+                    $sql = preg_replace('/\?/', str_replace(['\\', '$'], ['\\\\', '\\$'], $v), $sql, 1);
+                }
+
+                // El INSERT lleva su id explícito: las sentencias siguientes lo referencian, y el
+                // contador AUTO_INCREMENT de prod podría estar más adelante que el último id.
+                if (preg_match('/^\s*insert into `(\w+)` \(/i', $sql, $m)
+                    && isset(self::TABLAS_CON_ALTA[$m[1]])) {
+                    $id = (int) $pdo->lastInsertId();
+                    $pk = self::TABLAS_CON_ALTA[$m[1]];
+                    $sql = preg_replace('/^(\s*insert into `\w+` \()/i', '$1`' . $pk . '`, ', $sql, 1);
+                    $sql = preg_replace('/\) values \(/i', ') values (' . $id . ', ', $sql, 1);
+                }
+
+                $sentencias[] = $sql . ';';
+            });
+        }
 
         DB::beginTransaction();
         try {
@@ -237,6 +293,11 @@ class RevertirPagosSinComprobante extends Command
                 DB::rollBack();
                 $this->info('Simulación: no se guardó nada.');
             }
+
+            if ($archivoSql && !$ejecutar) {
+                $this->escribirScript($archivoSql, $sentencias, $maximos);
+                $this->info("SQL para producción: {$archivoSql} (" . count($sentencias) . ' sentencias)');
+            }
         } catch (\Throwable $e) {
             DB::rollBack();
             $this->error('Error, no se guardó nada: ' . $e->getMessage() . ' @ ' . $e->getFile() . ':' . $e->getLine());
@@ -244,5 +305,35 @@ class RevertirPagosSinComprobante extends Command
         }
 
         return 0;
+    }
+
+    /**
+     * Script para pegar en phpMyAdmin. Arranca verificando que prod no cambió desde la copia (si
+     * cambió, la subconsulta devuelve 2 filas, MySQL corta con error 1242 y no se escribe nada), y
+     * va todo en una transacción.
+     */
+    private function escribirScript(string $archivo, array $sentencias, array $maximos): void
+    {
+        $base = DB::connection()->getDatabaseName();
+        $l = [];
+        $l[] = '-- Reversión de pagos confirmados sin comprobante (R-00000439, fase 3).';
+        $l[] = "-- Generado el " . date('Y-m-d H:i') . " contra la copia `{$base}` con corte {$this->option('corte')}.";
+        $l[] = '-- Correr en la base de prod de la que salió esa copia, sin cargar pagos en el medio.';
+        $l[] = '-- Si una guarda de abajo falla (error 1242), prod cambió: NO seguir, pedir una copia nueva.';
+        $l[] = '';
+        $l[] = 'START TRANSACTION;';
+        $l[] = '';
+        $l[] = '-- Guardas: el último id de cada tabla tiene que ser el de la copia.';
+        foreach ($maximos as $tabla => $max) {
+            $pk = self::TABLAS_CON_ALTA[$tabla];
+            $l[] = "SELECT (SELECT 1 UNION ALL SELECT 2 FROM DUAL WHERE (SELECT COALESCE(MAX({$pk}),0) FROM {$tabla}) <> {$max}) AS guarda_{$tabla};";
+        }
+        $l[] = '';
+        foreach ($sentencias as $s) {
+            $l[] = $s;
+        }
+        $l[] = '';
+        $l[] = 'COMMIT;';
+        file_put_contents($archivo, implode("\n", $l) . "\n");
     }
 }
