@@ -1216,6 +1216,15 @@ Route::group(
         // Circuito de ingresos (R-00000630)
         Route::post('ingresos/comprobantes/previsualizar', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngComprobantesController::class, 'postPrevisualizar']);  // Lee el export de ARCA, no graba
         Route::post('ingresos/comprobantes/confirmar', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngComprobantesController::class, 'postConfirmar']);  // Graba comprobantes, NC y asientos
+        Route::get('ingresos/clientes', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'getClientes']);
+        Route::get('ingresos/facturas-pendientes', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'getFacturasPendientes']);  // FC/ND con saldo, FIFO
+        Route::get('ingresos/anticipos-disponibles', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'getAnticiposDisponibles']);
+        Route::get('ingresos/ordenes', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'getListar']);
+        Route::get('ingresos/ordenes/{id}', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'getDetalle']);
+        Route::post('ingresos/ordenes', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'postGuardar']);  // Crea o reemplaza el borrador
+        Route::post('ingresos/ordenes/{id}/confirmar', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'postConfirmar']);  // Saldos + asiento
+        Route::post('ingresos/ordenes/{id}/anular', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'postAnular']);  // Contraasiento + devuelve saldos
+        Route::delete('ingresos/ordenes/{id}', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'deleteBorrador']);
         Route::get('imputacion-fifo-opa/{id}', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getImputacionFifo']);  // Que facturas cubrio lo pagado
         Route::get('estado-pago-factura/{id}', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getEstadoPagoFactura']);  // Estado de pago real de una factura
         Route::post('anular-opa', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getAnularOpa']);  // Anula la OP sin reemplazarla; libera sus facturas
