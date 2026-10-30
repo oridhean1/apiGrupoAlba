@@ -337,6 +337,97 @@ class AsientoContableRepository
         return $relacion->id_detalle_plan;
     }
 
+    /**
+     * Cuenta de venta de la razón (`RazonCuentaContableEntity::TIPO_VENTA_*`). Sin mapeo corta:
+     * un asiento de venta sin cuenta no se arma "como se pueda".
+     */
+    public function obtenerCuentaVentaByRazon($idRazon, string $tipo)
+    {
+        if (empty($idRazon)) {
+            throw new Exception("Falta la razón social para determinar la cuenta contable {$tipo}.");
+        }
+
+        $relacion = RazonCuentaContableEntity::where('id_razon', $idRazon)
+            ->where('tipo_contraparte', $tipo)
+            ->where('vigente', 1)
+            ->first();
+
+        if (!$relacion || empty($relacion->id_detalle_plan)) {
+            throw new Exception("La razón social no tiene configurada la cuenta contable {$tipo}. Por favor contacte con Contabilidad.");
+        }
+
+        return $relacion->id_detalle_plan;
+    }
+
+    /**
+     * Asiento de un comprobante de venta (circuito de ingresos, README 10.1).
+     *
+     * FC / ND: Deudores (D) total contra Ingresos (H) neto + no gravado + exento e IVA débito (H).
+     * NC: el mismo asiento invertido. Fecha del asiento = fecha de emisión.
+     *
+     * $c: id_comprobante, id_razon, clase (FC|ND|NC), descripcion, fecha_emision, cliente, cuit,
+     *     importe_ingreso, importe_iva, importe_total.
+     */
+    public function crearAsientoComprobanteVenta(array $c, $idPeriodoContable)
+    {
+        $this->validarPeriodoContable($idPeriodoContable, 'el asiento del comprobante de venta');
+
+        $ingreso = round((float) $c['importe_ingreso'], 2);
+        $iva = round((float) $c['importe_iva'], 2);
+        $total = round((float) $c['importe_total'], 2);
+
+        // Si no cuadra, falta un componente que el asiento no sabe imputar (p. ej. otros tributos).
+        if (abs($ingreso + $iva - $total) > 0.009) {
+            throw new Exception("El comprobante {$c['descripcion']} no cuadra: ingreso {$ingreso} + IVA {$iva} ≠ total {$total}.");
+        }
+
+        $cuentaDeudor = $this->obtenerCuentaVentaByRazon($c['id_razon'], RazonCuentaContableEntity::TIPO_VENTA_DEUDOR);
+        $cuentaIngreso = $this->obtenerCuentaVentaByRazon($c['id_razon'], RazonCuentaContableEntity::TIPO_VENTA_INGRESO);
+        $cuentaIva = $iva > 0
+            ? $this->obtenerCuentaVentaByRazon($c['id_razon'], RazonCuentaContableEntity::TIPO_VENTA_IVA)
+            : null;
+
+        $esNc = $c['clase'] === 'NC';
+
+        $asiento = $this->findByCrearAsiento(
+            1,
+            $esNc ? 'NOTA_CREDITO_VENTA' : 'FACTURA_VENTA',
+            "VENTA - {$c['descripcion']} - {$c['cuit']} - {$c['cliente']} - FECHA: {$c['fecha_emision']}",
+            $this->obtenerSiguienteNumeroAsiento(),
+            $idPeriodoContable,
+            $c['id_comprobante'],
+            'ACTIVO',
+            $c['id_razon']
+        );
+        $asiento->fecha_asiento = $c['fecha_emision'];
+        $asiento->save();
+
+        $lineas = [
+            [$cuentaDeudor, $total, 'Deudores por ventas'],
+            [$cuentaIngreso, -$ingreso, 'Ingresos por servicios'],
+        ];
+        if ($cuentaIva) {
+            $lineas[] = [$cuentaIva, -$iva, 'IVA debito fiscal'];
+        }
+
+        foreach ($lineas as [$cuenta, $importe, $obs]) {
+            if ($importe == 0) {
+                continue;
+            }
+            // positivo = debe en una FC; la NC da vuelta los lados
+            $debe = $esNc ? $importe < 0 : $importe > 0;
+            $this->findByCrearDetalleAsiento([
+                'id_asiento_contable' => $asiento->id_asiento_contable,
+                'monto_debe' => $debe ? abs($importe) : 0,
+                'monto_haber' => $debe ? 0 : abs($importe),
+                'observaciones' => $obs,
+                'id_detalle_plan' => $cuenta,
+            ]);
+        }
+
+        return $asiento;
+    }
+
     //Retenciones
 
     public function verificarRetencionTieneCuentaContable($idRetencion)
