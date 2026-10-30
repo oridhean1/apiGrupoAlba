@@ -3,7 +3,10 @@
 namespace App\Http\Controllers\Tesoreria\Services\Ingresos;
 
 use App\Http\Controllers\Tesoreria\Repository\Ingresos\TesIngOrdenCobranzaRepository;
+use Barryvdh\DomPDF\Facade\Pdf;
+use Carbon\Carbon;
 use Illuminate\Database\QueryException;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
 use Illuminate\Support\Facades\Log;
@@ -42,6 +45,49 @@ class TesIngOrdenCobranzaController extends Controller
     public function getDetalle($id, TesIngOrdenCobranzaRepository $repo)
     {
         return response()->json($repo->detalle($id));
+    }
+
+    /** Recibo de cobro en PDF. Sólo de órdenes confirmadas; una anulada sale con la marca ANULADO. */
+    public function getRecibo($id, TesIngOrdenCobranzaRepository $repo)
+    {
+        $d = $repo->detalle($id);
+        $o = $d['orden'];
+
+        if ($o->id_estado == TesIngOrdenCobranzaRepository::BORRADOR) {
+            return response()->json(['message' => 'Un borrador no tiene recibo: confirmá la orden primero.'], 409);
+        }
+
+        try {
+            // Totales desde las filas, sin filtrar `anulado`: al anular se marcan todas juntas, y el
+            // recibo de una orden anulada tiene que mostrar lo que fue, no "todo a cuenta".
+            $total = round($d['medios']->sum('importe') + $d['retenciones']->sum('importe') + $d['anticipos']->sum('importe'), 2);
+            $aplicado = round($d['imputaciones']->sum('importe'), 2);
+            $totales = ['total_imputable' => $total, 'excedente' => round(max(0, $total - $aplicado), 2)];
+
+            $razon = DB::table('tb_razones_sociales')->where('id_razon', $o->id_razon)->first();
+            $pdf = Pdf::loadView('tesoreria.recibo_cobranza', [
+                'numero' => $d['numero_formateado'],
+                'fecha_cobro' => Carbon::parse($o->fecha_cobro)->format('d/m/Y'),
+                'razon' => $razon,
+                'cliente' => $d['cliente'],
+                'medios' => $d['medios'],
+                'retenciones' => $d['retenciones'],
+                'anticipos' => $d['anticipos'],
+                'imputaciones' => $d['imputaciones'],
+                'totales' => $totales,
+                'observaciones' => $o->observaciones,
+                'anulada' => $o->id_estado == TesIngOrdenCobranzaRepository::ANULADA,
+                'fecha_anula' => $o->fecha_anula ? Carbon::parse($o->fecha_anula)->format('d/m/Y') : null,
+                'motivo_anulacion' => $o->motivo_anulacion,
+                'emitido' => Carbon::now('America/Argentina/Buenos_Aires')->format('d/m/Y H:i'),
+            ]);
+            $pdf->setPaper('A4');
+
+            return $pdf->stream("recibo-{$d['numero_formateado']}.pdf");
+        } catch (\Exception $e) {
+            Log::error('Error generar recibo de cobranza: ' . $e->getMessage());
+            return response()->json(['message' => 'Error al generar el recibo'], 500);
+        }
     }
 
     public function postGuardar(Request $request, TesIngOrdenCobranzaRepository $repo)

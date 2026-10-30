@@ -1224,6 +1224,7 @@ Route::group(
         Route::get('ingresos/facturas-pendientes', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'getFacturasPendientes']);  // FC/ND con saldo, FIFO
         Route::get('ingresos/anticipos-disponibles', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'getAnticiposDisponibles']);
         Route::get('ingresos/ordenes', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'getListar']);
+        Route::get('ingresos/ordenes/{id}/recibo', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'getRecibo']);  // PDF
         Route::get('ingresos/ordenes/{id}', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'getDetalle']);
         Route::post('ingresos/ordenes', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'postGuardar']);  // Crea o reemplaza el borrador
         Route::post('ingresos/ordenes/{id}/confirmar', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'postConfirmar']);  // Saldos + asiento
