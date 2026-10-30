@@ -222,7 +222,7 @@ class TesIngComprobanteRepository
             if (!$f['punto_venta'] || !$f['numero']) $e[] = 'Punto de venta o número inválido.';
             if ($f['numero_hasta'] && $f['numero_hasta'] != $f['numero']) $e[] = 'Rango de comprobantes (desde ≠ hasta): no admitido.';
             if ($f['moneda'] && !in_array(mb_strtoupper($f['moneda']), self::MONEDAS_PESOS)) $e[] = "Moneda {$f['moneda']}: sólo pesos.";
-            if (!$this->cuitValido($f['cuit_receptor'])) $e[] = 'CUIT del receptor inválido.';
+            if (!TesIngClienteRepository::cuitValido($f['cuit_receptor'])) $e[] = 'CUIT del receptor inválido.';
 
             $importes = ['importe_neto_gravado', 'importe_no_gravado', 'importe_exento', 'importe_otros_tributos', 'importe_iva', 'importe_total'];
             if (in_array(null, array_map(fn($k) => $f[$k], $importes), true)) {
@@ -370,20 +370,5 @@ class TesIngComprobanteRepository
             ->where('vigente', 1)
             ->whereNotNull('id_detalle_plan')
             ->exists();
-    }
-
-    private function cuitValido(?string $cuit): bool
-    {
-        if (!$cuit || !preg_match('/^\d{11}$/', $cuit)) {
-            return false;
-        }
-        $pesos = [5, 4, 3, 2, 7, 6, 5, 4, 3, 2];
-        $suma = 0;
-        foreach ($pesos as $i => $p) {
-            $suma += $cuit[$i] * $p;
-        }
-        $dv = 11 - ($suma % 11);
-        $dv = $dv === 11 ? 0 : ($dv === 10 ? 9 : $dv);
-        return $dv === (int) $cuit[10];
     }
 }

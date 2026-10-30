@@ -62,7 +62,8 @@ class TesIngOrdenCobranzaRepository
         return TesIngClienteEntity::where('activo', 1)
             ->when($texto, fn($q) => $q->where(fn($w) => $w->where('razon_social', 'like', "%{$texto}%")
                 ->orWhere('sigla', 'like', "%{$texto}%")
-                ->orWhere('cuit', 'like', '%' . preg_replace('/\D/', '', $texto) . '%')))
+                // sin dígitos quedaría LIKE '%%' y traería todos
+                ->when(preg_replace('/\D/', '', $texto), fn($q, $digitos) => $q->orWhere('cuit', 'like', "%{$digitos}%"))))
             ->orderBy('razon_social')
             ->limit(50)
             ->get(['id_cliente', 'cuit', 'razon_social', 'sigla', 'condicion_iva']);

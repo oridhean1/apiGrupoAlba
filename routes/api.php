@@ -1216,7 +1216,11 @@ Route::group(
         // Circuito de ingresos (R-00000630)
         Route::post('ingresos/comprobantes/previsualizar', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngComprobantesController::class, 'postPrevisualizar']);  // Lee el export de ARCA, no graba
         Route::post('ingresos/comprobantes/confirmar', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngComprobantesController::class, 'postConfirmar']);  // Graba comprobantes, NC y asientos
-        Route::get('ingresos/clientes', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'getClientes']);
+        Route::get('ingresos/clientes', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'getClientes']);  // Combo de clientes activos
+        Route::get('ingresos/clientes-abm', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngClientesController::class, 'getListar']);
+        Route::post('ingresos/clientes', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngClientesController::class, 'postGuardar']);  // Alta o edición
+        Route::get('ingresos/obras-sociales', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngClientesController::class, 'getObrasSociales']);  // Padrón SSS para vincular
+        Route::get('ingresos/cuenta-corriente', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngClientesController::class, 'getCuentaCorriente']);
         Route::get('ingresos/facturas-pendientes', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'getFacturasPendientes']);  // FC/ND con saldo, FIFO
         Route::get('ingresos/anticipos-disponibles', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'getAnticiposDisponibles']);
         Route::get('ingresos/ordenes', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'getListar']);
