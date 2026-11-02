@@ -62,6 +62,39 @@ class TesIngComprobantesController extends Controller
         }
     }
 
+    /** Usa el saldo a favor de una NC para cancelar otra factura del mismo cliente (sin asiento). */
+    public function postAplicarSaldoNc(Request $request, TesIngComprobanteRepository $repo)
+    {
+        $request->validate([
+            'id_comprobante_nc' => 'required|integer',
+            'id_comprobante' => 'required|integer',
+            'importe' => 'required|numeric|gt:0',
+        ]);
+
+        try {
+            $i = $repo->aplicarSaldoNotaCredito($request->input('id_comprobante_nc'), $request->input('id_comprobante'), $request->input('importe'));
+            return response()->json(['message' => 'Saldo a favor aplicado', 'data' => $i], 201);
+        } catch (QueryException $e) {
+            Log::error('Error aplicar saldo de NC: ' . $e->getMessage());
+            return response()->json(['message' => 'Error al aplicar el saldo a favor'], 500);
+        } catch (\Exception $e) {
+            return response()->json(['message' => $e->getMessage()], 409);
+        }
+    }
+
+    public function deleteAplicacionSaldoNc($idImputacion, TesIngComprobanteRepository $repo)
+    {
+        try {
+            $repo->desaplicarSaldoNotaCredito($idImputacion);
+            return response()->json(['message' => 'Aplicación deshecha']);
+        } catch (QueryException $e) {
+            Log::error('Error desaplicar saldo de NC: ' . $e->getMessage());
+            return response()->json(['message' => 'Error al deshacer la aplicación'], 500);
+        } catch (\Exception $e) {
+            return response()->json(['message' => $e->getMessage()], 409);
+        }
+    }
+
     private function asociaciones(Request $request): array
     {
         $a = $request->input('asociaciones', []);

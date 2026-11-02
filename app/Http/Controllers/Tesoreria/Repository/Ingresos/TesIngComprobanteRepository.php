@@ -97,8 +97,8 @@ class TesIngComprobanteRepository
                     'importe_iva' => $f['importe_iva'],
                     'importe_otros_tributos' => $f['importe_otros_tributos'],
                     'importe_total' => $f['importe_total'],
-                    // La NC nace aplicada entera a su factura (abajo).
-                    'saldo' => $f['clase'] === 'NC' ? 0 : $f['importe_total'],
+                    // NC: aplicarNotaCredito() la deja con lo que no pudo aplicar (saldo a favor).
+                    'saldo' => $f['importe_total'],
                     'cae' => $f['cae'],
                     'id_comprobante_asociado' => $idAsociado,
                     'id_importacion' => $importacion->id_importacion,
@@ -136,7 +136,10 @@ class TesIngComprobanteRepository
         });
     }
 
-    /** Baja el saldo de la factura; se vuelve a controlar con la fila bloqueada. */
+    /**
+     * Aplica la NC a su factura hasta el saldo de ésta (con la fila bloqueada); lo que sobra queda
+     * en `saldo` de la NC como saldo a favor del cliente.
+     */
     private function aplicarNotaCredito(TesIngComprobanteEntity $nc, $idFactura): void
     {
         $factura = TesIngComprobanteEntity::where('id_comprobante', $idFactura)->lockForUpdate()->first();
@@ -144,20 +147,100 @@ class TesIngComprobanteRepository
         if (!$factura || $factura->id_razon != $nc->id_razon || $factura->id_cliente != $nc->id_cliente) {
             throw new Exception("La NC {$nc->punto_venta}-{$nc->numero} apunta a una factura de otro cliente o razón social.");
         }
-        if ((float) $nc->importe_total > (float) $factura->saldo + 0.009) {
-            throw new Exception("La NC {$nc->punto_venta}-{$nc->numero} supera el saldo de la factura {$factura->punto_venta}-{$factura->numero} ({$factura->saldo}).");
+
+        $aplica = round(min((float) $nc->importe_total, max(0, (float) $factura->saldo)), 2);
+        if ($aplica > 0) {
+            TesIngImputacionEntity::create([
+                'id_comprobante' => $factura->id_comprobante,
+                'id_comprobante_nc' => $nc->id_comprobante,
+                'importe' => $aplica,
+                'cod_usuario' => $this->user->cod_usuario,
+                'fecha_registra' => $this->fechaActual,
+            ]);
+            $factura->saldo = round((float) $factura->saldo - $aplica, 2);
+            $factura->save();
         }
 
-        TesIngImputacionEntity::create([
-            'id_comprobante' => $factura->id_comprobante,
-            'id_comprobante_nc' => $nc->id_comprobante,
-            'importe' => $nc->importe_total,
-            'cod_usuario' => $this->user->cod_usuario,
-            'fecha_registra' => $this->fechaActual,
-        ]);
+        $nc->saldo = round((float) $nc->importe_total - $aplica, 2);
+        $nc->save();
+    }
 
-        $factura->saldo = round((float) $factura->saldo - (float) $nc->importe_total, 2);
-        $factura->save();
+    /**
+     * Usa el saldo a favor de una NC para cancelar otra FC/ND del mismo cliente y razón social.
+     * No lleva asiento: es Deudores contra Deudores del mismo cliente (el crédito ya quedó en
+     * Deudores con el asiento de la NC).
+     */
+    public function aplicarSaldoNotaCredito($idNc, $idFactura, $importe): TesIngImputacionEntity
+    {
+        $importe = round((float) $importe, 2);
+        if ($importe <= 0) {
+            throw new Exception('El importe a aplicar tiene que ser mayor a cero.');
+        }
+
+        return DB::transaction(function () use ($idNc, $idFactura, $importe) {
+            $nc = $this->comprobanteBloqueado($idNc, ['NC'], 'Nota de crédito');
+            $factura = $this->comprobanteBloqueado($idFactura, ['FC', 'ND'], 'Factura');
+
+            // Razón social y cliente de las dos puntas: si falta alguno, no coincide y corta.
+            if (!$nc->id_razon || !$nc->id_cliente || $nc->id_razon != $factura->id_razon || $nc->id_cliente != $factura->id_cliente) {
+                throw new Exception('La nota de crédito y la factura tienen que ser de la misma razón social y del mismo cliente.');
+            }
+            if ($importe > (float) $nc->saldo + 0.009) {
+                throw new Exception("La NC {$nc->punto_venta}-{$nc->numero} tiene {$nc->saldo} a favor y se quieren aplicar {$importe}.");
+            }
+            if ($importe > (float) $factura->saldo + 0.009) {
+                throw new Exception("La factura {$factura->punto_venta}-{$factura->numero} tiene saldo {$factura->saldo} y se quieren aplicar {$importe}.");
+            }
+
+            $nc->saldo = round((float) $nc->saldo - $importe, 2);
+            $nc->save();
+            $factura->saldo = round((float) $factura->saldo - $importe, 2);
+            $factura->save();
+
+            return TesIngImputacionEntity::create([
+                'id_comprobante' => $factura->id_comprobante,
+                'id_comprobante_nc' => $nc->id_comprobante,
+                'importe' => $importe,
+                'cod_usuario' => $this->user->cod_usuario,
+                'fecha_registra' => $this->fechaActual,
+            ]);
+        });
+    }
+
+    /**
+     * Deshace una aplicación de saldo a favor hecha con aplicarSaldoNotaCredito(). La aplicación
+     * original de la NC a su factura (la de la importación) no se deshace por acá.
+     */
+    public function desaplicarSaldoNotaCredito($idImputacion): void
+    {
+        DB::transaction(function () use ($idImputacion) {
+            $i = TesIngImputacionEntity::lockForUpdate()->find($idImputacion);
+            if (!$i || !$i->id_comprobante_nc || $i->anulado) {
+                throw new Exception('Aplicación de nota de crédito inexistente o ya deshecha.');
+            }
+            $nc = $this->comprobanteBloqueado($i->id_comprobante_nc, ['NC'], 'Nota de crédito');
+            if ($nc->id_comprobante_asociado == $i->id_comprobante) {
+                throw new Exception('Es la aplicación de la NC a su propia factura: no se deshace desde acá.');
+            }
+            $factura = TesIngComprobanteEntity::lockForUpdate()->find($i->id_comprobante);
+
+            $nc->saldo = round((float) $nc->saldo + (float) $i->importe, 2);
+            $nc->save();
+            $factura->saldo = round((float) $factura->saldo + (float) $i->importe, 2);
+            $factura->save();
+            $i->anulado = 1;
+            $i->save();
+        });
+    }
+
+    private function comprobanteBloqueado($id, array $clases, string $nombre): TesIngComprobanteEntity
+    {
+        $c = TesIngComprobanteEntity::lockForUpdate()->find($id);
+        $clase = $c ? DB::table('tb_tes_ing_tipo_comprobante')->where('id_tipo_comprobante', $c->id_tipo_comprobante)->value('clase') : null;
+        if (!$c || $c->anulado || !in_array($clase, $clases)) {
+            throw new Exception("{$nombre} inexistente o anulada.");
+        }
+        return $c;
     }
 
     private function clienteParaCuit(array $f): int
@@ -280,7 +363,8 @@ class TesIngComprobanteRepository
 
     /**
      * NC (obligatoria) y ND (opcional): la factura asociada tiene que ser del mismo cliente, razón y
-     * letra, con saldo. La NC no puede superar ese saldo, descontando otras NC del archivo a la misma.
+     * letra, con o sin saldo. Si la NC supera el saldo (descontando otras NC del archivo a la misma),
+     * el excedente queda como saldo a favor en la NC.
      */
     private function resolverAsociaciones(array $filas, $idRazon, array $asociaciones): array
     {
@@ -303,7 +387,8 @@ class TesIngComprobanteRepository
                 ->where('t.clase', 'FC')
                 ->where('t.letra', $f['letra'])
                 ->where('tb_tes_ing_comprobante.anulado', 0)
-                ->where('tb_tes_ing_comprobante.saldo', '>', 0)
+                // también las ya cobradas: la NC puede aplicar a una factura sin saldo
+                ->orderByDesc('tb_tes_ing_comprobante.saldo')
                 ->orderBy('fecha_emision')
                 ->get(['id_comprobante', 'punto_venta', 'numero', 'fecha_emision', 'importe_total', 'saldo']);
 
@@ -340,7 +425,7 @@ class TesIngComprobanteRepository
 
             $elegida = collect($f['candidatas'])->firstWhere('ref', $ref);
             if (!$elegida) {
-                $f['errores'][] = 'La factura elegida no es del mismo cliente, razón social y letra, o no tiene saldo.';
+                $f['errores'][] = 'La factura elegida no es del mismo cliente, razón social y letra.';
                 continue;
             }
 
@@ -350,13 +435,16 @@ class TesIngComprobanteRepository
                 $f['id_comprobante_asociado'] = (int) $ref;
             }
 
+            // Lo que la NC no puede aplicar a su factura (ya cobrada) queda como saldo a favor del
+            // cliente en la propia NC (README 9, respuesta 6 de la segunda ronda).
             if ($f['clase'] === 'NC') {
-                $disponible = $elegida['saldo'] - ($saldoUsado[$ref] ?? 0);
-                if ($f['importe_total'] > $disponible + 0.009) {
-                    $f['errores'][] = "La NC ({$f['importe_total']}) supera el saldo disponible de {$elegida['descripcion']} ({$disponible}).";
-                    continue;
+                $disponible = max(0, round($elegida['saldo'] - ($saldoUsado[$ref] ?? 0), 2));
+                $aplica = min($f['importe_total'], $disponible);
+                $saldoUsado[$ref] = ($saldoUsado[$ref] ?? 0) + $aplica;
+                if ($f['importe_total'] > $aplica + 0.009) {
+                    $f['avisos'][] = 'Aplica ' . number_format($aplica, 2, ',', '.') . ' a ' . $elegida['descripcion']
+                        . '; quedan ' . number_format($f['importe_total'] - $aplica, 2, ',', '.') . ' como saldo a favor del cliente.';
                 }
-                $saldoUsado[$ref] = ($saldoUsado[$ref] ?? 0) + $f['importe_total'];
             }
         }
 

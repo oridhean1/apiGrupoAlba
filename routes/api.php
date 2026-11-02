@@ -1216,6 +1216,8 @@ Route::group(
         // Circuito de ingresos (R-00000630)
         Route::post('ingresos/comprobantes/previsualizar', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngComprobantesController::class, 'postPrevisualizar']);  // Lee el export de ARCA, no graba
         Route::post('ingresos/comprobantes/confirmar', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngComprobantesController::class, 'postConfirmar']);  // Graba comprobantes, NC y asientos
+        Route::post('ingresos/notas-credito/aplicar', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngComprobantesController::class, 'postAplicarSaldoNc']);  // Saldo a favor de NC → otra factura
+        Route::delete('ingresos/notas-credito/aplicaciones/{id}', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngComprobantesController::class, 'deleteAplicacionSaldoNc']);
         Route::get('ingresos/clientes', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'getClientes']);  // Combo de clientes activos
         Route::get('ingresos/clientes-abm', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngClientesController::class, 'getListar']);
         Route::post('ingresos/clientes', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngClientesController::class, 'postGuardar']);  // Alta o edición

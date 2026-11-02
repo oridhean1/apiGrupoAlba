@@ -98,7 +98,7 @@ class TesIngClienteRepository
      * no suma. Las órdenes anuladas no figuran (orden y contraasiento se cancelan).
      *
      * Saldo positivo = nos debe; negativo = a favor del cliente. Control: tiene que dar igual a
-     * Σ saldo de facturas − Σ anticipos disponibles (`control`).
+     * Σ saldo de facturas − Σ anticipos disponibles − Σ saldo a favor de NC (`control`).
      */
     public function cuentaCorriente($idRazon, $idCliente, ?string $hasta = null): array
     {
@@ -127,9 +127,11 @@ class TesIngClienteRepository
                 'fecha' => $c->fecha_emision,
                 'tipo' => $c->clase,
                 'comprobante' => "{$c->descripcion} {$nro($c->punto_venta, $c->numero)}",
-                'detalle' => $esNc && $c->id_comprobante_asociado
-                    ? 'Aplica a ' . optional($comprobantes->firstWhere('id_comprobante', $c->id_comprobante_asociado), fn($f) => $nro($f->punto_venta, $f->numero))
-                    : ($esNc ? '' : 'Saldo ' . number_format((float) $c->saldo, 2, ',', '.')),
+                'detalle' => $esNc
+                    ? trim(($c->id_comprobante_asociado
+                        ? 'Aplica a ' . optional($comprobantes->firstWhere('id_comprobante', $c->id_comprobante_asociado), fn($f) => $nro($f->punto_venta, $f->numero))
+                        : '') . ((float) $c->saldo > 0 ? ' · saldo a favor ' . number_format((float) $c->saldo, 2, ',', '.') : ''), ' ·')
+                    : 'Saldo ' . number_format((float) $c->saldo, 2, ',', '.'),
                 'debe' => $esNc ? 0 : (float) $c->importe_total,
                 'haber' => $esNc ? (float) $c->importe_total : 0,
                 'orden' => 1,
@@ -165,17 +167,44 @@ class TesIngClienteRepository
         $pendientes = $this->pendientesPorAntiguedad($comprobantes);
         $anticipos = round($ordenes->sum(fn($o) => (float) $o->saldo_anticipo), 2);
         $deuda = round(array_sum(array_column($pendientes['facturas'], 'saldo')), 2);
+        $ncAFavor = $comprobantes->filter(fn($c) => $c->clase === 'NC' && (float) $c->saldo > 0)->values();
+        $saldoNc = round($ncAFavor->sum(fn($c) => (float) $c->saldo), 2);
 
         return [
             'movimientos' => $movs,
             'saldo' => $saldo,
             'deuda_facturas' => $deuda,
             'anticipos_disponibles' => $anticipos,
+            'nc_saldo_a_favor' => $saldoNc,
+            'notas_credito_a_favor' => $ncAFavor->map(fn($c) => [
+                'id_comprobante' => $c->id_comprobante,
+                'comprobante' => "{$c->descripcion} {$nro($c->punto_venta, $c->numero)}",
+                'fecha_emision' => $c->fecha_emision,
+                'importe_total' => (float) $c->importe_total,
+                'saldo' => (float) $c->saldo,
+            ])->all(),
+            'aplicaciones_nc' => $this->aplicacionesDeSaldoNc($idRazon, $idCliente),
             // Si no da 0, algún saldo guardado se desfasó de sus movimientos (sólo tiene sentido sin `hasta`).
-            'control' => $hasta ? null : round($saldo - ($deuda - $anticipos), 2),
+            'control' => $hasta ? null : round($saldo - ($deuda - $anticipos - $saldoNc), 2),
             'antiguedad' => $pendientes['tramos'],
             'pendientes' => $pendientes['facturas'],
         ];
+    }
+
+    /** Saldo a favor de NC usado en otras facturas (no la aplicación a su propia factura): se puede deshacer. */
+    private function aplicacionesDeSaldoNc($idRazon, $idCliente): array
+    {
+        return DB::table('tb_tes_ing_imputacion as i')
+            ->join('tb_tes_ing_comprobante as nc', 'nc.id_comprobante', '=', 'i.id_comprobante_nc')
+            ->join('tb_tes_ing_comprobante as f', 'f.id_comprobante', '=', 'i.id_comprobante')
+            ->where('nc.id_razon', $idRazon)->where('nc.id_cliente', $idCliente)
+            ->where('i.anulado', 0)
+            ->whereColumn('i.id_comprobante', '<>', 'nc.id_comprobante_asociado')
+            ->orderByDesc('i.id_imputacion')
+            ->get(['i.id_imputacion', 'i.importe', 'i.fecha_registra',
+                DB::raw("CONCAT(LPAD(nc.punto_venta,5,'0'),'-',LPAD(nc.numero,8,'0')) AS nc"),
+                DB::raw("CONCAT(LPAD(f.punto_venta,5,'0'),'-',LPAD(f.numero,8,'0')) AS factura")])
+            ->all();
     }
 
     private function pendientesPorAntiguedad($comprobantes): array
