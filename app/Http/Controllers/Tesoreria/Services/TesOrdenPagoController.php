@@ -126,25 +126,25 @@ class TesOrdenPagoController extends Controller
     public function getProcesar(Request $request, TestOrdenPagoRepository $opa, TesPagosRepository $pagosRepo)
     {
         try {
-            DB::beginTransaction();
-            $menssage = "OPA generado con éxito.";
-            if (is_null($request->id_orden_pago)) {
-                $opa->findByCreate($request);
-            } else {
-                /* if (!$opa->findByExistsOpaEstado($request->id_orden_pago, '1')) {
-                    DB::rollBack();
-                    return response()->json(['message' => 'La OPA ya se encuentra en un proceso de PAGO y no puede ser modificado.'], 409);
-                } */
-                foreach ((array) $request->fechaprobablepagos as $fechaProbable) {
-                    if (empty($fechaProbable['fecha_probable_pago'])) {
-                        DB::rollBack();
-                        return response()->json(['message' => 'Hay fechas de pago sin completar. Revisá la lista antes de continuar.'], 422);
-                    }
-                }
-                $opa->findByUpdate($request);
-                $pagosRepo->findByUpdatePagoPorOpa($request, $request->id_orden_pago);
-                $menssage = "OPA actualizo con éxito.";
+            // Este endpoint sólo MODIFICA. Sin id creaba una OPA por el camino viejo (findByCreate):
+            // sin cronograma ni validación de razón social. Las OPAs nacen sólo en
+            // Pagos › Generar OPA (procesarOpaAgrupada). T-00001235, 2026-11-03.
+            if (empty($request->id_orden_pago)) {
+                return response()->json([
+                    'message' => 'Las órdenes de pago sólo se generan desde Pagos › Generar OPA.',
+                ], 422);
             }
+
+            foreach ((array) $request->fechaprobablepagos as $fechaProbable) {
+                if (empty($fechaProbable['fecha_probable_pago'])) {
+                    return response()->json(['message' => 'Hay fechas de pago sin completar. Revisá la lista antes de continuar.'], 422);
+                }
+            }
+
+            DB::beginTransaction();
+            $opa->findByUpdate($request);
+            $pagosRepo->findByUpdatePagoPorOpa($request, $request->id_orden_pago);
+            $menssage = "OPA actualizo con éxito.";
 
             DB::commit();
             return response()->json(['message' => $menssage]);
