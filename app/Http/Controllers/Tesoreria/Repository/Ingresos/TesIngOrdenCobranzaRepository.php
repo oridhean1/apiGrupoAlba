@@ -40,9 +40,10 @@ class TesIngOrdenCobranzaRepository
     public const ANULADA = 4;
     public const ESTADOS_EFECTIVOS = [self::APLICADA, self::APLICACION_PARCIAL];
 
-    // Por ahora sólo medios que acreditan directo en el banco. Cheque / eCheq / efectivo necesitan
-    // la cuenta de valores a depositar y de caja (pregunta 7 y 8 de la segunda ronda, README 13.2).
-    private const FORMAS_ADMITIDAS = [1 => 'Transferencia', 3 => 'Deposito'];
+    // Transferencia y depósito acreditan directo en el banco. Cheque y eCheq entran a Valores a
+    // depositar y pasan al banco con depositarValor() (README 13.2-7 y 13.4). Efectivo no se cobra.
+    private const FORMAS_ADMITIDAS = [1 => 'Transferencia', 3 => 'Deposito', 2 => 'Cheque', 7 => 'eCheq'];
+    public const FORMAS_VALOR = [2, 7];
 
     private $user;
     private $fechaActual;
@@ -132,8 +133,9 @@ class TesIngOrdenCobranzaRepository
             'medios' => DB::table('tb_tes_ing_orden_medio as m')
                 ->join('tb_tes_formas_pago as f', 'f.id_forma_pago', '=', 'm.id_forma_pago')
                 ->leftJoin('tb_tes_cuentas_bancarias as cb', 'cb.id_cuenta_bancaria', '=', 'm.id_cuenta_bancaria')
+                ->leftJoin('tb_tes_cuentas_bancarias as cd', 'cd.id_cuenta_bancaria', '=', 'm.id_cuenta_deposito')
                 ->where('m.id_orden_cobranza', $id)
-                ->get(['m.*', 'f.tipo_pago', 'cb.nombre_cuenta']),
+                ->get(['m.*', 'f.tipo_pago', 'cb.nombre_cuenta', 'cd.nombre_cuenta as nombre_cuenta_deposito']),
             'retenciones' => TesIngRetencionEntity::where('id_orden_cobranza', $id)->get(),
             'anticipos' => DB::table('tb_tes_ing_anticipo_aplicacion as a')
                 ->join('tb_tes_ing_orden_cobranza as o', 'o.id_orden_cobranza', '=', 'a.id_orden_anticipo')
@@ -152,7 +154,8 @@ class TesIngOrdenCobranzaRepository
 
     /**
      * Crea o reemplaza un borrador. $d: id_razon, id_cliente, fecha_cobro, observaciones,
-     * medios [{id_forma_pago, id_cuenta_bancaria, referencia, importe}],
+     * medios [{id_forma_pago, id_cuenta_bancaria, referencia, importe}] — cheque / eCheq sin cuenta
+     *   y con banco_emisor y fecha_pago_cheque (la cuenta se elige al depositarlo),
      * retenciones [{numero_certificado, fecha_retencion, importe}],
      * anticipos [{id_orden_anticipo, importe}], imputaciones [{id_comprobante, importe}].
      */
@@ -199,8 +202,10 @@ class TesIngOrdenCobranzaRepository
                 TesIngOrdenMedioEntity::create([
                     'id_orden_cobranza' => $idOrden,
                     'id_forma_pago' => $m['id_forma_pago'],
-                    'id_cuenta_bancaria' => $m['id_cuenta_bancaria'],
-                    'referencia' => $m['referencia'] ?? null,
+                    'id_cuenta_bancaria' => $this->esValor($m) ? null : $m['id_cuenta_bancaria'],
+                    'referencia' => isset($m['referencia']) ? trim($m['referencia']) : null,
+                    'banco_emisor' => $this->esValor($m) ? trim($m['banco_emisor']) : null,
+                    'fecha_pago_cheque' => $this->esValor($m) ? ($m['fecha_pago_cheque'] ?? null) : null,
                     'importe' => round((float) $m['importe'], 2),
                 ]);
             }
@@ -324,6 +329,7 @@ class TesIngOrdenCobranzaRepository
                 'fecha_cobro' => $orden->fecha_cobro,
                 'medios' => $medios->map(fn($m) => [
                     'id_cuenta_bancaria' => $m->id_cuenta_bancaria,
+                    'es_valor' => $this->esValor($m->toArray()),
                     'importe' => (float) $m->importe,
                     'descripcion' => (self::FORMAS_ADMITIDAS[$m->id_forma_pago] ?? '') . ($m->referencia ? " {$m->referencia}" : ''),
                 ])->all(),
@@ -361,6 +367,11 @@ class TesIngOrdenCobranzaRepository
                 ->where('a.anulado', 0)
                 ->whereIn('o.id_estado', self::ESTADOS_EFECTIVOS)
                 ->pluck('o.numero');
+            $depositados = TesIngOrdenMedioEntity::where('id_orden_cobranza', $id)->whereNotNull('id_asiento_deposito')->pluck('referencia');
+            if ($depositados->isNotEmpty()) {
+                throw new Exception('Hay valores ya depositados (' . $depositados->implode(', ') . '): anulá primero su depósito.');
+            }
+
             if ($usadaEn->isNotEmpty()) {
                 throw new Exception('El anticipo de esta orden se usó en ' . $usadaEn->map(fn($n) => $this->numeroFormateado($n))->implode(', ') . ': anulá primero esa(s) orden(es).');
             }
@@ -427,12 +438,40 @@ class TesIngOrdenCobranzaRepository
             $e[] = 'La orden necesita al menos un medio de cobro (o un anticipo a aplicar).';
         }
 
+        $valoresVistos = [];
         foreach ($medios as $n => $m) {
             $r = 'Medio ' . ($n + 1) . ': ';
             if (!isset(self::FORMAS_ADMITIDAS[$m['id_forma_pago'] ?? 0])) {
-                $e[] = $r . 'por ahora sólo se admite transferencia o depósito (cheque, eCheq y efectivo pendientes de definir con Finanzas).';
+                $e[] = $r . 'se admite transferencia, depósito, cheque o eCheq (no se cobra en efectivo).';
             }
             if ((float) ($m['importe'] ?? 0) <= 0) $e[] = $r . 'el importe tiene que ser mayor a cero.';
+            if ($this->esValor($m)) {
+                // Cheque / eCheq: entra a Valores a depositar; la cuenta propia se elige al depositar.
+                $numero = trim((string) ($m['referencia'] ?? ''));
+                $banco = trim((string) ($m['banco_emisor'] ?? ''));
+                if ($numero === '') $e[] = $r . 'falta el número del cheque.';
+                if ($banco === '') $e[] = $r . 'falta el banco emisor del cheque.';
+                if ($numero !== '' && $banco !== '') {
+                    $clave = mb_strtoupper("{$banco}|{$numero}");
+                    if (isset($valoresVistos[$clave])) $e[] = $r . "el cheque {$numero} está cargado dos veces.";
+                    $valoresVistos[$clave] = true;
+                    // Unicidad: el mismo cheque (banco + número) no entra en dos órdenes vivas de la razón.
+                    $repetido = DB::table('tb_tes_ing_orden_medio as m')
+                        ->join('tb_tes_ing_orden_cobranza as o', 'o.id_orden_cobranza', '=', 'm.id_orden_cobranza')
+                        ->whereIn('m.id_forma_pago', self::FORMAS_VALOR)
+                        ->where('o.id_razon', $orden->id_razon)
+                        ->whereIn('o.id_estado', self::ESTADOS_EFECTIVOS)
+                        ->when($orden->id_orden_cobranza, fn($q) => $q->where('o.id_orden_cobranza', '<>', $orden->id_orden_cobranza))
+                        ->where('m.referencia', $numero)
+                        ->whereRaw('UPPER(TRIM(m.banco_emisor)) = ?', [mb_strtoupper($banco)])
+                        ->value('o.numero');
+                    if ($repetido) $e[] = $r . "el cheque {$numero} de {$banco} ya está registrado en {$this->numeroFormateado($repetido)}.";
+                }
+                if (!$this->tieneCuenta($orden->id_razon, RazonCuentaContableEntity::TIPO_VENTA_VALORES_DEP)) {
+                    $e[] = $r . 'la razón social no tiene configurada la cuenta de Valores a depositar.';
+                }
+                continue;
+            }
             if (empty($m['id_cuenta_bancaria'])) {
                 $e[] = $r . 'falta la cuenta bancaria.';
                 continue;
@@ -520,6 +559,112 @@ class TesIngOrdenCobranzaRepository
             throw new Exception("El período contable {$yymm} no está abierto para la razón social.");
         }
         return $periodo->id_periodo_contable;
+    }
+
+    private function esValor(array $m): bool
+    {
+        return in_array((int) ($m['id_forma_pago'] ?? 0), self::FORMAS_VALOR, true);
+    }
+
+    // ---------------------------------------------------------------- valores a depositar
+
+    /** Cheques / eCheq de órdenes confirmadas. estado: pendientes (default) | depositados | todos. */
+    public function valores(array $f): array
+    {
+        $estado = $f['estado'] ?? 'pendientes';
+
+        return DB::table('tb_tes_ing_orden_medio as m')
+            ->join('tb_tes_ing_orden_cobranza as o', 'o.id_orden_cobranza', '=', 'm.id_orden_cobranza')
+            ->join('tb_tes_ing_cliente as c', 'c.id_cliente', '=', 'o.id_cliente')
+            ->join('tb_tes_formas_pago as fp', 'fp.id_forma_pago', '=', 'm.id_forma_pago')
+            ->leftJoin('tb_tes_cuentas_bancarias as cd', 'cd.id_cuenta_bancaria', '=', 'm.id_cuenta_deposito')
+            ->whereIn('m.id_forma_pago', self::FORMAS_VALOR)
+            ->whereIn('o.id_estado', self::ESTADOS_EFECTIVOS)
+            ->when(!empty($f['id_razon']), fn($q) => $q->where('o.id_razon', $f['id_razon']))
+            ->when($estado === 'pendientes', fn($q) => $q->whereNull('m.id_asiento_deposito'))
+            ->when($estado === 'depositados', fn($q) => $q->whereNotNull('m.id_asiento_deposito'))
+            ->orderByRaw('COALESCE(m.fecha_pago_cheque, o.fecha_cobro)')
+            ->get([
+                'm.id_orden_medio', 'm.id_forma_pago', 'fp.tipo_pago', 'm.referencia', 'm.banco_emisor', 'm.fecha_pago_cheque',
+                'm.importe', 'm.id_cuenta_deposito', 'cd.nombre_cuenta as nombre_cuenta_deposito', 'm.fecha_deposito',
+                'o.id_orden_cobranza', 'o.id_razon', 'o.numero', 'o.fecha_cobro', 'c.razon_social as cliente', 'c.cuit',
+            ])
+            ->map(function ($r) {
+                $r->numero_formateado = $this->numeroFormateado($r->numero);
+                return $r;
+            })
+            ->all();
+    }
+
+    /**
+     * Deposita un cheque / eCheq en una cuenta propia: Banco (D) contra Valores a depositar (H), con
+     * la fecha de depósito. La cuenta tiene que ser de la razón de la orden: si no, corta.
+     */
+    public function depositarValor($idMedio, $idCuenta, $fecha): TesIngOrdenMedioEntity
+    {
+        return DB::transaction(function () use ($idMedio, $idCuenta, $fecha) {
+            $m = TesIngOrdenMedioEntity::lockForUpdate()->findOrFail($idMedio);
+            if (!$this->esValor($m->toArray())) throw new Exception('Sólo se depositan cheques y eCheq.');
+            if ($m->id_asiento_deposito) throw new Exception("El cheque {$m->referencia} ya está depositado.");
+
+            $orden = TesIngOrdenCobranzaEntity::lockForUpdate()->findOrFail($m->id_orden_cobranza);
+            if (!in_array($orden->id_estado, self::ESTADOS_EFECTIVOS)) throw new Exception('La orden del cheque no está confirmada (o fue anulada).');
+            if (empty($fecha)) throw new Exception('Falta la fecha de depósito.');
+            if (Carbon::parse($fecha)->lt(Carbon::parse($orden->fecha_cobro))) throw new Exception('La fecha de depósito no puede ser anterior a la de cobro.');
+
+            $cuenta = DB::table('tb_tes_cuentas_bancarias')->where('id_cuenta_bancaria', $idCuenta)->first();
+            if (!$cuenta || !$cuenta->activo) throw new Exception('Cuenta bancaria inexistente o inactiva.');
+            if (empty($orden->id_razon) || (int) $cuenta->id_razon !== (int) $orden->id_razon) {
+                throw new Exception("La cuenta {$cuenta->nombre_cuenta} es de otra razón social que la orden del cheque.");
+            }
+
+            $cliente = TesIngClienteEntity::find($orden->id_cliente);
+            $asiento = $this->asientos->crearAsientoDepositoValor([
+                'id_orden_medio' => $m->id_orden_medio,
+                'id_razon' => $orden->id_razon,
+                'id_cuenta_bancaria' => $cuenta->id_cuenta_bancaria,
+                'nombre_cuenta' => $cuenta->nombre_cuenta,
+                'importe' => (float) $m->importe,
+                'descripcion' => (self::FORMAS_ADMITIDAS[$m->id_forma_pago] ?? '') . " {$m->referencia} {$m->banco_emisor} - {$this->numeroFormateado($orden->numero)} - {$cliente->razon_social}",
+                'fecha' => Carbon::parse($fecha)->toDateString(),
+            ], $this->periodoAbierto($fecha, $orden->id_razon));
+
+            $m->id_cuenta_deposito = $cuenta->id_cuenta_bancaria;
+            $m->fecha_deposito = Carbon::parse($fecha)->toDateString();
+            $m->id_asiento_deposito = $asiento->id_asiento_contable;
+            $m->cod_usuario_deposita = $this->user->cod_usuario;
+            $m->fecha_registra_deposito = $this->fechaActual;
+            $m->save();
+
+            return $m->fresh();
+        });
+    }
+
+    /** Deshace un depósito con contraasiento (fecha de hoy); el cheque vuelve a cartera. */
+    public function anularDepositoValor($idMedio): TesIngOrdenMedioEntity
+    {
+        return DB::transaction(function () use ($idMedio) {
+            $m = TesIngOrdenMedioEntity::lockForUpdate()->findOrFail($idMedio);
+            if (!$m->id_asiento_deposito) throw new Exception('El cheque no está depositado.');
+            $orden = TesIngOrdenCobranzaEntity::findOrFail($m->id_orden_cobranza);
+
+            $hoy = $this->fechaActual->toDateString();
+            $this->asientos->contraasientoCompleto(
+                $m->id_asiento_deposito,
+                "ANULACION DEPOSITO {$m->referencia}",
+                $this->periodoAbierto($hoy, $orden->id_razon),
+                $hoy
+            );
+
+            $m->id_cuenta_deposito = null;
+            $m->fecha_deposito = null;
+            $m->id_asiento_deposito = null;
+            $m->cod_usuario_deposita = null;
+            $m->fecha_registra_deposito = null;
+            $m->save();
+
+            return $m->fresh();
+        });
     }
 
     private function tieneCuenta($idRazon, string $tipo): bool

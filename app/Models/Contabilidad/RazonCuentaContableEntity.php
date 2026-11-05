@@ -27,6 +27,7 @@ class RazonCuentaContableEntity extends Model
     const TIPO_VENTA_IVA = 'VENTA_IVA';
     const TIPO_VENTA_RET_GANANCIAS = 'VENTA_RET_GANANCIAS';
     const TIPO_VENTA_ANTICIPO = 'VENTA_ANTICIPO';
+    const TIPO_VENTA_VALORES_DEP = 'VENTA_VALORES_DEP'; // cheques / eCheq recibidos sin depositar (columna varchar 20)
 
     protected $fillable = [
         'id_razon',

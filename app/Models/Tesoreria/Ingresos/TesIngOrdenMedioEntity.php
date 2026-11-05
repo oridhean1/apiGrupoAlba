@@ -15,6 +15,13 @@ class TesIngOrdenMedioEntity extends Model
         'id_forma_pago',
         'id_cuenta_bancaria',
         'referencia',
+        'banco_emisor',
+        'fecha_pago_cheque',
         'importe',
+        'id_cuenta_deposito',
+        'fecha_deposito',
+        'id_asiento_deposito',
+        'cod_usuario_deposita',
+        'fecha_registra_deposito',
     ];
 }

@@ -445,6 +445,11 @@ class AsientoContableRepository
 
         $lineas = [];
         foreach ($o['medios'] as $m) {
+            if (!empty($m['es_valor'])) {
+                // cheque / eCheq: Valores a depositar hasta que se deposite (crearAsientoDepositoValor)
+                $lineas[] = [$this->obtenerCuentaVentaByRazon($o['id_razon'], RazonCuentaContableEntity::TIPO_VENTA_VALORES_DEP), $m['importe'], 0, "Cobro {$m['descripcion']}", null];
+                continue;
+            }
             $banco = $this->obtenerCuentaContableByCuentaBancaria($m['id_cuenta_bancaria']);
             if (!$banco || empty($banco->id_detalle_plan)) {
                 throw new Exception("La cuenta bancaria {$m['descripcion']} no tiene cuenta contable de BANCO. Por favor contacte con Contabilidad.");
@@ -493,6 +498,59 @@ class AsientoContableRepository
                 'id_detalle_plan' => $cuenta,
             ]);
         }
+
+        return $asiento;
+    }
+
+    /**
+     * Depósito de un cheque / eCheq recibido (circuito de ingresos, README 10.2):
+     * Banco (D) contra Valores a depositar (H), con la fecha de depósito.
+     *
+     * $d: id_orden_medio, id_razon, id_cuenta_bancaria, nombre_cuenta, importe, descripcion, fecha.
+     */
+    public function crearAsientoDepositoValor(array $d, $idPeriodoContable)
+    {
+        $this->validarPeriodoContable($idPeriodoContable, 'el asiento del depósito');
+
+        $banco = $this->obtenerCuentaContableByCuentaBancaria($d['id_cuenta_bancaria']);
+        if (!$banco || empty($banco->id_detalle_plan)) {
+            throw new Exception("La cuenta bancaria {$d['nombre_cuenta']} no tiene cuenta contable de BANCO. Por favor contacte con Contabilidad.");
+        }
+        $valores = $this->obtenerCuentaVentaByRazon($d['id_razon'], RazonCuentaContableEntity::TIPO_VENTA_VALORES_DEP);
+        $importe = round((float) $d['importe'], 2);
+        if ($importe <= 0) {
+            throw new Exception('El importe del depósito tiene que ser mayor a cero.');
+        }
+
+        $asiento = $this->findByCrearAsiento(
+            1,
+            'DEPOSITO_VALORES',
+            "DEPOSITO - {$d['descripcion']} - FECHA: {$d['fecha']}",
+            $this->obtenerSiguienteNumeroAsiento(),
+            $idPeriodoContable,
+            $d['id_orden_medio'],
+            'ACTIVO',
+            $d['id_razon']
+        );
+        $asiento->fecha_asiento = $d['fecha'];
+        $asiento->save();
+
+        $this->findByCrearDetalleAsiento([
+            'id_asiento_contable' => $asiento->id_asiento_contable,
+            'id_cuenta_bancaria_cuenta_contable' => $banco->id_banco_cuenta_contable,
+            'monto_debe' => $importe,
+            'monto_haber' => 0,
+            'observaciones' => "Deposito en {$d['nombre_cuenta']}",
+            'id_detalle_plan' => $banco->id_detalle_plan,
+        ]);
+        $this->findByCrearDetalleAsiento([
+            'id_asiento_contable' => $asiento->id_asiento_contable,
+            'id_cuenta_bancaria_cuenta_contable' => null,
+            'monto_debe' => 0,
+            'monto_haber' => $importe,
+            'observaciones' => 'Valores a depositar',
+            'id_detalle_plan' => $valores,
+        ]);
 
         return $asiento;
     }

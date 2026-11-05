@@ -1232,6 +1232,9 @@ Route::group(
         Route::post('ingresos/ordenes/{id}/confirmar', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'postConfirmar']);  // Saldos + asiento
         Route::post('ingresos/ordenes/{id}/anular', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'postAnular']);  // Contraasiento + devuelve saldos
         Route::delete('ingresos/ordenes/{id}', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'deleteBorrador']);
+        Route::get('ingresos/valores', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'getValores']);  // Cheques / eCheq en cartera
+        Route::post('ingresos/valores/{id}/depositar', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'postDepositarValor']);  // Banco contra Valores a depositar
+        Route::post('ingresos/valores/{id}/anular-deposito', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'postAnularDepositoValor']);
         Route::get('imputacion-fifo-opa/{id}', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getImputacionFifo']);  // Que facturas cubrio lo pagado
         Route::get('estado-pago-factura/{id}', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getEstadoPagoFactura']);  // Estado de pago real de una factura
         Route::post('anular-opa', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getAnularOpa']);  // Anula la OP sin reemplazarla; libera sus facturas

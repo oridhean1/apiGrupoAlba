@@ -123,6 +123,29 @@ class TesIngOrdenCobranzaController extends Controller
         }, 'eliminar borrador de orden de cobranza');
     }
 
+    /** Cheques / eCheq recibidos. estado: pendientes (default) | depositados | todos. */
+    public function getValores(Request $request, TesIngOrdenCobranzaRepository $repo)
+    {
+        return response()->json($repo->valores($request->only(['id_razon', 'estado'])));
+    }
+
+    public function postDepositarValor($id, Request $request, TesIngOrdenCobranzaRepository $repo)
+    {
+        $request->validate(['id_cuenta_bancaria' => 'required|integer', 'fecha_deposito' => 'required|date']);
+        return $this->ejecutar(fn() => response()->json([
+            'message' => 'Valor depositado',
+            'data' => $repo->depositarValor($id, $request->input('id_cuenta_bancaria'), $request->input('fecha_deposito')),
+        ]), 'depositar el valor');
+    }
+
+    public function postAnularDepositoValor($id, TesIngOrdenCobranzaRepository $repo)
+    {
+        return $this->ejecutar(fn() => response()->json([
+            'message' => 'Depósito anulado: el valor volvió a cartera',
+            'data' => $repo->anularDepositoValor($id),
+        ]), 'anular el depósito');
+    }
+
     private function ejecutar(callable $fn, string $contexto)
     {
         try {
