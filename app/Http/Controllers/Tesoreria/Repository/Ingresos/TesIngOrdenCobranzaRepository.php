@@ -113,7 +113,7 @@ class TesIngOrdenCobranzaRepository
             ->limit(500)
             ->get([
                 'o.id_orden_cobranza', 'o.numero', 'o.fecha_cobro', 'o.id_estado', 'e.descripcion as estado', 'e.name_class',
-                'o.saldo_anticipo', 'o.id_razon', 'r.razon_social as razon', 'cl.razon_social as cliente', 'cl.cuit',
+                'o.saldo_anticipo', 'o.id_razon', 'o.id_cliente', 'r.razon_social as razon', 'cl.razon_social as cliente', 'cl.cuit',
                 DB::raw('(SELECT COALESCE(SUM(importe),0) FROM tb_tes_ing_orden_medio m WHERE m.id_orden_cobranza = o.id_orden_cobranza) AS importe_acreditado'),
                 DB::raw('(SELECT COALESCE(SUM(importe),0) FROM tb_tes_ing_imputacion i WHERE i.id_orden_cobranza = o.id_orden_cobranza AND i.anulado = 0) AS importe_aplicado'),
             ]);
