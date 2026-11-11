@@ -63,6 +63,10 @@
             @if (!empty($cliente->condicion_iva))
                 <tr><td class="bold">Condición IVA</td><td colspan="3">{{ $cliente->condicion_iva }}</td></tr>
             @endif
+            {{-- Detalle libre del cobro (p. ej. "Prestación Junio"): se carga en Observaciones de la orden --}}
+            @if (!empty($observaciones))
+                <tr><td class="bold">Detalle</td><td colspan="3" class="oscuro bold">{{ $observaciones }}</td></tr>
+            @endif
         </table>
     </div>
 
@@ -111,9 +115,6 @@
         @endif
     </table>
 
-    @if (!empty($observaciones))
-        <div class="card"><b>Observaciones:</b> {{ $observaciones }}</div>
-    @endif
     @if ($anulada)
         <div class="card rojo"><b>Anulado</b> el {{ $fecha_anula }}{{ $motivo_anulacion ? ': ' . $motivo_anulacion : '' }}</div>
     @endif
