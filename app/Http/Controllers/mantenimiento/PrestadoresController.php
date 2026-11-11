@@ -15,29 +15,38 @@ use Maatwebsite\Excel\Facades\Excel;
 
 class PrestadoresController extends Controller
 {
+    /**
+     * Query de "Consultar Prestadores" compartida por la grilla paginada y el Excel.
+     * Cada filtro se aplica solo si viene cargado (las fechas filtran por fecha_alta).
+     */
+    private function buildQueryConsultarPrestadores(Request $request)
+    {
+        $query = PrestadorEntity::with(["tipoPrestador", "tipoImpuesto", "tipoIva", "localidad", "datosBancarios", "usuario"]);
+
+        if (!empty($request->desde)) {
+            $query->whereDate('fecha_alta', '>=', $request->desde);
+        }
+        if (!empty($request->hasta)) {
+            $query->whereDate('fecha_alta', '<=', $request->hasta);
+        }
+        if (!empty($request->prestador)) {
+            $query->where("cod_tipo_prestador", $request->prestador);
+        }
+        if (!empty($request->search)) {
+            $query->where(function ($q) use ($request) {
+                $q->where("cuit", 'LIKE', $request->search . '%')
+                  ->orWhere('razon_social', 'LIKE', '%' . $request->search . '%')
+                  ->orWhere('nombre_fantasia', 'LIKE', '%' . $request->search . '%');
+            });
+        }
+
+        return $query->orderByDesc("cod_prestador");
+    }
+
     public function exportarExcelPrestadores(Request $request)
     {
         try {
-            $query = PrestadorEntity::with(["tipoPrestador", "tipoImpuesto", "tipoIva", "localidad", "datosBancarios", "usuario"]);
-
-            if (!empty($request->search) && empty($request->prestador)) {
-                $query->where(function ($q) use ($request) {
-                    $q->where("cuit", 'LIKE', $request->search . '%')
-                      ->orWhere('razon_social', 'LIKE', '%' . $request->search . '%')
-                      ->orWhere('nombre_fantasia', 'LIKE', '%' . $request->search . '%');
-                });
-            } else if (empty($request->search) && !empty($request->prestador)) {
-                $query->where("cod_tipo_prestador", $request->prestador);
-            } else if (!empty($request->search) && !empty($request->prestador)) {
-                $query->where("cod_tipo_prestador", $request->prestador)
-                      ->where(function ($q) use ($request) {
-                          $q->where("cuit", 'LIKE', $request->search . '%')
-                            ->orWhere('razon_social', 'LIKE', '%' . $request->search . '%')
-                            ->orWhere('nombre_fantasia', 'LIKE', '%' . $request->search . '%');
-                      });
-            }
-
-            $dataLista = $query->orderByDesc("cod_prestador")->get();
+            $dataLista = $this->buildQueryConsultarPrestadores($request)->get();
 
             $filename = 'listado_prestadores_' . date('Y-m-d_H-i-s') . '.xlsx';
 
@@ -56,6 +65,16 @@ class PrestadoresController extends Controller
     {
         try {
             $dataLista = [];
+
+            // Modo paginado (front ALBA): aplica todos los filtros, incluidas las fechas.
+            // Sin "page" se mantiene la respuesta legacy (array) que consume frontOsv.
+            if ($request->filled('page')) {
+                $perPage = (int) ($request->per_page ?: 10);
+                return response()->json(
+                    $this->buildQueryConsultarPrestadores($request)
+                        ->paginate($perPage, ['*'], 'page', (int) $request->page)
+                );
+            }
 
             if (!is_null($request->search) && is_null($request->prestador)) {
                 $dataLista = PrestadorEntity::with(["tipoPrestador", "tipoImpuesto", "tipoIva", "localidad", "datosBancarios", "usuario"])

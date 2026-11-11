@@ -50,6 +50,32 @@ class PrestadoresMedicosController extends Controller
     {
         $dtListaData = [];
 
+        // Modo paginado (front ALBA): filtra por fecha_alta y matrícula/apellidos y nombres.
+        // Sin "page" se mantiene la respuesta legacy (array completo) que consume frontOsv.
+        if ($request->filled('page')) {
+            $query = PrestadorMedicosEntity::with(["tipoMatricula", "especialidad", "prestador"]);
+
+            if (!empty($request->desde)) {
+                $query->whereDate('fecha_alta', '>=', $request->desde);
+            }
+            if (!empty($request->hasta)) {
+                $query->whereDate('fecha_alta', '<=', $request->hasta);
+            }
+            if (!empty($request->search)) {
+                $query->where(function ($q) use ($request) {
+                    $q->where('numero_matricula', 'LIKE', $request->search . '%')
+                      ->orWhere('apellidos_nombres', 'LIKE', '%' . $request->search . '%');
+                });
+            }
+
+            $perPage = (int) ($request->per_page ?: 10);
+            return response()->json(
+                $query->orderByDesc('cod_profesional')
+                    ->paginate($perPage, ['*'], 'page', (int) $request->page),
+                200
+            );
+        }
+
         $dtListaData = PrestadorMedicosEntity::with(["tipoMatricula", "especialidad", "prestador"])
             ->orderByDesc('cod_profesional')
             ->get();
