@@ -21,6 +21,14 @@ class RazonCuentaContableEntity extends Model
     const TIPO_PRESTADOR = 'PRESTADOR';
     const TIPO_PROVEEDOR = 'PROVEEDOR';
 
+    // Circuito de ingresos (R-00000630): cuentas de venta por razón social.
+    const TIPO_VENTA_DEUDOR = 'VENTA_DEUDOR';
+    const TIPO_VENTA_INGRESO = 'VENTA_INGRESO';
+    const TIPO_VENTA_IVA = 'VENTA_IVA';
+    const TIPO_VENTA_RET_GANANCIAS = 'VENTA_RET_GANANCIAS';
+    const TIPO_VENTA_ANTICIPO = 'VENTA_ANTICIPO';
+    const TIPO_VENTA_VALORES_DEP = 'VENTA_VALORES_DEP'; // cheques / eCheq recibidos sin depositar (columna varchar 20)
+
     protected $fillable = [
         'id_razon',
         'tipo_contraparte',

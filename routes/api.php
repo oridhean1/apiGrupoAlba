@@ -1212,6 +1212,29 @@ Route::group(
         Route::get('anticipos-con-saldo', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getAnticiposConSaldo']);  // Saldo a favor de un beneficiario
         Route::post('anticipos', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getCrearAnticipo']);  // Anticipo: OP sin facturas
         Route::post('anticipos/aplicar', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getAplicarAnticipo']);  // Aplica saldo a facturas
+
+        // Circuito de ingresos (R-00000630)
+        Route::post('ingresos/comprobantes/previsualizar', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngComprobantesController::class, 'postPrevisualizar']);  // Lee el export de ARCA, no graba
+        Route::post('ingresos/comprobantes/confirmar', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngComprobantesController::class, 'postConfirmar']);  // Graba comprobantes, NC y asientos
+        Route::post('ingresos/notas-credito/aplicar', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngComprobantesController::class, 'postAplicarSaldoNc']);  // Saldo a favor de NC → otra factura
+        Route::delete('ingresos/notas-credito/aplicaciones/{id}', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngComprobantesController::class, 'deleteAplicacionSaldoNc']);
+        Route::get('ingresos/clientes', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'getClientes']);  // Combo de clientes activos
+        Route::get('ingresos/clientes-abm', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngClientesController::class, 'getListar']);
+        Route::post('ingresos/clientes', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngClientesController::class, 'postGuardar']);  // Alta o edición
+        Route::get('ingresos/obras-sociales', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngClientesController::class, 'getObrasSociales']);  // Padrón SSS para vincular
+        Route::get('ingresos/cuenta-corriente', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngClientesController::class, 'getCuentaCorriente']);
+        Route::get('ingresos/facturas-pendientes', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'getFacturasPendientes']);  // FC/ND con saldo, FIFO
+        Route::get('ingresos/anticipos-disponibles', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'getAnticiposDisponibles']);
+        Route::get('ingresos/ordenes', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'getListar']);
+        Route::get('ingresos/ordenes/{id}/recibo', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'getRecibo']);  // PDF
+        Route::get('ingresos/ordenes/{id}', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'getDetalle']);
+        Route::post('ingresos/ordenes', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'postGuardar']);  // Crea o reemplaza el borrador
+        Route::post('ingresos/ordenes/{id}/confirmar', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'postConfirmar']);  // Saldos + asiento
+        Route::post('ingresos/ordenes/{id}/anular', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'postAnular']);  // Contraasiento + devuelve saldos
+        Route::delete('ingresos/ordenes/{id}', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'deleteBorrador']);
+        Route::get('ingresos/valores', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'getValores']);  // Cheques / eCheq en cartera
+        Route::post('ingresos/valores/{id}/depositar', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'postDepositarValor']);  // Banco contra Valores a depositar
+        Route::post('ingresos/valores/{id}/anular-deposito', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'postAnularDepositoValor']);
         Route::get('imputacion-fifo-opa/{id}', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getImputacionFifo']);  // Que facturas cubrio lo pagado
         Route::get('estado-pago-factura/{id}', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getEstadoPagoFactura']);  // Estado de pago real de una factura
         Route::post('anular-opa', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'getAnularOpa']);  // Anula la OP sin reemplazarla; libera sus facturas

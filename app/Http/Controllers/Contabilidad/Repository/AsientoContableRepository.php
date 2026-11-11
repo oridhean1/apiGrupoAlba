@@ -337,6 +337,268 @@ class AsientoContableRepository
         return $relacion->id_detalle_plan;
     }
 
+    /**
+     * Cuenta de venta de la razón (`RazonCuentaContableEntity::TIPO_VENTA_*`). Sin mapeo corta:
+     * un asiento de venta sin cuenta no se arma "como se pueda".
+     */
+    public function obtenerCuentaVentaByRazon($idRazon, string $tipo)
+    {
+        if (empty($idRazon)) {
+            throw new Exception("Falta la razón social para determinar la cuenta contable {$tipo}.");
+        }
+
+        $relacion = RazonCuentaContableEntity::where('id_razon', $idRazon)
+            ->where('tipo_contraparte', $tipo)
+            ->where('vigente', 1)
+            ->first();
+
+        if (!$relacion || empty($relacion->id_detalle_plan)) {
+            throw new Exception("La razón social no tiene configurada la cuenta contable {$tipo}. Por favor contacte con Contabilidad.");
+        }
+
+        return $relacion->id_detalle_plan;
+    }
+
+    /**
+     * Asiento de un comprobante de venta (circuito de ingresos, README 10.1).
+     *
+     * FC / ND: Deudores (D) total contra Ingresos (H) neto + no gravado + exento e IVA débito (H).
+     * NC: el mismo asiento invertido. Fecha del asiento = fecha de emisión.
+     *
+     * $c: id_comprobante, id_razon, clase (FC|ND|NC), descripcion, fecha_emision, cliente, cuit,
+     *     importe_ingreso, importe_iva, importe_total.
+     */
+    public function crearAsientoComprobanteVenta(array $c, $idPeriodoContable)
+    {
+        $this->validarPeriodoContable($idPeriodoContable, 'el asiento del comprobante de venta');
+
+        $ingreso = round((float) $c['importe_ingreso'], 2);
+        $iva = round((float) $c['importe_iva'], 2);
+        $total = round((float) $c['importe_total'], 2);
+
+        // Si no cuadra, falta un componente que el asiento no sabe imputar (p. ej. otros tributos).
+        if (abs($ingreso + $iva - $total) > 0.009) {
+            throw new Exception("El comprobante {$c['descripcion']} no cuadra: ingreso {$ingreso} + IVA {$iva} ≠ total {$total}.");
+        }
+
+        $cuentaDeudor = $this->obtenerCuentaVentaByRazon($c['id_razon'], RazonCuentaContableEntity::TIPO_VENTA_DEUDOR);
+        $cuentaIngreso = $this->obtenerCuentaVentaByRazon($c['id_razon'], RazonCuentaContableEntity::TIPO_VENTA_INGRESO);
+        $cuentaIva = $iva > 0
+            ? $this->obtenerCuentaVentaByRazon($c['id_razon'], RazonCuentaContableEntity::TIPO_VENTA_IVA)
+            : null;
+
+        $esNc = $c['clase'] === 'NC';
+
+        $asiento = $this->findByCrearAsiento(
+            1,
+            $esNc ? 'NOTA_CREDITO_VENTA' : 'FACTURA_VENTA',
+            "VENTA - {$c['descripcion']} - {$c['cuit']} - {$c['cliente']} - FECHA: {$c['fecha_emision']}",
+            $this->obtenerSiguienteNumeroAsiento(),
+            $idPeriodoContable,
+            $c['id_comprobante'],
+            'ACTIVO',
+            $c['id_razon']
+        );
+        $asiento->fecha_asiento = $c['fecha_emision'];
+        $asiento->save();
+
+        $lineas = [
+            [$cuentaDeudor, $total, 'Deudores por ventas'],
+            [$cuentaIngreso, -$ingreso, 'Ingresos por servicios'],
+        ];
+        if ($cuentaIva) {
+            $lineas[] = [$cuentaIva, -$iva, 'IVA debito fiscal'];
+        }
+
+        foreach ($lineas as [$cuenta, $importe, $obs]) {
+            if ($importe == 0) {
+                continue;
+            }
+            // positivo = debe en una FC; la NC da vuelta los lados
+            $debe = $esNc ? $importe < 0 : $importe > 0;
+            $this->findByCrearDetalleAsiento([
+                'id_asiento_contable' => $asiento->id_asiento_contable,
+                'monto_debe' => $debe ? abs($importe) : 0,
+                'monto_haber' => $debe ? 0 : abs($importe),
+                'observaciones' => $obs,
+                'id_detalle_plan' => $cuenta,
+            ]);
+        }
+
+        return $asiento;
+    }
+
+    /**
+     * Asiento de una orden de cobranza confirmada (circuito de ingresos, README 10.2).
+     *
+     * Debe: Banco de cada renglón, Retención Ganancias, Anticipos aplicados.
+     * Haber: Deudores por lo aplicado a facturas, Anticipos por el excedente.
+     * Fecha del asiento = fecha de cobro.
+     *
+     * $o: id_orden_cobranza, id_razon, numero, cliente, cuit, fecha_cobro,
+     *     medios [[id_cuenta_bancaria, importe, descripcion]], retencion, anticipos_aplicados,
+     *     aplicado, excedente.
+     */
+    public function crearAsientoCobranza(array $o, $idPeriodoContable)
+    {
+        $this->validarPeriodoContable($idPeriodoContable, 'el asiento de la orden de cobranza');
+
+        $lineas = [];
+        foreach ($o['medios'] as $m) {
+            if (!empty($m['es_valor'])) {
+                // cheque / eCheq: Valores a depositar hasta que se deposite (crearAsientoDepositoValor)
+                $lineas[] = [$this->obtenerCuentaVentaByRazon($o['id_razon'], RazonCuentaContableEntity::TIPO_VENTA_VALORES_DEP), $m['importe'], 0, "Cobro {$m['descripcion']}", null];
+                continue;
+            }
+            $banco = $this->obtenerCuentaContableByCuentaBancaria($m['id_cuenta_bancaria']);
+            if (!$banco || empty($banco->id_detalle_plan)) {
+                throw new Exception("La cuenta bancaria {$m['descripcion']} no tiene cuenta contable de BANCO. Por favor contacte con Contabilidad.");
+            }
+            $lineas[] = [$banco->id_detalle_plan, $m['importe'], 0, "Cobro {$m['descripcion']}", $banco->id_banco_cuenta_contable];
+        }
+        if ($o['retencion'] > 0) {
+            $lineas[] = [$this->obtenerCuentaVentaByRazon($o['id_razon'], RazonCuentaContableEntity::TIPO_VENTA_RET_GANANCIAS), $o['retencion'], 0, 'Retencion Ganancias sufrida', null];
+        }
+        if ($o['anticipos_aplicados'] > 0) {
+            $lineas[] = [$this->obtenerCuentaVentaByRazon($o['id_razon'], RazonCuentaContableEntity::TIPO_VENTA_ANTICIPO), $o['anticipos_aplicados'], 0, 'Anticipo de cliente aplicado', null];
+        }
+        if ($o['aplicado'] > 0) {
+            $lineas[] = [$this->obtenerCuentaVentaByRazon($o['id_razon'], RazonCuentaContableEntity::TIPO_VENTA_DEUDOR), 0, $o['aplicado'], 'Deudores por ventas', null];
+        }
+        if ($o['excedente'] > 0) {
+            $lineas[] = [$this->obtenerCuentaVentaByRazon($o['id_razon'], RazonCuentaContableEntity::TIPO_VENTA_ANTICIPO), 0, $o['excedente'], 'Anticipo de cliente', null];
+        }
+
+        $debe = round(array_sum(array_column($lineas, 1)), 2);
+        $haber = round(array_sum(array_column($lineas, 2)), 2);
+        if ($debe <= 0 || abs($debe - $haber) > 0.009) {
+            throw new Exception("El asiento de la cobranza no balancea (debe {$debe}, haber {$haber}).");
+        }
+
+        $asiento = $this->findByCrearAsiento(
+            1,
+            'COBRANZA',
+            "COBRANZA - OC-" . str_pad($o['numero'], 6, '0', STR_PAD_LEFT) . " - {$o['cuit']} - {$o['cliente']} - FECHA: {$o['fecha_cobro']}",
+            $this->obtenerSiguienteNumeroAsiento(),
+            $idPeriodoContable,
+            $o['id_orden_cobranza'],
+            'ACTIVO',
+            $o['id_razon']
+        );
+        $asiento->fecha_asiento = $o['fecha_cobro'];
+        $asiento->save();
+
+        foreach ($lineas as [$cuenta, $d, $h, $obs, $idBancoCuenta]) {
+            $this->findByCrearDetalleAsiento([
+                'id_asiento_contable' => $asiento->id_asiento_contable,
+                'id_cuenta_bancaria_cuenta_contable' => $idBancoCuenta,
+                'monto_debe' => $d,
+                'monto_haber' => $h,
+                'observaciones' => $obs,
+                'id_detalle_plan' => $cuenta,
+            ]);
+        }
+
+        return $asiento;
+    }
+
+    /**
+     * Depósito de un cheque / eCheq recibido (circuito de ingresos, README 10.2):
+     * Banco (D) contra Valores a depositar (H), con la fecha de depósito.
+     *
+     * $d: id_orden_medio, id_razon, id_cuenta_bancaria, nombre_cuenta, importe, descripcion, fecha.
+     */
+    public function crearAsientoDepositoValor(array $d, $idPeriodoContable)
+    {
+        $this->validarPeriodoContable($idPeriodoContable, 'el asiento del depósito');
+
+        $banco = $this->obtenerCuentaContableByCuentaBancaria($d['id_cuenta_bancaria']);
+        if (!$banco || empty($banco->id_detalle_plan)) {
+            throw new Exception("La cuenta bancaria {$d['nombre_cuenta']} no tiene cuenta contable de BANCO. Por favor contacte con Contabilidad.");
+        }
+        $valores = $this->obtenerCuentaVentaByRazon($d['id_razon'], RazonCuentaContableEntity::TIPO_VENTA_VALORES_DEP);
+        $importe = round((float) $d['importe'], 2);
+        if ($importe <= 0) {
+            throw new Exception('El importe del depósito tiene que ser mayor a cero.');
+        }
+
+        $asiento = $this->findByCrearAsiento(
+            1,
+            'DEPOSITO_VALORES',
+            "DEPOSITO - {$d['descripcion']} - FECHA: {$d['fecha']}",
+            $this->obtenerSiguienteNumeroAsiento(),
+            $idPeriodoContable,
+            $d['id_orden_medio'],
+            'ACTIVO',
+            $d['id_razon']
+        );
+        $asiento->fecha_asiento = $d['fecha'];
+        $asiento->save();
+
+        $this->findByCrearDetalleAsiento([
+            'id_asiento_contable' => $asiento->id_asiento_contable,
+            'id_cuenta_bancaria_cuenta_contable' => $banco->id_banco_cuenta_contable,
+            'monto_debe' => $importe,
+            'monto_haber' => 0,
+            'observaciones' => "Deposito en {$d['nombre_cuenta']}",
+            'id_detalle_plan' => $banco->id_detalle_plan,
+        ]);
+        $this->findByCrearDetalleAsiento([
+            'id_asiento_contable' => $asiento->id_asiento_contable,
+            'id_cuenta_bancaria_cuenta_contable' => null,
+            'monto_debe' => 0,
+            'monto_haber' => $importe,
+            'observaciones' => 'Valores a depositar',
+            'id_detalle_plan' => $valores,
+        ]);
+
+        return $asiento;
+    }
+
+    /**
+     * Contraasiento completo (todas las líneas invertidas) en el período indicado; el original
+     * queda marcado CONTRAASIENTO. Mismo criterio que generarContraasiento() de los historiales,
+     * sin tabla de historial: el vínculo lo guarda quien lo llama.
+     */
+    public function contraasientoCompleto($idAsientoOriginal, string $motivo, $idPeriodoContable, string $fecha)
+    {
+        $original = AsientosContablesEntity::with('detalle')->find($idAsientoOriginal);
+        if (!$original) {
+            throw new Exception("No se encontró el asiento contable original (ID: {$idAsientoOriginal}).");
+        }
+        if ($original->vigente !== 'ACTIVO') {
+            throw new Exception("El asiento {$original->numero} ya no está activo ({$original->vigente}).");
+        }
+
+        $contra = $this->findByCrearAsiento(
+            2,
+            'CONTRAASIENTO - ' . $original->asiento_modelo,
+            'CONTRAASIENTO - ' . $original->asiento_leyenda . ' - ' . $motivo,
+            $this->obtenerSiguienteNumeroAsiento(),
+            $idPeriodoContable,
+            $original->numero,
+            'ACTIVO',
+            $original->id_razon
+        );
+        $contra->fecha_asiento = $fecha;
+        $contra->save();
+
+        foreach ($original->detalle as $d) {
+            $this->findByCrearDetalleAsiento([
+                'id_asiento_contable' => $contra->id_asiento_contable,
+                'id_cuenta_bancaria_cuenta_contable' => $d->id_cuenta_bancaria_cuenta_contable,
+                'monto_debe' => $d->monto_haber,
+                'monto_haber' => $d->monto_debe,
+                'observaciones' => 'CONTRAASIENTO - ' . $d->observaciones,
+                'id_detalle_plan' => $d->id_detalle_plan,
+            ]);
+        }
+
+        $this->findByAnularAsientoContableId($idAsientoOriginal, 'CONTRAASIENTO');
+
+        return $contra;
+    }
+
     //Retenciones
 
     public function verificarRetencionTieneCuentaContable($idRetencion)
