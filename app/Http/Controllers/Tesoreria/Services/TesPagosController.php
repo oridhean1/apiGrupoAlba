@@ -543,6 +543,52 @@ class TesPagosController extends Controller
         }
     }
 
+    /**
+     * Reemplaza el archivo de un comprobante ya guardado, típicamente el de un pago ejecutado
+     * que se adjuntó equivocado. Da de baja el comprobante viejo y crea el nuevo con la misma
+     * boleta y fecha del cronograma. NO pasa por `ejecutarPagosConComprobante()` ni por ningún
+     * asiento: el asiento sale de los datos del pago, no del archivo, así que no hay movimiento
+     * contable ni cambio de saldo. (R-00000665, 2026-11-12)
+     */
+    public function getReemplazarComprobantePago(Request $request, TesPagosRepository $pago, ManejadorDeArchivosUtils $storage)
+    {
+        $archivos = $request->hasFile('archivos') ? $request->file('archivos') : [];
+        if (count($archivos) !== 1) {
+            return response()->json(['message' => 'Adjuntá un solo archivo.'], 422);
+        }
+        $extension = strtolower($archivos[0]->getClientOriginalExtension());
+        if (!in_array($extension, ['jpg', 'jpeg', 'png', 'pdf'], true)) {
+            return response()->json(['message' => 'El comprobante tiene que ser JPG, PNG o PDF.'], 422);
+        }
+
+        [$comprobante, $motivo] = $pago->comprobanteParaReemplazar($request->id_comprobante);
+        if ($motivo) {
+            return response()->json(['message' => $motivo], 422);
+        }
+
+        try {
+            DB::beginTransaction();
+
+            $pagoDb = \App\Models\Tesoreria\TesPagoEntity::find($comprobante->id_pago);
+
+            $pago->findByDeleteComprobantePago($comprobante->id_comprobante);
+
+            // Mismo nombre y carpeta que los comprobantes subidos al confirmar. El archivo se
+            // escribe al final, para que una falla de la base no deje un archivo suelto.
+            $subidos = $storage->findByCargaMasivaArchivos("COMP" . $pagoDb->id_pago . $pagoDb->num_pago, 'tesoreria/comprobantes_pago', $request);
+            $nuevo = $pago->findByCargarComprobantePago($subidos[0]['nombre'], $comprobante->id_pago, $comprobante->id_fecha_probable);
+
+            DB::commit();
+            return response()->json([
+                'message' => 'Se reemplazó el comprobante. El pago y su asiento no cambiaron.',
+                'comprobante' => $nuevo,
+            ]);
+        } catch (\Throwable $th) {
+            DB::rollBack();
+            return response()->json(['message' => $th->getMessage()], 500);
+        }
+    }
+
     public function getVerAdjunto(ManejadorDeArchivosUtils $storageFile, Request $request)
     {
         $path = "tesoreria/comprobantes_pago/";
