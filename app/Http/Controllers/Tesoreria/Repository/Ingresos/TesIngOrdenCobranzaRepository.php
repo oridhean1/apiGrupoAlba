@@ -73,7 +73,7 @@ class TesIngOrdenCobranzaRepository
     /** FC/ND con saldo de la razón y el cliente, de la más vieja a la más nueva (orden FIFO). */
     public function facturasPendientes($idRazon, $idCliente)
     {
-        return DB::table('tb_tes_ing_comprobante as c')
+        $facturas = DB::table('tb_tes_ing_comprobante as c')
             ->join('tb_tes_ing_tipo_comprobante as t', 't.id_tipo_comprobante', '=', 'c.id_tipo_comprobante')
             ->where('c.id_razon', $idRazon)
             ->where('c.id_cliente', $idCliente)
@@ -84,6 +84,33 @@ class TesIngOrdenCobranzaRepository
             ->orderBy('c.id_comprobante')
             ->get(['c.id_comprobante', 't.descripcion as tipo', 't.clase', 'c.punto_venta', 'c.numero', 'c.fecha_emision',
                 'c.periodo_desde', 'c.periodo_hasta', 'c.importe_total', 'c.saldo']);
+
+        return $this->conNotasCredito($facturas, 'id_comprobante');
+    }
+
+    /**
+     * Agrega a cada fila `notas_credito`: las NC imputadas a esa factura (tipo, número, importe).
+     * Es sólo informativo para la orden y el recibo: la NC no forma parte del cobro ni de sus totales.
+     */
+    private function conNotasCredito($filas, string $campoFactura)
+    {
+        $ids = $filas->pluck($campoFactura)->unique()->values()->all();
+        $ncs = empty($ids) ? collect() : DB::table('tb_tes_ing_imputacion as i')
+            ->join('tb_tes_ing_comprobante as nc', 'nc.id_comprobante', '=', 'i.id_comprobante_nc')
+            ->join('tb_tes_ing_tipo_comprobante as t', 't.id_tipo_comprobante', '=', 'nc.id_tipo_comprobante')
+            ->whereIn('i.id_comprobante', $ids)
+            ->whereNotNull('i.id_comprobante_nc')
+            ->where('i.anulado', 0)
+            ->orderBy('nc.fecha_emision')
+            ->orderBy('i.id_imputacion')
+            ->get(['i.id_comprobante', 'i.id_comprobante_nc', 't.descripcion as tipo', 'nc.punto_venta', 'nc.numero',
+                'nc.fecha_emision', 'i.importe'])
+            ->groupBy('id_comprobante');
+
+        return $filas->map(function ($f) use ($ncs, $campoFactura) {
+            $f->notas_credito = $ncs->get($f->{$campoFactura}, collect())->values();
+            return $f;
+        });
     }
 
     /** Órdenes confirmadas con excedente sin aplicar, de la razón y el cliente. */
@@ -141,11 +168,11 @@ class TesIngOrdenCobranzaRepository
                 ->join('tb_tes_ing_orden_cobranza as o', 'o.id_orden_cobranza', '=', 'a.id_orden_anticipo')
                 ->where('a.id_orden_cobranza', $id)
                 ->get(['a.*', 'o.numero', 'o.fecha_cobro', 'o.saldo_anticipo']),
-            'imputaciones' => DB::table('tb_tes_ing_imputacion as i')
+            'imputaciones' => $this->conNotasCredito(DB::table('tb_tes_ing_imputacion as i')
                 ->join('tb_tes_ing_comprobante as c', 'c.id_comprobante', '=', 'i.id_comprobante')
                 ->join('tb_tes_ing_tipo_comprobante as t', 't.id_tipo_comprobante', '=', 'c.id_tipo_comprobante')
                 ->where('i.id_orden_cobranza', $id)
-                ->get(['i.*', 't.descripcion as tipo', 'c.punto_venta', 'c.numero', 'c.fecha_emision', 'c.importe_total', 'c.saldo']),
+                ->get(['i.*', 't.descripcion as tipo', 'c.punto_venta', 'c.numero', 'c.fecha_emision', 'c.importe_total', 'c.saldo']), 'id_comprobante'),
             'totales' => $t,
         ];
     }
