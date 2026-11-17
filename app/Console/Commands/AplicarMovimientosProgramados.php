@@ -16,7 +16,7 @@ use Illuminate\Support\Facades\Mail;
 /**
  * Aplica los traspasos entre Orígenes programados desde Comercial (R-00000352).
  * Corre el día 1 de cada mes a la 1:00 (ver Kernel). Por cada afiliado con un ALTA pendiente
- * cuya fecha ya llegó, pasa caja y origen al nuevo valor en tb_padron_comercial y tb_padron,
+ * cuya fecha ya llegó, pasa caja, origen y fecha de alta (R-00000680) al nuevo valor en tb_padron_comercial y tb_padron,
  * y marca como APLICADO el par BAJA/ALTA. Si algo falla lo marca ERROR y notifica por mail.
  */
 class AplicarMovimientosProgramados extends Command
@@ -68,9 +68,12 @@ class AplicarMovimientosProgramados extends Command
                     throw new \Exception('El origen actual del afiliado no coincide con el origen de baja programado');
                 }
 
+                // R-00000680: la Fecha Alta pasa a ser la vigencia del alta en el nuevo Origen
+                $feAltaAnterior = $actual->fe_alta;
                 $cambios = [
                     'id_comercial_caja' => $alta->id_comercial_caja,
                     'id_comercial_origen' => $alta->id_comercial_origen,
+                    'fe_alta' => Carbon::parse($alta->fecha_vigencia)->format('Y-m-d'),
                 ];
                 if ($comercial) {
                     PadronComercialModelo::where('id', $comercial->id)->update($cambios);
@@ -90,6 +93,7 @@ class AplicarMovimientosProgramados extends Command
                     'antes' => json_encode([
                         'id_comercial_caja' => $baja->id_comercial_caja,
                         'id_comercial_origen' => $baja->id_comercial_origen,
+                        'fe_alta' => $feAltaAnterior,
                     ]),
                     'ahora' => json_encode($cambios),
                     'id_padron' => $alta->dni,

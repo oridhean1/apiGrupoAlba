@@ -989,6 +989,29 @@ class TesPagosRepository
             : null;
     }
 
+    /**
+     * ¿Se puede reemplazar el archivo de este comprobante? Devuelve el comprobante o el motivo por
+     * el que no. Sólo se cambia el archivo: el pago, su débito y su asiento no se tocan, así que no
+     * hay más condiciones que el comprobante esté vivo y su pago no esté anulado. (R-00000665, 2026-11-12)
+     *
+     * @return array{0: ?TestDetalleComprobantesPagoEntity, 1: ?string}
+     */
+    public function comprobanteParaReemplazar($idComprobante): array
+    {
+        $comprobante = TestDetalleComprobantesPagoEntity::find($idComprobante);
+
+        if (is_null($comprobante) || $comprobante->estado != '1') {
+            return [null, 'El comprobante ya no existe. Actualizá la pantalla e intentá de nuevo.'];
+        }
+
+        $pago = TesPagoEntity::find($comprobante->id_pago);
+        if (is_null($pago) || (int) $pago->id_estado_orden_pago === 3) {
+            return [null, 'El pago de este comprobante está anulado.'];
+        }
+
+        return [$comprobante, null];
+    }
+
     public function findByAnularPago($id_pago, $observacion)
     {
         $pago = TesPagoEntity::find($id_pago);
