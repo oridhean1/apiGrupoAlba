@@ -138,7 +138,7 @@ class TesOperacionesManualesController extends Controller
             $data = $operacion->findByListarBetween($request->desde, $request->hasta);
         }
 
-        return response()->json($data);
+        return response()->json($this->soloDeLaRazon($data, $request));
     }
 
     public function getVerAdjunto(TesOperacionesManuelesRepository $pago, ManejadorDeArchivosUtils $storageFile, Request $request)
@@ -149,5 +149,19 @@ class TesOperacionesManualesController extends Controller
         $path .= "{$anioTrabaja}/$data->comprobante";
 
         return $storageFile->findByObtenerArchivo($path);
+    }
+
+    /**
+     * Pantalla Cuentas con razón social elegida arriba (2026-11-18): sólo lo de las cuentas de esa
+     * razón, así no se mezclan las entidades del grupo. Sin `id_razon`, como antes.
+     */
+    private function soloDeLaRazon($data, Request $request)
+    {
+        if (!$request->filled('id_razon')) {
+            return $data;
+        }
+        $ids = \App\Models\Tesoreria\TesCuentasBancariasEntity::where('id_razon', $request->id_razon)
+            ->pluck('id_cuenta_bancaria')->map(fn($i) => (int) $i)->all();
+        return collect($data)->filter(fn($r) => in_array((int) $r->id_cuenta_bancaria, $ids, true))->values();
     }
 }
