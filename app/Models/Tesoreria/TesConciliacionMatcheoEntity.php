@@ -17,6 +17,7 @@ class TesConciliacionMatcheoEntity extends Model
     protected $fillable = [
         'id_extracto_bancario',
         'id_movimiento_interno',
+        'id_pago_parcial', // eCheq emitido a acreditar al confirmar (R-00000689 E4)
         'tipo_origen_interno', // PAGO / TRANSFERENCIA / OPERACION_MANUAL (informativo)
         'score_obtenido',
         'reglas_cumplidas',
@@ -35,6 +36,12 @@ class TesConciliacionMatcheoEntity extends Model
     public function extracto()
     {
         return $this->belongsTo(TesExtractosBancariosEntity::class, 'id_extracto_bancario', 'id_extracto');
+    }
+
+    /** eCheq emitido que se acredita al confirmar esta sugerencia (todavía sin movimiento). */
+    public function abono()
+    {
+        return $this->hasOne(TesPagosParciales::class, 'id_pago_parcial', 'id_pago_parcial');
     }
 
     public function movimiento()

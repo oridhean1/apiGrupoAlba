@@ -55,6 +55,8 @@ class ExtractoBancarioCygnusSheetImport implements ToCollection, WithStartRow
                 try {
                     $detalle = $row[6] ?? null;
                     [$detalleNombre, $detalleCuit] = $this->parseDetalle($detalle);
+                    // Macro informa el CUIT de la contraparte en el concepto ("TRANSF:...-33718968289").
+                    $detalleCuit ??= $this->cuitDeTexto($row[2] ?? null);
                     $bancoFila = $row[1] ?? '-';
                     $idCuentaBancaria = $this->resolverCuentaBancaria($bancoFila);
 
@@ -73,11 +75,20 @@ class ExtractoBancarioCygnusSheetImport implements ToCollection, WithStartRow
                         'detalle_cuit' => $detalleCuit,
                     ]);
 
+                    // Un movimiento se propone para una sola línea del archivo (dos líneas idénticas
+                    // no pueden llevarse el mismo pago).
                     $resultado = $idCuentaBancaria
-                        ? $this->matching->calcularMejorCandidato($extractoTransient)
-                        : ['movimiento' => null, 'score' => 0, 'reglas' => [], 'tipo_origen' => null];
+                        ? $this->matching->calcularMejorCandidato($extractoTransient, $this->movimientosPropuestos, $this->abonosPropuestos)
+                        : ['movimiento' => null, 'abono' => null, 'score' => 0, 'reglas' => [], 'tipo_origen' => null];
 
                     $mov = $resultado['movimiento'];
+                    $abono = $resultado['abono'] ?? null;
+                    if ($mov) {
+                        $this->movimientosPropuestos[] = $mov->id_movimiento;
+                    }
+                    if ($abono) {
+                        $this->abonosPropuestos[] = $abono->id_pago_parcial;
+                    }
 
                     $this->filasPreview[] = [
                         'id_cuenta_bancaria' => $idCuentaBancaria,
@@ -94,16 +105,19 @@ class ExtractoBancarioCygnusSheetImport implements ToCollection, WithStartRow
                         'observaciones' => $this->obs,
                         'score_matching' => $resultado['score'],
                         'id_movimiento_match' => $mov?->id_movimiento,
+                        'id_pago_parcial_match' => $abono?->id_pago_parcial, // eCheq que se acredita al confirmar (E4)
                         'tipo_origen_interno' => $resultado['tipo_origen'],
                         'reglas_cumplidas' => $resultado['reglas'],
                         'ya_importado' => $this->yaImportado($bancoFila, $extractoTransient),
                         // Misma forma que usa el listado normal (matcheos[0].movimiento...) para reusar el front tal cual.
-                        'matcheos' => $mov ? [[
-                            'id_movimiento_interno' => $mov->id_movimiento,
+                        'matcheos' => ($mov || $abono) ? [[
+                            'id_movimiento_interno' => $mov?->id_movimiento,
+                            'id_pago_parcial' => $abono?->id_pago_parcial,
                             'tipo_origen_interno' => $resultado['tipo_origen'],
                             'score_obtenido' => $resultado['score'],
                             'reglas_cumplidas' => $resultado['reglas'],
-                            'movimiento' => $mov->toArray(),
+                            'movimiento' => $mov?->toArray(),
+                            'abono' => $abono?->toArray(),
                         ]] : [],
                     ];
                 } catch (\Exception $e) {
@@ -143,9 +157,30 @@ class ExtractoBancarioCygnusSheetImport implements ToCollection, WithStartRow
         return $coincidencias->count() === 1 ? $coincidencias->first()->id_cuenta_bancaria : null;
     }
 
+    /** @var int[] movimientos ya propuestos a otra línea de este archivo */
+    private $movimientosPropuestos = [];
+    /** @var int[] eCheq a acreditar ya propuestos a otra línea de este archivo */
+    private $abonosPropuestos = [];
+
+    /** Primer CUIT válido (11 dígitos, prefijo de CUIT) que aparezca suelto en el texto. */
+    public function cuitDeTexto($texto): ?string
+    {
+        if (preg_match('/(?<!\d)((?:20|23|24|27|30|33|34)\d{9})(?!\d)/', (string) $texto, $m)) {
+            return $m[1];
+        }
+        return null;
+    }
+
+    /** @var array<string,int> ocurrencias de cada línea dentro de este archivo */
+    private $ocurrencias = [];
+    /** @var array<string,int> líneas iguales ya guardadas en la base (cache por clave) */
+    private $existentes = [];
+
     /**
-     * Detecta si esta fila ya fue importada antes (mismo banco/fecha/importe/concepto para la
-     * misma razón social), para avisar en el preview y no duplicar al reimportar el mismo Excel.
+     * Detecta si esta fila ya fue importada antes. Compara por cantidad: la N-ésima línea igual
+     * del archivo es "ya importada" sólo si en la base hay al menos N iguales. Así dos operaciones
+     * reales idénticas del mismo día no se pierden (R-00000689 P3) y reimportar el mismo Excel
+     * sigue sin duplicar.
      */
     public function yaImportado(string $bancoFila, TesExtractosBancariosEntity $extracto): bool
     {
@@ -153,12 +188,13 @@ class ExtractoBancarioCygnusSheetImport implements ToCollection, WithStartRow
             return false;
         }
 
-        return TesExtractosBancariosEntity::where('id_razon', $this->id_razon)
-            ->where('banco', $bancoFila)
-            ->where('fecha', $extracto->fecha)
-            ->where('concepto', $extracto->concepto)
-            ->whereRaw('ABS(importe - ?) < 0.01', [$extracto->importe])
-            ->exists();
+        $clave = TesExtractosBancariosEntity::claveLinea($this->id_razon, $bancoFila, $extracto->fecha, $extracto->concepto, $extracto->importe);
+        $this->ocurrencias[$clave] = ($this->ocurrencias[$clave] ?? 0) + 1;
+        $this->existentes[$clave] ??= TesExtractosBancariosEntity::contarIguales(
+            $this->id_razon, $bancoFila, $extracto->fecha, $extracto->concepto, $extracto->importe
+        );
+
+        return $this->ocurrencias[$clave] <= $this->existentes[$clave];
     }
 
     /**

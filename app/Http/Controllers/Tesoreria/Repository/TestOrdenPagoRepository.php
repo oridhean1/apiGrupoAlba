@@ -802,8 +802,8 @@ class TestOrdenPagoRepository
      *
      * No es una columna propia de la orden: sale de sus facturas
      * (`tb_tes_orden_pago_detalle` -> `tb_facturacion_datos.id_locatorio`), igual que el filtro
-     * de Carga de eCheq. Un ANTICIPO no tiene facturas imputadas, así que devuelve null y las
-     * validaciones que dependan de esto no se aplican.
+     * de Carga de eCheq. Un ANTICIPO no tiene facturas: vale `tb_tes_orden_pago.id_razon`
+     * (ver `razonesSocialesDeOpa`). Devuelve null sólo si no hay ninguna o hay más de una.
      */
     public function razonSocialDeOpa($idOpa): ?int
     {
@@ -825,8 +825,8 @@ class TestOrdenPagoRepository
      * Que haya más es una anomalía de datos —una sola en todo el sistema al 2026-09-09, la
      * OPA-1102— pero el código no puede resolverla eligiendo una al azar.
      *
-     * Un ANTICIPO no tiene facturas imputadas: devuelve vacío, y las validaciones que dependen
-     * de esto no se aplican.
+     * Un ANTICIPO no tiene facturas imputadas: vale la razón propia de la orden (abajo). Vacío
+     * sólo si tampoco la tiene; quien use esto para validar tiene que cortar en ese caso.
      */
     public function razonesSocialesDeOpa($idOpa): array
     {

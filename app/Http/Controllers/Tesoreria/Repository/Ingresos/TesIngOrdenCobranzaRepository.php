@@ -4,6 +4,8 @@ namespace App\Http\Controllers\Tesoreria\Repository\Ingresos;
 
 use App\Http\Controllers\Contabilidad\Repository\AsientoContableRepository;
 use App\Http\Controllers\Contabilidad\Repository\PeriodosContablesRepository;
+use App\Http\Controllers\Tesoreria\Repository\TesConciliacionMatchingRepository;
+use App\Http\Controllers\Tesoreria\Repository\TesCuentasBancariasRepository;
 use App\Models\Contabilidad\RazonCuentaContableEntity;
 use App\Models\Tesoreria\Ingresos\TesIngAnticipoAplicacionEntity;
 use App\Models\Tesoreria\Ingresos\TesIngClienteEntity;
@@ -369,6 +371,15 @@ class TesIngOrdenCobranzaRepository
             $orden->id_asiento_contable = $asiento->id_asiento_contable;
             $orden->save();
 
+            // Transferencia / depósito acreditan directo: dejan su ingreso en la cuenta (para que la
+            // conciliación los vea). Cheque y eCheq lo dejan recién al depositarse. R-00000689 E2.
+            foreach ($medios as $m) {
+                if (!$this->esValor($m->toArray())) {
+                    $this->moverBanco($m, $m->id_cuenta_bancaria, 'INGRESO', $orden->fecha_cobro,
+                        'COBRANZA ' . $this->numeroFormateado($orden->numero) . ' - ' . $cliente->razon_social);
+                }
+            }
+
             return ['orden' => $orden->fresh(), 'numero_formateado' => $this->numeroFormateado($orden->numero), 'totales' => $t, 'id_asiento_contable' => $asiento->id_asiento_contable];
         });
     }
@@ -399,6 +410,10 @@ class TesIngOrdenCobranzaRepository
                 throw new Exception('Hay valores ya depositados (' . $depositados->implode(', ') . '): anulá primero su depósito.');
             }
 
+            $mediosDirectos = TesIngOrdenMedioEntity::where('id_orden_cobranza', $id)
+                ->whereNotIn('id_forma_pago', self::FORMAS_VALOR)->get();
+            $this->cortarSiConciliado($mediosDirectos->pluck('id_orden_medio')->all(), 'Esta orden de cobranza');
+
             if ($usadaEn->isNotEmpty()) {
                 throw new Exception('El anticipo de esta orden se usó en ' . $usadaEn->map(fn($n) => $this->numeroFormateado($n))->implode(', ') . ': anulá primero esa(s) orden(es).');
             }
@@ -428,6 +443,12 @@ class TesIngOrdenCobranzaRepository
                 $this->periodoAbierto($hoy, $orden->id_razon),
                 $hoy
             );
+
+            // La plata que entró por transferencia/depósito sale de la cuenta (fecha de anulación).
+            foreach ($mediosDirectos as $m) {
+                $this->moverBanco($m, $m->id_cuenta_bancaria, 'EGRESO', $hoy,
+                    'ANULACION COBRANZA ' . $this->numeroFormateado($orden->numero));
+            }
 
             $orden->id_estado = self::ANULADA;
             $orden->saldo_anticipo = 0;
@@ -656,6 +677,9 @@ class TesIngOrdenCobranzaRepository
                 'fecha' => Carbon::parse($fecha)->toDateString(),
             ], $this->periodoAbierto($fecha, $orden->id_razon));
 
+            $this->moverBanco($m, $cuenta->id_cuenta_bancaria, 'INGRESO', Carbon::parse($fecha)->toDateString(),
+                'DEPOSITO ' . (self::FORMAS_ADMITIDAS[$m->id_forma_pago] ?? '') . " {$m->referencia} - {$this->numeroFormateado($orden->numero)} - {$cliente->razon_social}");
+
             $m->id_cuenta_deposito = $cuenta->id_cuenta_bancaria;
             $m->fecha_deposito = Carbon::parse($fecha)->toDateString();
             $m->id_asiento_deposito = $asiento->id_asiento_contable;
@@ -674,8 +698,10 @@ class TesIngOrdenCobranzaRepository
             $m = TesIngOrdenMedioEntity::lockForUpdate()->findOrFail($idMedio);
             if (!$m->id_asiento_deposito) throw new Exception('El cheque no está depositado.');
             $orden = TesIngOrdenCobranzaEntity::findOrFail($m->id_orden_cobranza);
+            $this->cortarSiConciliado([$m->id_orden_medio], 'Este depósito');
 
             $hoy = $this->fechaActual->toDateString();
+            $this->moverBanco($m, $m->id_cuenta_deposito, 'EGRESO', $hoy, "ANULACION DEPOSITO {$m->referencia}");
             $this->asientos->contraasientoCompleto(
                 $m->id_asiento_deposito,
                 "ANULACION DEPOSITO {$m->referencia}",
@@ -692,6 +718,30 @@ class TesIngOrdenCobranzaRepository
 
             return $m->fresh();
         });
+    }
+
+    /**
+     * Movimiento + saldo de la cuenta por un medio de cobro (R-00000689 E2). Sin cuenta corta:
+     * la plata tiene que entrar (o salir) de algún lado.
+     */
+    private function moverBanco(TesIngOrdenMedioEntity $m, $idCuenta, string $tipo, $fecha, string $descripcion): void
+    {
+        if (empty($idCuenta)) {
+            throw new Exception("El medio de cobro {$m->id_orden_medio} no tiene cuenta bancaria: no se puede registrar el movimiento.");
+        }
+        $cuentas = new TesCuentasBancariasRepository();
+        $tipo === 'INGRESO'
+            ? $cuentas->findByDepositoCuenta($idCuenta, (float) $m->importe)
+            : $cuentas->findByRetiroCuenta($idCuenta, (float) $m->importe);
+        $cuentas->findByRegistrarMovimiento($idCuenta, (float) $m->importe, $tipo, null, null, $descripcion, $fecha, $m->id_orden_medio);
+    }
+
+    /** Un cobro ya conciliado con el extracto no se anula: primero se desconcilia (como los pagos, P7). */
+    private function cortarSiConciliado(array $idsMedio, string $que): void
+    {
+        if (TesConciliacionMatchingRepository::medioTieneIngresoConciliado($idsMedio)) {
+            throw new Exception("{$que} ya está conciliada con el extracto bancario. Para anularla, primero desconciliá la línea en el Visor de Conciliación.");
+        }
     }
 
     private function tieneCuenta($idRazon, string $tipo): bool

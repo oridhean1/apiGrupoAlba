@@ -597,9 +597,7 @@ class TesInstrumentoPagoRepository
         $periodosRepo = new \App\Http\Controllers\Contabilidad\Repository\PeriodosContablesRepository();
         $historialRepo = new \App\Http\Controllers\Contabilidad\Repository\AsientosPagoHistorialRepository($asientoRepo);
 
-        $opaRepo = new TestOrdenPagoRepository();
-        $razones = $opaRepo->razonesSocialesDeOpa($opa->id_orden_pago);
-        $idRazon = $razones[0] ?? null;
+        $idRazon = $this->razonUnicaParaAsiento($opa);
 
         // ⚠️ El período se resuelve para la FECHA DE ACREDITACIÓN, no para hoy: un eCheq emitido
         // en septiembre y acreditado en octubre pertenece al período de octubre.
@@ -633,6 +631,8 @@ class TesInstrumentoPagoRepository
         );
 
         // El retiro del saldo va junto al asiento, por el mismo motivo: la plata sale ahora.
+        // El movimiento lleva la fecha de ACREDITACIÓN (la del débito en el banco), igual que el
+        // asiento: con la fecha de carga no coincidía con el extracto. (R-00000689 E4, 2026-11-18)
         $cuentasRepo->findByRetiroCuenta($abono->id_cuenta_bancaria, (float) $abono->monto_pago);
         $cuentasRepo->findByRegistrarMovimiento(
             $abono->id_cuenta_bancaria,
@@ -640,7 +640,8 @@ class TesInstrumentoPagoRepository
             'EGRESO',
             $abono->id_pago,
             null,
-            'OPA'
+            'OPA',
+            \Carbon\Carbon::parse($fechaAcreditacion)->toDateString()
         );
     }
 
@@ -883,6 +884,32 @@ class TesInstrumentoPagoRepository
      *
      * Un ANTICIPO no tiene facturas imputadas, así que no tiene razón social: ahí no se valida.
      */
+    /**
+     * Razón social con la que se asienta un movimiento de la OPA. Corta si no hay una sola: sin
+     * razón el período se buscaba con `null`, y con varias se tomaba la primera al azar (regla de
+     * CLAUDE.md: una guarda que protege plata nunca se apaga sola). El anticipo, sin facturas, ya
+     * resuelve por `tb_tes_orden_pago.id_razon` (ver `razonesSocialesDeOpa`). (2026-11-18)
+     */
+    private function razonUnicaParaAsiento($opa): int
+    {
+        $razones = (new TestOrdenPagoRepository())->razonesSocialesDeOpa($opa->id_orden_pago);
+
+        if (count($razones) === 0) {
+            throw new \Exception(
+                "La orden {$opa->num_orden_pago} no tiene razón social (ni en sus facturas ni en la "
+                    . 'orden), así que no se puede asentar. Cargá la razón social de la orden.'
+            );
+        }
+        if (count($razones) > 1) {
+            throw new \Exception(
+                "La orden {$opa->num_orden_pago} tiene facturas de más de una razón social, así que no "
+                    . 'se sabe con qué contabilidad asentar. Hay que separarla por razón social.'
+            );
+        }
+
+        return $razones[0];
+    }
+
     public function validarCuentaDeRazonSocial($idCuenta, $idOpa, TestOrdenPagoRepository $opaRepo): void
     {
         if (is_null($idCuenta)) {
@@ -1029,9 +1056,7 @@ class TesInstrumentoPagoRepository
         //    original: contra la cuenta de diferidos si es cheque/eCheq, contra el banco si no.
         $boleta = TesPagoEntity::find($abono->id_pago);
         $opa = TesOrdenPagoEntity::find($boleta->id_orden_pago);
-        $opaRepo = new TestOrdenPagoRepository();
-        $razones = $opaRepo->razonesSocialesDeOpa($opa->id_orden_pago);
-        $idRazon = $razones[0] ?? null;
+        $idRazon = $this->razonUnicaParaAsiento($opa);
 
         $periodos = new \App\Http\Controllers\Contabilidad\Repository\PeriodosContablesRepository();
         $periodo = $periodos->findByPeriodoContableActivoNow($idRazon);

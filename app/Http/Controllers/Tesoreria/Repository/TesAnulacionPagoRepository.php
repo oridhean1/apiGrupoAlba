@@ -67,6 +67,7 @@ class TesAnulacionPagoRepository
             if (is_null($abono->fecha_ejecucion)) {
                 throw new \Exception('Ese pago todavía no tiene comprobante: no hace falta anularlo, se quita desde el pago.');
             }
+            $this->cortarSiEstaConciliado($abono->id_pago, $abono->id_cuenta_bancaria);
 
             if (!$this->revertirPorLineas($abono, $motivo)) {
                 throw new \Exception(
@@ -102,6 +103,7 @@ class TesAnulacionPagoRepository
             ->get();
 
         foreach ($boletas as $boleta) {
+            $this->cortarSiEstaConciliado($boleta->id_pago);
             $abonos = TesPagosParciales::where('id_pago', $boleta->id_pago)->vivos()->lockForUpdate()->get();
 
             foreach ($abonos as $abono) {
@@ -224,6 +226,21 @@ class TesAnulacionPagoRepository
         }
 
         return true;
+    }
+
+    /**
+     * Un pago cuyo débito ya se concilió con el extracto no se anula (R-00000689 P7: "no debería
+     * anularse un pago ya conciliado"). Hay que desconciliar la línea en el Visor de Conciliación
+     * primero, así la reversión queda a la vista de Tesorería.
+     */
+    private function cortarSiEstaConciliado($idPago, $idCuenta = null): void
+    {
+        if (TesConciliacionMatchingRepository::pagoTieneEgresoConciliado($idPago, $idCuenta)) {
+            throw new \Exception(
+                'Este pago ya está conciliado con el extracto bancario. Para anularlo, primero '
+                    . 'desconciliá la línea en el Visor de Conciliación.'
+            );
+        }
     }
 
     private function devolver($idCuenta, float $monto, $idPago, string $descripcion): void

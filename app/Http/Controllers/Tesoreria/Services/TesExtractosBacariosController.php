@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Tesoreria\Services;
 
 use App\Http\Controllers\Tesoreria\Repository\TesConciliacionMatchingRepository;
 use App\Http\Controllers\Tesoreria\Repository\TesExtractoBancariosRepository;
+use App\Http\Controllers\Tesoreria\Repository\TesRegistroExtractoRepository;
 use App\Models\Tesoreria\TesConciliacionMatcheoEntity;
 use App\Models\Tesoreria\TesExtractosBancariosEntity;
 use Carbon\Carbon;
@@ -84,23 +85,59 @@ class TesExtractosBacariosController extends Controller
             $creados = 0;
             $aprobados = 0;
             $omitidosDuplicados = 0;
+            $ocurrencias = [];
+            $existentes = [];
+            $movimientosAprobados = [];
+            $abonosAprobados = [];
+            $matching = app(\App\Http\Controllers\Tesoreria\Repository\TesConciliacionMatchingRepository::class);
 
             foreach ($filas as $fila) {
                 $fila = (object) $fila;
                 $aprobar = (bool) ($fila->aprobado ?? false);
-                $tieneCandidato = !empty($fila->id_movimiento_match);
+                $idAbonoMatch = $fila->id_pago_parcial_match ?? null; // eCheq a acreditar (E4)
+                $tieneCandidato = !empty($fila->id_movimiento_match) || !empty($idAbonoMatch);
 
                 // Re-chequeo defensivo: puede haber pasado tiempo entre la previsualización y este guardado.
-                $yaExiste = TesExtractosBancariosEntity::where('id_razon', $fila->id_razon)
-                    ->where('banco', $fila->banco ?? null)
-                    ->where('fecha', $fila->fecha ?? null)
-                    ->where('concepto', $fila->concepto ?? null)
-                    ->whereRaw('ABS(importe - ?) < 0.01', [$fila->importe ?? 0])
-                    ->exists();
+                // Se compara por CANTIDAD (ver contarIguales): la N-ésima línea igual del lote se omite
+                // sólo si ya había N iguales guardadas ANTES de este lote (el conteo se cachea antes de insertar).
+                $clave = TesExtractosBancariosEntity::claveLinea($fila->id_razon, $fila->banco ?? null, $fila->fecha ?? null, $fila->concepto ?? null, $fila->importe ?? 0);
+                $ocurrencias[$clave] = ($ocurrencias[$clave] ?? 0) + 1;
+                $existentes[$clave] ??= TesExtractosBancariosEntity::contarIguales(
+                    $fila->id_razon, $fila->banco ?? null, $fila->fecha ?? null, $fila->concepto ?? null, $fila->importe ?? 0
+                );
+                $yaExiste = $ocurrencias[$clave] <= $existentes[$clave];
 
                 if ($yaExiste) {
                     $omitidosDuplicados++;
                     continue;
+                }
+
+                // eCheq emitido: confirmarlo lo ACREDITA (asiento + débito) y se concilia contra el
+                // movimiento que deja. R-00000689 P1.
+                if ($aprobar && !empty($idAbonoMatch)) {
+                    if (in_array($idAbonoMatch, $abonosAprobados)) {
+                        throw new \Exception("El eCheq {$idAbonoMatch} está tildado en dos líneas del extracto. Dejá tildada una sola.");
+                    }
+                    $abonosAprobados[] = $idAbonoMatch;
+                    $fila->id_movimiento_match = $matching->acreditarDesdeExtracto(new TesExtractosBancariosEntity([
+                        'id_cuenta_bancaria' => $fila->id_cuenta_bancaria ?? null,
+                        'fecha' => $fila->fecha ?? null,
+                        'concepto' => $fila->concepto ?? null,
+                        'referencia' => $fila->referencia ?? null,
+                        'importe' => $fila->importe ?? 0,
+                    ]), $idAbonoMatch);
+                }
+
+                // Lo que se concilia en esta carga pasa por las mismas guardas que el visor.
+                if ($aprobar && !empty($fila->id_movimiento_match)) {
+                    if (in_array($fila->id_movimiento_match, $movimientosAprobados)) {
+                        throw new \Exception("El movimiento {$fila->id_movimiento_match} está tildado en dos líneas del extracto. Dejá tildada una sola.");
+                    }
+                    $matching->validarParaConfirmar(new TesExtractosBancariosEntity([
+                        'id_cuenta_bancaria' => $fila->id_cuenta_bancaria ?? null,
+                        'importe' => $fila->importe ?? 0,
+                    ]), $fila->id_movimiento_match);
+                    $movimientosAprobados[] = $fila->id_movimiento_match;
                 }
 
                 $extracto = TesExtractosBancariosEntity::create([
@@ -129,7 +166,8 @@ class TesExtractosBacariosController extends Controller
                 if ($tieneCandidato) {
                     TesConciliacionMatcheoEntity::create([
                         'id_extracto_bancario' => $extracto->id_extracto,
-                        'id_movimiento_interno' => $fila->id_movimiento_match,
+                        'id_movimiento_interno' => $fila->id_movimiento_match ?? null,
+                        'id_pago_parcial' => $idAbonoMatch,
                         'tipo_origen_interno' => $fila->tipo_origen_interno ?? null,
                         'score_obtenido' => $fila->score_matching ?? 0,
                         'reglas_cumplidas' => $fila->reglas_cumplidas ?? [],
@@ -177,6 +215,38 @@ class TesExtractosBacariosController extends Controller
         ));
     }
 
+    /** GET: conceptos para registrar una línea (sugerido, con/sin cuenta, cuentas destino). E5. */
+    public function getConceptosBancarios(Request $request, TesRegistroExtractoRepository $repo)
+    {
+        try {
+            return response()->json($repo->conceptosParaExtracto($request->id_extracto));
+        } catch (\Throwable $th) {
+            return response()->json(['message' => $th->getMessage()], 409);
+        }
+    }
+
+    /** POST: registra la línea (movimiento + asiento) y la concilia. E5. */
+    public function getRegistrarMovimientoExtracto(Request $request, TesRegistroExtractoRepository $repo)
+    {
+        try {
+            $extracto = $repo->registrar($request->id_extracto, (string) $request->concepto, $request->id_cuenta_destino, $request->observaciones);
+            return response()->json(['message' => 'Movimiento registrado y conciliado.', 'data' => $extracto]);
+        } catch (\Throwable $th) {
+            return response()->json(['message' => $th->getMessage()], 409);
+        }
+    }
+
+    /** POST: anula un registro (contraasiento + movimiento inverso); la línea vuelve a pendiente. E5. */
+    public function getAnularRegistroExtracto(Request $request, TesRegistroExtractoRepository $repo)
+    {
+        try {
+            $extracto = $repo->anular($request->id_extracto, $request->motivo);
+            return response()->json(['message' => 'Registro anulado. La línea volvió a pendiente.', 'data' => $extracto]);
+        } catch (\Throwable $th) {
+            return response()->json(['message' => $th->getMessage()], 409);
+        }
+    }
+
     public function getConfirmarMatch(Request $request, TesExtractoBancariosRepository $repoExtracto)
     {
         try {
@@ -184,7 +254,8 @@ class TesExtractosBacariosController extends Controller
                 $request->id_extracto,
                 (bool) $request->aprobar,
                 $request->id_movimiento_interno,
-                $request->observaciones
+                $request->observaciones,
+                $request->boolean('sin_contraparte')
             );
 
             return response()->json([

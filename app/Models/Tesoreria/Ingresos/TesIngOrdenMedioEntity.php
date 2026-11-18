@@ -24,4 +24,9 @@ class TesIngOrdenMedioEntity extends Model
         'cod_usuario_deposita',
         'fecha_registra_deposito',
     ];
+
+    public function orden()
+    {
+        return $this->hasOne(TesIngOrdenCobranzaEntity::class, 'id_orden_cobranza', 'id_orden_cobranza');
+    }
 }
