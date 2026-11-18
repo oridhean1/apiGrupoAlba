@@ -52,9 +52,13 @@ class TesExtractosBacariosController extends Controller
 
             $filas = $importacion->sheetImport->filasPreview ?? [];
             $conCandidato = count(array_filter($filas, fn ($f) => !empty($f['id_movimiento_match']) || !empty($f['id_pago_parcial_match'])));
+            $yaImportados = count(array_filter($filas, fn ($f) => !empty($f['ya_importado'])));
 
             return response()->json([
-                'message' => $filas ? count($filas) . ' movimientos leídos, ' . $conCandidato . ' con sugerencia de conciliación.' : 'El archivo no tiene movimientos para importar.',
+                'message' => $filas
+                    ? count($filas) . ' movimientos leídos, ' . $conCandidato . ' con sugerencia de conciliación.'
+                        . ($yaImportados ? " {$yaImportados} ya estaban importados (no se vuelven a cargar)." : '')
+                    : 'El archivo no tiene movimientos para importar.',
                 'data' => $filas
             ]);
         } catch (\Throwable $th) {

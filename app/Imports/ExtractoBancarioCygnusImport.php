@@ -75,9 +75,13 @@ class ExtractoBancarioCygnusSheetImport implements ToCollection, WithStartRow
                         'detalle_cuit' => $detalleCuit,
                     ]);
 
+                    // Ya importada: no se busca candidato. Su conciliación (o no) ya está en el visor, y
+                    // buscarle otro movimiento proponía pagos ajenos con puntaje bajo (prueba 18/11).
+                    $yaImportado = $this->yaImportado($bancoFila, $extractoTransient);
+
                     // Un movimiento se propone para una sola línea del archivo (dos líneas idénticas
                     // no pueden llevarse el mismo pago).
-                    $resultado = $idCuentaBancaria
+                    $resultado = ($idCuentaBancaria && !$yaImportado)
                         ? $this->matching->calcularMejorCandidato($extractoTransient, $this->movimientosPropuestos, $this->abonosPropuestos)
                         : ['movimiento' => null, 'abono' => null, 'score' => 0, 'reglas' => [], 'tipo_origen' => null];
 
@@ -108,7 +112,7 @@ class ExtractoBancarioCygnusSheetImport implements ToCollection, WithStartRow
                         'id_pago_parcial_match' => $abono?->id_pago_parcial, // eCheq que se acredita al confirmar (E4)
                         'tipo_origen_interno' => $resultado['tipo_origen'],
                         'reglas_cumplidas' => $resultado['reglas'],
-                        'ya_importado' => $this->yaImportado($bancoFila, $extractoTransient),
+                        'ya_importado' => $yaImportado,
                         // Misma forma que usa el listado normal (matcheos[0].movimiento...) para reusar el front tal cual.
                         'matcheos' => ($mov || $abono) ? [[
                             'id_movimiento_interno' => $mov?->id_movimiento,
