@@ -107,6 +107,15 @@
                 <td class="right">$ {{ number_format($i->importe_total, 2, ',', '.') }}</td>
                 <td class="right">$ {{ number_format($i->importe, 2, ',', '.') }}</td>
             </tr>
+            {{-- NC imputada a la factura: sólo informativa, no suma al cobro --}}
+            @foreach ($i->notas_credito ?? [] as $nc)
+                <tr class="rojo">
+                    <td style="padding-left: 15px;">{{ $nc->tipo }} {{ str_pad($nc->punto_venta, 5, '0', STR_PAD_LEFT) }}-{{ str_pad($nc->numero, 8, '0', STR_PAD_LEFT) }}</td>
+                    <td>{{ \Carbon\Carbon::parse($nc->fecha_emision)->format('d/m/Y') }}</td>
+                    <td class="right">- $ {{ number_format($nc->importe, 2, ',', '.') }}</td>
+                    <td></td>
+                </tr>
+            @endforeach
         @empty
             <tr><td colspan="4" class="center">Sin comprobantes: el importe queda a cuenta como anticipo.</td></tr>
         @endforelse
