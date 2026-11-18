@@ -10,8 +10,13 @@ use Illuminate\Routing\Controller as RoutingController;
 class RazonSocialController extends RoutingController
 {
     //
-    public function getListaRazonSocial()
+    public function getListaRazonSocial(Request $request)
     {
+        // ?todas=1 lo usa solo la grilla de configuración para poder reactivar
+        // las inactivas. El resto de los combos sigue recibiendo solo activas.
+        if ($request->boolean('todas')) {
+            return RazonSocialModelo::orderBy('id_razon')->get();
+        }
         return RazonSocialModelo::where('activo', 1)->get();
     }
 
