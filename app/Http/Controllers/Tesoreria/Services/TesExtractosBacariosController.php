@@ -51,7 +51,7 @@ class TesExtractosBacariosController extends Controller
             }
 
             $filas = $importacion->sheetImport->filasPreview ?? [];
-            $conCandidato = count(array_filter($filas, fn ($f) => !empty($f['id_movimiento_match'])));
+            $conCandidato = count(array_filter($filas, fn ($f) => !empty($f['id_movimiento_match']) || !empty($f['id_pago_parcial_match'])));
 
             return response()->json([
                 'message' => $filas ? count($filas) . ' movimientos leídos, ' . $conCandidato . ' con sugerencia de conciliación.' : 'El archivo no tiene movimientos para importar.',
