@@ -825,6 +825,7 @@ Route::group([
     Route::get('filtrar-facturas-ospf', [App\Http\Controllers\facturacion\Services\FacturasOspfController::class, 'getFacturasOspf']);
     Route::get('facturas-pendientes-ospf', [App\Http\Controllers\facturacion\Services\FacturasOspfController::class, 'getFacturasPendientesOspf']);
     Route::get('factura-id', [App\Http\Controllers\facturacion\FacturacionProcesosController::class, 'getBuscarFacturaId']);
+    Route::get('historial-edicion', [App\Http\Controllers\facturacion\FacturacionProcesosController::class, 'getHistorialEdicion']);
     Route::get('tipo-imputacion-contable', [App\Http\Controllers\facturacion\AuxiliaresFacturaController::class, 'getListaTipoImputacionContable']);
     Route::get('tipo-iva', [App\Http\Controllers\facturacion\AuxiliaresFacturaController::class, 'getListaTipoIVA']);
     Route::get('tipo-filtro', [App\Http\Controllers\facturacion\AuxiliaresFacturaController::class, 'getListaTipoFiltro']);
