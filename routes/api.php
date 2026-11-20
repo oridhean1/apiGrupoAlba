@@ -1223,6 +1223,7 @@ Route::group(
         Route::post('ingresos/clientes', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngClientesController::class, 'postGuardar']);  // Alta o edición
         Route::get('ingresos/obras-sociales', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngClientesController::class, 'getObrasSociales']);  // Padrón SSS para vincular
         Route::get('ingresos/cuenta-corriente', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngClientesController::class, 'getCuentaCorriente']);
+        Route::get('ingresos/cuenta-corriente/excel', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngClientesController::class, 'exportCuentaCorriente']);  // R-00000684
         Route::get('ingresos/facturas-pendientes', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'getFacturasPendientes']);  // FC/ND con saldo, FIFO
         Route::get('ingresos/anticipos-disponibles', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'getAnticiposDisponibles']);
         Route::get('ingresos/ordenes', [App\Http\Controllers\Tesoreria\Services\Ingresos\TesIngOrdenCobranzaController::class, 'getListar']);

@@ -927,7 +927,8 @@ class PadronController extends Controller
             $query->telefono = $titular->telefono;
             $query->fe_alta = $titular->fe_alta;
             $query->id_usuario = $titular->id_usuario;
-            $query->fecha_carga = $titular->fecha_carga;
+            // fecha_carga es la fecha de alta del registro comercial: la edicion no la pisa,
+            // porque en tb_padron puede venir NULL y en tb_padron_comercial es NOT NULL (T-00001349)
             $query->id_tipo_beneficiario = $titular->id_tipo_beneficiario;
             $query->id_tipo_domicilio = $titular->id_tipo_domicilio;
             $query->email = $titular->email;

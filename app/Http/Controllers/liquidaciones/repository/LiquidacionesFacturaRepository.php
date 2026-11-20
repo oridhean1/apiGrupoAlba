@@ -84,6 +84,15 @@ class LiquidacionesFacturaRepository
         if (!empty($params->id_locatario)) {
             $query->where('id_locatorio', $params->id_locatario);
         }
+        // Locatario real de la factura: tb_facturacion_datos.cod_sindicato (id_locatorio de la vista es la razón social)
+        if (!empty($params->id_sindicato)) {
+            $query->whereExists(function ($sub) use ($params) {
+                $sub->select(DB::raw(1))
+                    ->from('tb_facturacion_datos as fd_locatario')
+                    ->whereColumn('fd_locatario.id_factura', 'vw_liquidacion_factura_unica.id_factura')
+                    ->where('fd_locatario.cod_sindicato', $params->id_sindicato);
+            });
+        }
         if (!empty($params->cuit_prestador)) {
             $query->where(function ($q) use ($params) {
                 $q->where('cuit', 'like', "%$params->cuit_prestador%")
@@ -136,102 +145,109 @@ class LiquidacionesFacturaRepository
 
         $facturas = $query->distinct()->pluck('vw_liquidacion_factura_unica.id_factura')->toArray();
 
-        if (count($facturas) == 0) {
-            return [];
+        // Generador: devuelve las filas de a un chunk por vez para no cargar todo el detalle en memoria
+        return $this->generarDetalleExport($facturas, $wherePadron);
+    }
+
+    private function generarDetalleExport(array $facturas, string $wherePadron)
+    {
+        // Lectura unbuffered: MySQL entrega las filas de a una en lugar de cargar todo el resultado en memoria
+        $pdo = DB::connection()->getReadPdo();
+        $buffered = $pdo->getAttribute(\PDO::MYSQL_ATTR_USE_BUFFERED_QUERY);
+        $pdo->setAttribute(\PDO::MYSQL_ATTR_USE_BUFFERED_QUERY, false);
+
+        try {
+            // Dividir el array en chunks de 500 para evitar errores en queries largos
+            foreach (array_chunk($facturas, 500) as $chunk) {
+                $facturasStr = implode(',', $chunk);
+
+                $sql = "
+                    SELECT 
+                        fa.prestador as dni_prestador,
+                        fa.cuit,
+                        fa.razon_social,
+                        fa.num_liquidacion,
+                        fa.fecha_recepcion,
+                        fa.fecha_vencimiento,
+                        fa.fecha_liquidacion,
+                        fa.comprobante,
+                        fa.refacturacion,
+                        fa.imputacion_contable,
+                        fa.subtotal,
+                        fa.total_iva,
+                        fa.total_neto,
+                        fa.total_debito as factura_total_debito,
+                        fa.delegacion,
+                        fa.periodo,
+                        fa.tipo_carga_detalle,
+                        fa.locatorio as marca, 
+                        fa.fecha_registra_factura as fecha_registro_factura,
+
+                        det.codigo_practica,
+                        det.practica,
+                        det.monto_facturado as detalle_monto_facturado,
+                        det.monto_aprobado as detalle_monto_aprobado,
+                        det.monto_debitado as detalle_monto_debitado,
+                        det.coseguro,
+                        det.debita_coseguro,
+                        det.motivo_debito,
+                        det.observacion_debito,
+                        det.afiliado,
+                        COALESCE(TIMESTAMPDIFF(YEAR, padron.fe_nac, COALESCE(NULLIF(det.fecha_prestacion, ''), fa.fecha_recepcion, CURDATE())), det.edad_afiliado, 0) as edad_afiliado,
+                        det.dni_afiliado,
+                        det.fecha_prestacion,
+                        det.tipo as detalle_tipo,
+
+                        padron.cuil_tit as cuil_titular,
+                        padron.cuil_benef as cuil_beneficiario,
+                        plan.tipo as tipo_plan,
+                        origen.detalle_comercial_origen,
+                        caja.detalle_comercial_caja,
+                        fd.tipo_hospital,
+                        COALESCE(l.diagnostico, lm.diagnostico) as diagnostico,
+                        COALESCE(l.observaciones, lm.observaciones) as observaciones,
+                        COALESCE(l.fecha_registra, lm.fecha_registra) as fecha_registro_liq,
+                        COALESCE(l.fecha_actualiza, lm.fecha_actualiza) as fecha_actualiza_liq
+                    FROM vw_liquidacion_factura_unica fa
+                    LEFT JOIN (
+                        SELECT  codigo_practica, practica, monto_facturado, monto_aprobado, monto_debitado, 
+                                coseguro, debita_coseguro, motivo_debito, observacion_debito, afiliado, 
+                                edad_afiliado, dni_afiliado, tipo, id_factura, fecha_prestacion, id_liquidacion
+                        FROM vw_detalle_liquidaciones WHERE id_factura IN ($facturasStr)
+                        UNION ALL
+                        SELECT id_medicamento as codigo_practica, medicamento as practica, monto_facturado, 
+                               0 as monto_aprobado, 0 as monto_debitado, 0 as coseguro, 0 as debita_coseguro, 
+                               motivo_debito, '' as observacion_debito, '' as afiliado, '' as edad_afiliado, 
+                               '' as dni_afiliado, tipo, id_factura, '' as fecha_prestacion, id_liquidacion
+                        FROM vw_detalle_medicamentos WHERE id_factura IN ($facturasStr)
+                    ) as det ON fa.id_factura = det.id_factura
+                    LEFT JOIN tb_liquidaciones l ON l.id_liquidacion = det.id_liquidacion AND det.tipo = 'Practica'
+                    LEFT JOIN tb_liquidaciones_medicamentos lm ON lm.id_liquidacion = det.id_liquidacion AND det.tipo = 'Medicamento'
+                    LEFT JOIN tb_padron padron ON padron.id = COALESCE(l.id_afiliado, lm.id_afiliado)
+                    LEFT JOIN(
+                            SELECT
+                            id_padron,
+                            MAX(id_tipo_plan) id_tipo_plan
+                            FROM tb_detalle_padron_tipo_plan
+                            GROUP BY id_padron
+                            ) detalle_plan
+                    ON detalle_plan.id_padron = padron.dni
+                    LEFT JOIN tb_tipo_plan plan on detalle_plan.id_tipo_plan = plan.id_tipo_plan
+                    LEFT JOIN tb_comercial_caja caja on caja.id_comercial_caja=padron.id_comercial_caja
+                    LEFT JOIN tb_comercial_origen origen on origen.id_comercial_origen = padron.id_comercial_origen
+                    LEFT JOIN tb_facturacion_datos fd ON fa.id_factura = fd.id_factura
+                    WHERE fa.id_factura IN ($facturasStr)
+                    $wherePadron
+                    ORDER BY fa.fecha_registra_factura DESC, fa.prestador_fantasia ASC
+                ";
+
+                foreach (DB::cursor($sql) as $row) {
+                    yield $row;
+                }
+            }
+        } finally {
+            $pdo->setAttribute(\PDO::MYSQL_ATTR_USE_BUFFERED_QUERY, $buffered);
         }
-
-        // Dividir el array en chunks de 500 para evitar errores en queries largos
-        $chunks = array_chunk($facturas, 500);
-        $results = [];
-
-        foreach ($chunks as $chunk) {
-            $facturasStr = implode(',', $chunk);
-
-            $sql = "
-                SELECT 
-                    fa.prestador as dni_prestador,
-                    fa.cuit,
-                    fa.razon_social,
-                    fa.num_liquidacion,
-                    fa.fecha_recepcion,
-                    fa.fecha_vencimiento,
-                    fa.fecha_liquidacion,
-                    fa.comprobante,
-                    fa.refacturacion,
-                    fa.imputacion_contable,
-                    fa.subtotal,
-                    fa.total_iva,
-                    fa.total_neto,
-                    fa.total_debito as factura_total_debito,
-                    fa.delegacion,
-                    fa.periodo,
-                    fa.tipo_carga_detalle,
-                    fa.locatorio as marca, 
-                    fa.fecha_registra_factura as fecha_registro_factura,
-                    
-                    det.codigo_practica,
-                    det.practica,
-                    det.monto_facturado as detalle_monto_facturado,
-                    det.monto_aprobado as detalle_monto_aprobado,
-                    det.monto_debitado as detalle_monto_debitado,
-                    det.coseguro,
-                    det.debita_coseguro,
-                    det.motivo_debito,
-                    det.observacion_debito,
-                    det.afiliado,
-                    COALESCE(TIMESTAMPDIFF(YEAR, padron.fe_nac, COALESCE(NULLIF(det.fecha_prestacion, ''), fa.fecha_recepcion, CURDATE())), det.edad_afiliado, 0) as edad_afiliado,
-                    det.dni_afiliado,
-                    det.fecha_prestacion,
-                    det.tipo as detalle_tipo,
-                    
-                    padron.cuil_tit as cuil_titular,
-                    padron.cuil_benef as cuil_beneficiario,
-                    plan.tipo as tipo_plan,
-                    origen.detalle_comercial_origen,
-                    caja.detalle_comercial_caja,
-                    fd.tipo_hospital,
-                    COALESCE(l.diagnostico, lm.diagnostico) as diagnostico,
-                    COALESCE(l.observaciones, lm.observaciones) as observaciones,
-                    COALESCE(l.fecha_registra, lm.fecha_registra) as fecha_registro_liq,
-                    COALESCE(l.fecha_actualiza, lm.fecha_actualiza) as fecha_actualiza_liq
-                FROM vw_liquidacion_factura_unica fa
-                LEFT JOIN (
-                    SELECT  codigo_practica, practica, monto_facturado, monto_aprobado, monto_debitado, 
-                            coseguro, debita_coseguro, motivo_debito, observacion_debito, afiliado, 
-                            edad_afiliado, dni_afiliado, tipo, id_factura, fecha_prestacion, id_liquidacion
-                    FROM vw_detalle_liquidaciones WHERE id_factura IN ($facturasStr)
-                    UNION ALL
-                    SELECT id_medicamento as codigo_practica, medicamento as practica, monto_facturado, 
-                           0 as monto_aprobado, 0 as monto_debitado, 0 as coseguro, 0 as debita_coseguro, 
-                           motivo_debito, '' as observacion_debito, '' as afiliado, '' as edad_afiliado, 
-                           '' as dni_afiliado, tipo, id_factura, '' as fecha_prestacion, id_liquidacion
-                    FROM vw_detalle_medicamentos WHERE id_factura IN ($facturasStr)
-                ) as det ON fa.id_factura = det.id_factura
-                LEFT JOIN tb_liquidaciones l ON l.id_liquidacion = det.id_liquidacion AND det.tipo = 'Practica'
-                LEFT JOIN tb_liquidaciones_medicamentos lm ON lm.id_liquidacion = det.id_liquidacion AND det.tipo = 'Medicamento'
-                LEFT JOIN tb_padron padron ON padron.id = COALESCE(l.id_afiliado, lm.id_afiliado)
-                LEFT JOIN(
-                        SELECT
-                        id_padron,
-                        MAX(id_tipo_plan) id_tipo_plan
-                        FROM tb_detalle_padron_tipo_plan
-                        GROUP BY id_padron
-                        ) detalle_plan
-                ON detalle_plan.id_padron = padron.dni
-                LEFT JOIN tb_tipo_plan plan on detalle_plan.id_tipo_plan = plan.id_tipo_plan
-                LEFT JOIN tb_comercial_caja caja on caja.id_comercial_caja=padron.id_comercial_caja
-                LEFT JOIN tb_comercial_origen origen on origen.id_comercial_origen = padron.id_comercial_origen
-                LEFT JOIN tb_facturacion_datos fd ON fa.id_factura = fd.id_factura
-                WHERE fa.id_factura IN ($facturasStr)
-                $wherePadron
-                ORDER BY fa.fecha_registra_factura DESC, fa.prestador_fantasia ASC
-            ";
-
-            $chunkResults = DB::select($sql);
-            $results = array_merge($results, $chunkResults);
-        }
-
-        return $results;
     }
 
     public function collectAlls($params)

@@ -18,7 +18,23 @@ class LiquidacionesFacturaController extends Controller
 
     public function getFacturaLiquidacionesDetallado(LiquidacionesFacturaRepository $repo, Request $request)
     {
-        return response()->json($repo->findTopByFechaRecepcionBetweenAndEstadoAndNumFacturaLikeDetallado($request));
+        $filas = $repo->findTopByFechaRecepcionBetweenAndEstadoAndNumFacturaLikeDetallado($request);
+
+        // Se responde en streaming (fila por fila) porque sin filtro de fechas el detalle puede superar
+        // las 150k filas y armar el JSON completo en memoria excede el memory_limit
+        return response()->stream(function () use ($filas) {
+            echo '[';
+            $primera = true;
+            $i = 0;
+            foreach ($filas as $fila) {
+                echo ($primera ? '' : ',') . json_encode($fila, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+                $primera = false;
+                if (++$i % 2000 === 0) {
+                    flush();
+                }
+            }
+            echo ']';
+        }, 200, ['Content-Type' => 'application/json']);
     }
 
 
