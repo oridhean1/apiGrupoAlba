@@ -64,6 +64,10 @@ class TesRegistroExtractoRepository
 
         return [
             'sugerido' => ConceptosBancarios::sugerir($extracto->concepto, $sentido),
+            // Para que el modal diga de qué cuenta es la línea: el traspaso se registra desde
+            // cualquiera de las dos puntas y la de origen no figura entre los destinos (2026-11-19).
+            'cuenta_origen' => TesCuentasBancariasEntity::where('id_cuenta_bancaria', $extracto->id_cuenta_bancaria)->value('nombre_cuenta'),
+            'sentido' => $sentido,
             'conceptos' => $conceptos,
             'cuentas_destino' => $idRazon
                 ? TesCuentasBancariasEntity::where('id_razon', $idRazon)
@@ -109,13 +113,29 @@ class TesRegistroExtractoRepository
             $destino = null;
             if ($codigo === ConceptosBancarios::TRASPASO) {
                 $destino = $this->cuentaDestinoValida($idCuentaDestino, $cuenta, $idRazon);
+                // Un traspaso se registra desde UNA sola punta: si ya se registró desde la línea de la
+                // otra cuenta, acá ya existe su movimiento espejo y registrar de nuevo duplica la plata
+                // y el asiento. Esta línea se concilia contra ese movimiento (2026-11-19).
+                $espejo = self::movimientosVigentes()
+                    ->where('id_cuenta_bancaria', $cuenta->id_cuenta_bancaria)
+                    ->where('tipo_movimiento', $sentido)
+                    ->where('monto', $importe)
+                    ->whereDate('fecha_movimiento', $fecha)
+                    ->where('descripcion', 'like', 'TRASPASO desde/hacia %')
+                    ->whereDoesntHave('matcheos', fn($q) => $q->where('estado', 1))
+                    ->first();
+                if ($espejo) {
+                    throw new Exception("Este traspaso ya se registró desde la línea de la otra cuenta: en {$cuenta->nombre_cuenta} "
+                        . "ya está el movimiento \"{$espejo->descripcion}\". No lo registres de nuevo: conciliá esta línea con "
+                        . '"Revisar / buscar manual" eligiendo ese movimiento.');
+                }
                 $contra = ['id_cuenta_bancaria' => $destino->id_cuenta_bancaria, 'nombre' => $destino->nombre_cuenta];
             } else {
                 try {
                     $idPlan = $this->asientos->obtenerCuentaVentaByRazon($idRazon, $concepto['tipo']);
                 } catch (Exception $e) {
                     // Cuentas pendientes de definir por Contabilidad (respuesta P5 del cliente).
-                    throw new Exception("Contabilidad todavía no cargó la cuenta contable de \"{$concepto['descripcion']}\" para esta razón social ({$concepto['tipo']}). Sin esa cuenta no se puede generar el asiento.");
+                    throw new Exception("Contabilidad todavía no cargó la cuenta contable de \"{$concepto['descripcion']}\" para esta razón social ({$concepto['tipo']}). Sin esa cuenta no se puede generar el asiento: se carga en Contabilidad › Relaciones Contables › Cuentas por razón social.");
                 }
                 $contra = ['id_detalle_plan' => $idPlan, 'nombre' => $concepto['descripcion']];
             }
@@ -180,8 +200,13 @@ class TesRegistroExtractoRepository
             $idRazon = $this->razonDe($extracto, true);
             $marca = "[EXT {$extracto->id_extracto}]";
 
-            $movs = TesMovientosCuentaBancariaEntity::where('descripcion', 'like', "%{$marca}")
-                ->whereNull('id_pago')->whereNull('id_operacion')->whereNull('id_orden_medio')->get();
+            // Sólo los movimientos del registro VIGENTE: si la línea ya se registró y anuló antes,
+            // los de ese ciclo (y sus ANULACION) comparten la marca y no se vuelven a revertir (2026-11-19).
+            $base = TesMovientosCuentaBancariaEntity::where('descripcion', 'like', "%{$marca}")
+                ->whereNull('id_pago')->whereNull('id_operacion')->whereNull('id_orden_medio');
+            $ultimaAnulacion = (clone $base)->where('descripcion', 'like', 'ANULACION %')->max('id_movimiento') ?? 0;
+            $movs = (clone $base)->where('descripcion', 'not like', 'ANULACION %')
+                ->where('id_movimiento', '>', $ultimaAnulacion)->get();
             foreach ($movs as $m) {
                 if ($m->id_movimiento != $matcheo->id_movimiento_interno && $m->matcheos()->where('estado', 1)->exists()) {
                     throw new Exception('La otra punta del traspaso ya está conciliada con una línea de la otra cuenta: desconciliala primero.');
@@ -261,6 +286,24 @@ class TesRegistroExtractoRepository
             throw new Exception("La cuenta {$destino->nombre_cuenta} es de otra razón social: un traspaso es sólo entre cuentas propias de la misma razón.");
         }
         return $destino;
+    }
+
+    /**
+     * Movimientos que siguen valiendo: sin los "ANULACION ..." ni los que esas anulaciones revirtieron
+     * (mismo texto con "ANULACION " adelante, misma cuenta, posterior). Lo usan la guarda del traspaso
+     * y la lista de candidatos para conciliar a mano (2026-11-19).
+     */
+    public static function movimientosVigentes()
+    {
+        return TesMovientosCuentaBancariaEntity::query()
+            ->where('descripcion', 'not like', 'ANULACION %')
+            ->whereNotExists(function ($q) {
+                $q->select(DB::raw(1))
+                    ->from('tb_tes_movimiento_cuenta_bancaria as an')
+                    ->whereColumn('an.id_cuenta_bancaria', 'tb_tes_movimiento_cuenta_bancaria.id_cuenta_bancaria')
+                    ->whereColumn('an.id_movimiento', '>', 'tb_tes_movimiento_cuenta_bancaria.id_movimiento')
+                    ->whereRaw("an.descripcion = CONCAT('ANULACION ', tb_tes_movimiento_cuenta_bancaria.descripcion)");
+            });
     }
 
     private function mover($idCuenta, float $importe, string $tipo, string $fecha, string $descripcion): TesMovientosCuentaBancariaEntity

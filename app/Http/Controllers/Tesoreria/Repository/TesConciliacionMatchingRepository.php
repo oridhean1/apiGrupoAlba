@@ -360,6 +360,33 @@ class TesConciliacionMatchingRepository
             ->exists();
     }
 
+    /**
+     * Motivo legible de por qué no se anula: qué egreso (importe, fecha, cuenta) de esos pagos está
+     * conciliado. null si ninguno. Así el usuario sabe qué línea desconciliar (2026-11-19).
+     */
+    public static function motivoEgresoConciliado(array $idsPago, $idCuenta = null): ?string
+    {
+        if (empty($idsPago)) {
+            return null;
+        }
+        $mov = TesMovientosCuentaBancariaEntity::with('cuenta')
+            ->whereIn('id_pago', $idsPago)
+            ->where('tipo_movimiento', 'EGRESO')
+            ->when($idCuenta, fn($q) => $q->where('id_cuenta_bancaria', $idCuenta))
+            ->whereHas('matcheos', fn($q) => $q->where('estado', 1))
+            ->orderBy('fecha_movimiento')
+            ->first();
+        if (is_null($mov)) {
+            return null;
+        }
+        $importe = '$' . number_format((float) $mov->monto, 2, ',', '.');
+        $fecha   = $mov->fecha_movimiento ? date('d/m/Y', strtotime($mov->fecha_movimiento)) : 's/f';
+        $cuenta  = $mov->cuenta->nombre_cuenta ?? "cuenta {$mov->id_cuenta_bancaria}";
+        return "No se puede anular: el pago de {$importe} del {$fecha} desde {$cuenta} ya está conciliado "
+            . 'con el extracto bancario. Para anularlo, primero desconciliá esa línea en el Visor de Conciliación '
+            . '(Tesorería › Conciliación).';
+    }
+
     public static function pagoTieneEgresoConciliado($idPago, $idCuenta = null): bool
     {
         return TesMovientosCuentaBancariaEntity::where('id_pago', $idPago)

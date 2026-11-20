@@ -1505,6 +1505,9 @@ Route::group([
     Route::get('cs-tipo-retencion', [App\Http\Controllers\Contabilidad\Services\CatalogoController::class, 'getTipoRetencion']);
     Route::get('cs-tipo-impuesto', [App\Http\Controllers\Contabilidad\Services\CatalogoController::class, 'getTipoImpuesto']);
     Route::get('cs-retencion-cuenta-contable', [App\Http\Controllers\Contabilidad\Services\RetencionCuentaContableController::class, 'getListar']);
+    // Relaciones Contables › Cuentas por razón social (ventas, conceptos bancarios, contrapartes). 2026-11-19
+    Route::get('cs-razon-cuenta-contable', [App\Http\Controllers\Contabilidad\Services\RazonCuentaContableController::class, 'getListar']);
+    Route::post('psr-razon-cuenta-contable', [App\Http\Controllers\Contabilidad\Services\RazonCuentaContableController::class, 'postGuardar']);
     Route::get('cs-plan-cuenta-completo', [App\Http\Controllers\Contabilidad\Services\PlanesCuentasController::class, 'getListarCuentasCompleto']);
     Route::get('get-export-plan-cuentas', [App\Http\Controllers\Contabilidad\Services\PlanesCuentasController::class, 'getExportPlanCuentas']);
     Route::get('get-imputaciones-contables', [App\Http\Controllers\Contabilidad\Services\ImputacionCuentaContableController::class, 'getListarTipoImputacionContable']);

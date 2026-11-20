@@ -43,8 +43,9 @@ class TesCuentasFilterController extends Controller
     {
         $data = [];
 
-        if (!is_null($request->cuenta)) {
-            $data = $repo->findByListMovimientosIdCuenta($request->desde, $request->hasta, $request->cuenta);
+        // El front manda cuenta='' sin cuenta elegida: con is_null filtraba por id vacio y no traia nada.
+        if ($request->filled('cuenta')) {
+            $data = $repo->findByListMovimientosIdCuenta($request->desde, $request->hasta, $request->cuenta, $request->boolean('conciliables'));
         } else {
             $data = $repo->findByListMovimientos($request->desde, $request->hasta);
         }

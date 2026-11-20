@@ -2111,6 +2111,15 @@ class TestOrdenPagoRepository
         // ("tiene pagos confirmados" y "hay eCheq emitidos") lo impedían porque no había cómo
         // revertir; el proceso documentado del cliente (punto 7) prevé anular cualquier orden.
 
+        // Salvo que algún pago ya esté conciliado con el extracto (R-00000689 P7): primero se
+        // desconcilia. Va acá (y no sólo en revertirPagosDeOpa) para que el motivo llegue al
+        // usuario en vez del "Error al anular" genérico del catch (2026-11-19).
+        $idsPago = TesPagoEntity::where('id_orden_pago', $idOpa)->pluck('id_pago')->all();
+        $conciliado = TesConciliacionMatchingRepository::motivoEgresoConciliado($idsPago);
+        if (!is_null($conciliado)) {
+            return $conciliado;
+        }
+
         return null;
     }
 
