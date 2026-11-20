@@ -1562,13 +1562,16 @@ class TesInstrumentoPagoRepository
             // corte entraban decenas de pagos de 2025 ya cerrados.
             ->whereNotNull('pp.id_fecha_probable')
             ->whereNotNull($fechaResuelta)
-            // Comprobante vigente de ESA fecha, o uno viejo sin fecha que cubre toda la boleta.
-            ->whereNotExists(fn($c) => $c->select(DB::raw(1))
-                ->from('tb_test_pago_detalle_comprobantes as comp')
-                ->whereColumn('comp.id_pago', 'p.id_pago')
-                ->where(fn($e) => $e->whereNull('comp.estado')->orWhere('comp.estado', 1))
-                ->where(fn($f) => $f->whereColumn('comp.id_fecha_probable', 'pp.id_fecha_probable')
-                    ->orWhereNull('comp.id_fecha_probable')))
+            // Comprobante vigente que respalde ESA fecha (puede respaldar varias, R-00000661), o
+            // uno viejo sin fecha que cubre toda la boleta.
+            ->whereNotExists(fn($c) => TesPagosRepository::whereComprobanteCubreFecha(
+                $c->select(DB::raw(1))
+                    ->from('tb_test_pago_detalle_comprobantes as comp')
+                    ->whereColumn('comp.id_pago', 'p.id_pago')
+                    ->where(fn($e) => $e->whereNull('comp.estado')->orWhere('comp.estado', 1)),
+                'comp',
+                'pp.id_fecha_probable'
+            ))
             ->when(!is_null($idBanco), fn($q) => $q->where($bancoResuelto, $idBanco))
             ->tap(fn($q) => $this->filtrarPorOpaYRazon($q, $numeroOpa, $idRazon, 'o.num_orden_pago', 'o.id_orden_pago'))
             ->when(!is_null($filtrosGrilla), function ($q) use ($filtrosGrilla, $fechaResuelta) {

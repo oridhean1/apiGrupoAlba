@@ -217,21 +217,24 @@ class TesPagosController extends Controller
 
                 // Fecha real en que salió cada pago, una por comprobante. Sin ella, hoy.
                 $fechasPago = (array) ($params->archivos_fechas_pago ?? []);
-                foreach ($fechasArchivos as $i => $idFecha) {
+                // Un comprobante puede respaldar varias fechas (R-00000661): su "Pagado el" vale
+                // para todas ellas.
+                foreach ($fechasArchivos as $i => $idsFecha) {
                     $fechaPago = trim((string) ($fechasPago[$i] ?? ''));
                     if ($fechaPago !== '' && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $fechaPago)) {
                         DB::rollBack();
                         return response()->json(['message' => 'La fecha del pago no es válida.'], 422);
                     }
-                    $clave = $idFecha ?? 'sin';
-                    if ($fechaPago !== '' && !isset($fechaRealPorFecha[$clave])) {
-                        $fechaRealPorFecha[$clave] = $fechaPago;
+                    foreach (empty($idsFecha) ? ['sin'] : $idsFecha as $clave) {
+                        if ($fechaPago !== '' && !isset($fechaRealPorFecha[$clave])) {
+                            $fechaRealPorFecha[$clave] = $fechaPago;
+                        }
                     }
                 }
             }
             $arrayArchivos = $storage->findByCargaMasivaArchivos("COMP" . $params->id_pago . $params->num_pago, 'tesoreria/comprobantes_pago', $request);
             foreach ($arrayArchivos as $i => $key) {
-                $pago->findByCargarComprobantePago($key['nombre'], $params->id_pago, $fechasArchivos[$i] ?? null);
+                $pago->findByCargarComprobantePago($key['nombre'], $params->id_pago, $fechasArchivos[$i] ?? []);
             }
 
             // @EJECUTAMOS LOS PAGOS CON COMPROBANTE
@@ -571,12 +574,16 @@ class TesPagosController extends Controller
 
             $pagoDb = \App\Models\Tesoreria\TesPagoEntity::find($comprobante->id_pago);
 
+            // El nuevo respalda las mismas fechas vigentes que el viejo (puede ser más de una,
+            // R-00000661). Se leen ANTES de dar de baja el viejo.
+            $fechasDelViejo = $pago->fechasDeComprobante($comprobante->id_comprobante);
+
             $pago->findByDeleteComprobantePago($comprobante->id_comprobante);
 
             // Mismo nombre y carpeta que los comprobantes subidos al confirmar. El archivo se
             // escribe al final, para que una falla de la base no deje un archivo suelto.
             $subidos = $storage->findByCargaMasivaArchivos("COMP" . $pagoDb->id_pago . $pagoDb->num_pago, 'tesoreria/comprobantes_pago', $request);
-            $nuevo = $pago->findByCargarComprobantePago($subidos[0]['nombre'], $comprobante->id_pago, $comprobante->id_fecha_probable);
+            $nuevo = $pago->findByCargarComprobantePago($subidos[0]['nombre'], $comprobante->id_pago, $fechasDelViejo);
 
             DB::commit();
             return response()->json([
