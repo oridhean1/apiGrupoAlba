@@ -159,6 +159,11 @@ class FacturasPrestadoresRepository
             $query->where('id_tipo_factura', $params->id_tipo);
         }
 
+        // R-00000700: filtro que antes solo tenía la exportación
+        if (!is_null($params->id_tipo_comprobante)) {
+            $query->where('id_tipo_comprobante', $params->id_tipo_comprobante);
+        }
+
         if (!is_null($params->id_locatario)) {
             $query->where('id_razon', $params->id_locatario);
         }

@@ -168,13 +168,17 @@ class FacturasPrestadoresController extends Controller
         return response()->json(["message" => "Imputación contable cambiado correctamente"]);
     }
 
+    // R-00000700: exportando sin filtros (todos los comprobantes) PhpSpreadsheet supera los 128M
+    // por defecto (~142M con ~4.300 filas de detalle en nov/2026). Se sube el límite solo para estas exportaciones.
     public function getExportFacturaPrestador(Request $request)
     {
+        ini_set('memory_limit', '512M');
         return Excel::download(new FacturaPrestadorExport($request), 'facturacionPrestador.xlsx');
     }
 
     public function getExportFacturaProveedor(Request $request)
     {
+        ini_set('memory_limit', '512M');
         return Excel::download(new FacturaProveedorExport($request), 'facturacionProveedor.xlsx');
     }
 
