@@ -72,40 +72,71 @@ class TesExtractoBancariosRepository
             'matcheos.movimiento.pago.opa.proveedor',
             'matcheos.movimiento.pago.opa.prestador',
             'matcheos.movimiento.operacion',
+            'matcheos.movimiento.medio.orden.cliente', // cobros (R-00000689 E3)
+            'matcheos.abono.pago.opa.proveedor',        // eCheq a acreditar (E4)
+            'matcheos.abono.pago.opa.prestador',
         ]);
     }
 
     /**
      * Confirma o rechaza el match sugerido por el motor (o uno elegido a mano por el usuario).
      */
-    public function findByConfirmarMatch($idExtracto, $aprobar, $idMovimientoInterno = null, $observaciones = null)
+    public function findByConfirmarMatch($idExtracto, $aprobar, $idMovimientoInterno = null, $observaciones = null, $sinContraparte = false)
     {
-        $extracto = TesExtractosBancariosEntity::findOrFail($idExtracto);
-        $matcheo = TesConciliacionMatcheoEntity::where('id_extracto_bancario', $idExtracto)
-            ->latest('id_matching')
-            ->first();
+        // Una sola transacción: confirmar un eCheq lo acredita (asiento + movimiento) y eso tiene
+        // que quedar junto con la conciliación, o nada.
+        return \Illuminate\Support\Facades\DB::transaction(function () use ($idExtracto, $aprobar, $idMovimientoInterno, $observaciones, $sinContraparte) {
+            $extracto = TesExtractosBancariosEntity::lockForUpdate()->findOrFail($idExtracto);
+            $matcheo = TesConciliacionMatcheoEntity::where('id_extracto_bancario', $idExtracto)
+                ->latest('id_matching')
+                ->first();
 
-        if (!$matcheo) {
-            $matcheo = new TesConciliacionMatcheoEntity(['id_extracto_bancario' => $idExtracto]);
-        }
+            if (!$matcheo) {
+                $matcheo = new TesConciliacionMatcheoEntity(['id_extracto_bancario' => $idExtracto]);
+            }
 
-        if ($idMovimientoInterno) {
-            $matcheo->id_movimiento_interno = $idMovimientoInterno; // el usuario eligió un candidato distinto al sugerido
-        }
+            // Un registro bancario (E5) tiene asiento y movimiento propios: no se desconcilia a secas.
+            if ($matcheo->tipo_origen_interno === TesRegistroExtractoRepository::ORIGEN && $matcheo->estado) {
+                throw new \Exception('Esta línea se registró con asiento propio. Para deshacerla usá "Anular registro".');
+            }
 
-        $matcheo->estado = $aprobar ? 1 : 0;
-        $matcheo->id_usuario_aprobador = $this->user?->cod_usuario;
-        $matcheo->fecha_matching = $this->fechaActual;
-        if ($observaciones) {
-            $matcheo->observaciones = $observaciones;
-        }
-        $matcheo->save();
+            if ($sinContraparte) {
+                // "Conciliado sin contraparte" (comisión, etc.): no se usa la sugerencia.
+                $matcheo->id_movimiento_interno = null;
+                $matcheo->id_pago_parcial = null;
+            } elseif ($idMovimientoInterno) {
+                $matcheo->id_movimiento_interno = $idMovimientoInterno; // el usuario eligió un candidato distinto al sugerido
+                $matcheo->id_pago_parcial = null;
+            }
 
-        $extracto->estado_conciliacion = $aprobar ? 'CONCILIADO_MANUAL' : 'PENDIENTE';
-        $extracto->id_usuario_confirma = $this->user?->cod_usuario;
-        $extracto->fecha_confirma = $this->fechaActual;
-        $extracto->save();
+            $matching = app(TesConciliacionMatchingRepository::class);
 
-        return $extracto;
+            // eCheq emitido sugerido: confirmar lo acredita con la fecha del extracto (R-00000689 P1).
+            if ($aprobar && $matcheo->id_pago_parcial && !$matcheo->id_movimiento_interno) {
+                $matcheo->id_movimiento_interno = $matching->acreditarDesdeExtracto($extracto, $matcheo->id_pago_parcial);
+            }
+
+            // El movimiento puede venir elegido a mano: misma cuenta (⇒ misma razón), mismo sentido y
+            // no conciliado contra otra línea. Sin candidato = "conciliado sin contraparte" (comisión, etc.).
+            if ($aprobar && $matcheo->id_movimiento_interno) {
+                $matching->validarParaConfirmar($extracto, $matcheo->id_movimiento_interno, $extracto->id_extracto);
+            }
+
+            $matcheo->estado = $aprobar ? 1 : 0;
+            $matcheo->id_usuario_aprobador = $this->user?->cod_usuario;
+            $matcheo->fecha_matching = $this->fechaActual;
+            if ($observaciones) {
+                $matcheo->observaciones = $observaciones;
+            }
+            $matcheo->save();
+
+            $extracto->estado_conciliacion = $aprobar ? 'CONCILIADO_MANUAL' : 'PENDIENTE';
+            $extracto->id_movimiento_match = $aprobar ? $matcheo->id_movimiento_interno : null;
+            $extracto->id_usuario_confirma = $this->user?->cod_usuario;
+            $extracto->fecha_confirma = $this->fechaActual;
+            $extracto->save();
+
+            return $extracto;
+        });
     }
 }

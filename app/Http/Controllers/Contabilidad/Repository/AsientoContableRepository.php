@@ -556,6 +556,80 @@ class AsientoContableRepository
     }
 
     /**
+     * Registro desde la conciliación de una línea del extracto que no nació en Tesorería
+     * (R-00000689 E5): gasto/impuesto bancario, sueldos, FCI, seguros o traspaso entre cuentas.
+     *
+     * Débito (EGRESO): contra (D) / Banco (H). Crédito (INGRESO): Banco (D) / contra (H).
+     * `contra` es una cuenta contable (`id_detalle_plan`) o, en un traspaso, otra cuenta bancaria
+     * (`id_cuenta_bancaria`, se usa su cuenta de BANCO). Fecha del asiento = fecha del extracto.
+     *
+     * $d: id_extracto, id_razon, id_cuenta_bancaria, nombre_cuenta, sentido, contra, importe,
+     *     descripcion, fecha.
+     */
+    public function crearAsientoRegistroBancario(array $d, $idPeriodoContable)
+    {
+        $this->validarPeriodoContable($idPeriodoContable, 'el asiento del registro bancario');
+
+        $banco = $this->obtenerCuentaContableByCuentaBancaria($d['id_cuenta_bancaria']);
+        if (!$banco || empty($banco->id_detalle_plan)) {
+            throw new Exception("La cuenta bancaria {$d['nombre_cuenta']} no tiene cuenta contable de BANCO. Por favor contacte con Contabilidad.");
+        }
+
+        $idContraBco = null;
+        if (!empty($d['contra']['id_cuenta_bancaria'])) {
+            $otro = $this->obtenerCuentaContableByCuentaBancaria($d['contra']['id_cuenta_bancaria']);
+            if (!$otro || empty($otro->id_detalle_plan)) {
+                throw new Exception("La cuenta bancaria {$d['contra']['nombre']} no tiene cuenta contable de BANCO. Por favor contacte con Contabilidad.");
+            }
+            $idContraPlan = $otro->id_detalle_plan;
+            $idContraBco = $otro->id_banco_cuenta_contable;
+        } else {
+            $idContraPlan = $d['contra']['id_detalle_plan'] ?? null;
+        }
+        if (empty($idContraPlan)) {
+            throw new Exception('Falta la cuenta contable de contrapartida del registro bancario.');
+        }
+
+        $importe = round((float) $d['importe'], 2);
+        if ($importe <= 0) {
+            throw new Exception('El importe del registro tiene que ser mayor a cero.');
+        }
+
+        $asiento = $this->findByCrearAsiento(
+            1,
+            'REGISTRO_BANCARIO',
+            "REGISTRO BANCARIO - {$d['descripcion']} - {$d['nombre_cuenta']} - FECHA: {$d['fecha']}",
+            $this->obtenerSiguienteNumeroAsiento(),
+            $idPeriodoContable,
+            $d['id_extracto'],
+            'ACTIVO',
+            $d['id_razon']
+        );
+        $asiento->fecha_asiento = $d['fecha'];
+        $asiento->save();
+
+        $egreso = $d['sentido'] === 'EGRESO';
+        $this->findByCrearDetalleAsiento([
+            'id_asiento_contable' => $asiento->id_asiento_contable,
+            'id_cuenta_bancaria_cuenta_contable' => $idContraBco,
+            'monto_debe' => $egreso ? $importe : 0,
+            'monto_haber' => $egreso ? 0 : $importe,
+            'observaciones' => $d['contra']['nombre'],
+            'id_detalle_plan' => $idContraPlan,
+        ]);
+        $this->findByCrearDetalleAsiento([
+            'id_asiento_contable' => $asiento->id_asiento_contable,
+            'id_cuenta_bancaria_cuenta_contable' => $banco->id_banco_cuenta_contable,
+            'monto_debe' => $egreso ? 0 : $importe,
+            'monto_haber' => $egreso ? $importe : 0,
+            'observaciones' => $d['nombre_cuenta'],
+            'id_detalle_plan' => $banco->id_detalle_plan,
+        ]);
+
+        return $asiento;
+    }
+
+    /**
      * Contraasiento completo (todas las líneas invertidas) en el período indicado; el original
      * queda marcado CONTRAASIENTO. Mismo criterio que generarContraasiento() de los historiales,
      * sin tabla de historial: el vínculo lo guarda quien lo llama.

@@ -802,8 +802,8 @@ class TestOrdenPagoRepository
      *
      * No es una columna propia de la orden: sale de sus facturas
      * (`tb_tes_orden_pago_detalle` -> `tb_facturacion_datos.id_locatorio`), igual que el filtro
-     * de Carga de eCheq. Un ANTICIPO no tiene facturas imputadas, así que devuelve null y las
-     * validaciones que dependan de esto no se aplican.
+     * de Carga de eCheq. Un ANTICIPO no tiene facturas: vale `tb_tes_orden_pago.id_razon`
+     * (ver `razonesSocialesDeOpa`). Devuelve null sólo si no hay ninguna o hay más de una.
      */
     public function razonSocialDeOpa($idOpa): ?int
     {
@@ -825,8 +825,8 @@ class TestOrdenPagoRepository
      * Que haya más es una anomalía de datos —una sola en todo el sistema al 2026-09-09, la
      * OPA-1102— pero el código no puede resolverla eligiendo una al azar.
      *
-     * Un ANTICIPO no tiene facturas imputadas: devuelve vacío, y las validaciones que dependen
-     * de esto no se aplican.
+     * Un ANTICIPO no tiene facturas imputadas: vale la razón propia de la orden (abajo). Vacío
+     * sólo si tampoco la tiene; quien use esto para validar tiene que cortar en ese caso.
      */
     public function razonesSocialesDeOpa($idOpa): array
     {
@@ -2110,6 +2110,15 @@ class TestOrdenPagoRepository
         // contraasienta cada pago y devuelve lo debitado. Hasta acá las dos guardas que había
         // ("tiene pagos confirmados" y "hay eCheq emitidos") lo impedían porque no había cómo
         // revertir; el proceso documentado del cliente (punto 7) prevé anular cualquier orden.
+
+        // Salvo que algún pago ya esté conciliado con el extracto (R-00000689 P7): primero se
+        // desconcilia. Va acá (y no sólo en revertirPagosDeOpa) para que el motivo llegue al
+        // usuario en vez del "Error al anular" genérico del catch (2026-11-19).
+        $idsPago = TesPagoEntity::where('id_orden_pago', $idOpa)->pluck('id_pago')->all();
+        $conciliado = TesConciliacionMatchingRepository::motivoEgresoConciliado($idsPago);
+        if (!is_null($conciliado)) {
+            return $conciliado;
+        }
 
         return null;
     }

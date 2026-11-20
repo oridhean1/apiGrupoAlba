@@ -1189,8 +1189,8 @@ Route::group(
         Route::get('tipo-transacciones', [App\Http\Controllers\Tesoreria\Services\TesCuentasFilterController::class, 'getListarTipoTransaciones']);
         Route::get('consultar-transaciones', [App\Http\Controllers\Tesoreria\Services\TesOperacionesManualesController::class, 'getListarTransaciones']);
         Route::get('cuenta-bancaria-id', [App\Http\Controllers\Tesoreria\Services\TesCuentasFilterController::class, 'findById']);
-        Route::get('consultar-conciliacion-bancarias', [App\Http\Controllers\Tesoreria\Services\TesConciliacionBancariaController::class, 'getListar']);
         Route::get('consultar-extractos-bancarios', [App\Http\Controllers\Tesoreria\Services\TesExtractosBacariosController::class, 'getFiltrar']);
+        Route::get('conceptos-bancarios-extracto', [App\Http\Controllers\Tesoreria\Services\TesExtractosBacariosController::class, 'getConceptosBancarios']); // R-00000689 E5
         Route::get('detalle-pagos-confirmados-opa', [App\Http\Controllers\Tesoreria\Services\TesPagosController::class, 'getListarDetallePago']);
         Route::get('ver-comp-ope-manual', [App\Http\Controllers\Tesoreria\Services\TesOperacionesManualesController::class, 'getVerAdjunto']);
         Route::get('filtrar-cheques', [App\Http\Controllers\Tesoreria\Services\TesChequesController::class, 'getListarCheques']);
@@ -1251,11 +1251,12 @@ Route::group(
         Route::post('reemplazar-comprobante-pago', [App\Http\Controllers\Tesoreria\Services\TesPagosController::class, 'getReemplazarComprobantePago']);  // Cambia solo el archivo del comprobante, sin impacto contable (R-00000665)
         Route::post('operacion-manual', [App\Http\Controllers\Tesoreria\Services\TesOperacionesManualesController::class, 'getNuevaOperacion']);
         Route::post('operacion-manual-enlazar-factura', [App\Http\Controllers\Tesoreria\Services\TesOperacionesManualesController::class, 'getEnalazarFacturaObraSocial']);
-        Route::post('procesar-conciliacion-bancaria', [App\Http\Controllers\Tesoreria\Services\TesConciliacionBancariaController::class, 'getProcesar']);
         Route::post('previsualizar-extracto-bancario', [App\Http\Controllers\Tesoreria\Services\TesExtractosBacariosController::class, 'getPrevisualizarExtracto']);
         Route::post('guardar-conciliacion-bancaria', [App\Http\Controllers\Tesoreria\Services\TesExtractosBacariosController::class, 'getGuardarConciliacion']);
         Route::post('ejecutar-cygnus-finance-ai', [App\Http\Controllers\Tesoreria\Services\CygnusFinanceAiController::class, 'ejecutarMotorMatching']);
         Route::post('confirmar-match-extracto', [App\Http\Controllers\Tesoreria\Services\TesExtractosBacariosController::class, 'getConfirmarMatch']);
+        Route::post('registrar-movimiento-extracto', [App\Http\Controllers\Tesoreria\Services\TesExtractosBacariosController::class, 'getRegistrarMovimientoExtracto']); // R-00000689 E5
+        Route::post('anular-registro-extracto', [App\Http\Controllers\Tesoreria\Services\TesExtractosBacariosController::class, 'getAnularRegistroExtracto']); // R-00000689 E5
         Route::post('procesar-cheque', [App\Http\Controllers\Tesoreria\Services\TesChequesController::class, 'getProcesar']);
 
         Route::get('imprimir-reporte-pago-opa/{id}', [App\Http\Controllers\Tesoreria\Services\TesOrdenPagoController::class, 'printOrderPay']);
@@ -1505,6 +1506,9 @@ Route::group([
     Route::get('cs-tipo-retencion', [App\Http\Controllers\Contabilidad\Services\CatalogoController::class, 'getTipoRetencion']);
     Route::get('cs-tipo-impuesto', [App\Http\Controllers\Contabilidad\Services\CatalogoController::class, 'getTipoImpuesto']);
     Route::get('cs-retencion-cuenta-contable', [App\Http\Controllers\Contabilidad\Services\RetencionCuentaContableController::class, 'getListar']);
+    // Relaciones Contables › Cuentas por razón social (ventas, conceptos bancarios, contrapartes). 2026-11-19
+    Route::get('cs-razon-cuenta-contable', [App\Http\Controllers\Contabilidad\Services\RazonCuentaContableController::class, 'getListar']);
+    Route::post('psr-razon-cuenta-contable', [App\Http\Controllers\Contabilidad\Services\RazonCuentaContableController::class, 'postGuardar']);
     Route::get('cs-plan-cuenta-completo', [App\Http\Controllers\Contabilidad\Services\PlanesCuentasController::class, 'getListarCuentasCompleto']);
     Route::get('get-export-plan-cuentas', [App\Http\Controllers\Contabilidad\Services\PlanesCuentasController::class, 'getExportPlanCuentas']);
     Route::get('get-imputaciones-contables', [App\Http\Controllers\Contabilidad\Services\ImputacionCuentaContableController::class, 'getListarTipoImputacionContable']);

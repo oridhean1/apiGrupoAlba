@@ -58,18 +58,34 @@ class TesCuentasFiltrosRepository
 
     public function findByListMovimientos($desde, $hasta)
     {
-        return TesMovientosCuentaBancariaEntity::with(['cuenta'])
-            ->whereBetween(DB::raw('DATE(fecha_movimiento)'), [$desde, $hasta])
-            ->orderByDesc('id_movimiento')
+        return $this->movimientosQuery($desde, $hasta)->get();
+    }
+
+    public function findByListMovimientosIdCuenta($desde, $hasta, $cuenta, bool $conciliables = false)
+    {
+        return $this->movimientosQuery($desde, $hasta, $conciliables)
+            ->where('id_cuenta_bancaria', $cuenta)
             ->get();
     }
 
-    public function findByListMovimientosIdCuenta($desde, $hasta, $cuenta)
+    /**
+     * Movimientos más nuevos primero (por fecha). Cada extremo de fecha filtra sólo si viene:
+     * sin filtros de fecha se listan todos (2026-11-19).
+     */
+    /**
+     * `$conciliables` (buscador manual del Visor): sólo lo que se puede elegir para conciliar, sin
+     * movimientos anulados ni sus ANULACION ni los ya conciliados con otra línea (2026-11-19).
+     */
+    private function movimientosQuery($desde, $hasta, bool $conciliables = false)
     {
-        return TesMovientosCuentaBancariaEntity::with(['cuenta'])
-            ->whereBetween(DB::raw('DATE(fecha_movimiento)'), [$desde, $hasta])
-            ->where('id_cuenta_bancaria', $cuenta)
-            ->orderByDesc('id_movimiento')
-            ->get();
+        $base = $conciliables
+            ? TesRegistroExtractoRepository::movimientosVigentes()
+                ->whereDoesntHave('matcheos', fn($q) => $q->where('estado', 1))
+            : TesMovientosCuentaBancariaEntity::query();
+        return $base->with(['cuenta'])
+            ->when(!empty($desde), fn($q) => $q->where(DB::raw('DATE(fecha_movimiento)'), '>=', $desde))
+            ->when(!empty($hasta), fn($q) => $q->where(DB::raw('DATE(fecha_movimiento)'), '<=', $hasta))
+            ->orderByDesc('fecha_movimiento')
+            ->orderByDesc('id_movimiento');
     }
 }

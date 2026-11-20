@@ -878,17 +878,19 @@ class TesPagosRepository
     {
         $hoy = $this->fechaActual->toDateString();
 
-        $comprobantes = DB::table('tb_test_pago_detalle_comprobantes')
-            ->where('id_pago', $idPago)
-            ->where('estado', '1')
-            ->pluck('id_fecha_probable');
+        $cobertura = self::coberturaDeComprobantes($idPago);
 
-        if ($comprobantes->isEmpty()) {
+        if (empty($cobertura)) {
             return [];
         }
 
-        $hayComprobanteDeBoleta = $comprobantes->contains(fn($f) => is_null($f));
-        $fechasConComprobante = $comprobantes->filter()->map(fn($f) => (int) $f)->all();
+        $hayComprobanteDeBoleta = in_array(null, $cobertura, true);
+        $fechasConComprobante = [];
+        foreach ($cobertura as $fechas) {
+            foreach ((array) $fechas as $idFecha) {
+                $fechasConComprobante[] = $idFecha;
+            }
+        }
 
         $ejecutados = [];
 
@@ -963,25 +965,33 @@ class TesPagosRepository
             return null;
         }
 
-        $idFecha = $comprobante->id_fecha_probable;
+        // Un comprobante puede cubrir varias fechas (R-00000661). Se puede quitar sólo si CADA
+        // fecha suya con pagos ejecutados queda respaldada por otro comprobante vivo.
+        $cobertura = self::coberturaDeComprobantes($comprobante->id_pago);
+        // null = respalda toda la boleta (comprobante viejo); `??` lo confundiría con "nada".
+        $mias = array_key_exists((int) $comprobante->id_comprobante, $cobertura)
+            ? $cobertura[(int) $comprobante->id_comprobante]
+            : [];
+        unset($cobertura[(int) $comprobante->id_comprobante]);
 
-        $otroVivo = TestDetalleComprobantesPagoEntity::where('id_pago', $comprobante->id_pago)
-            ->where('estado', '1')
-            ->where('id_comprobante', '!=', $comprobante->id_comprobante)
-            ->where(fn($q) => is_null($idFecha)
-                ? $q->whereNull('id_fecha_probable')
-                : $q->where('id_fecha_probable', $idFecha)->orWhereNull('id_fecha_probable'))
-            ->exists();
+        $otroCubre = function (?int $idFecha) use ($cobertura): bool {
+            foreach ($cobertura as $fechas) {
+                if (is_null($fechas) || (!is_null($idFecha) && in_array($idFecha, $fechas, true))) {
+                    return true;
+                }
+            }
+            return false;
+        };
 
-        if ($otroVivo) {
-            return null;
-        }
-
-        $ejecutados = TesPagosParciales::where('id_pago', $comprobante->id_pago)
+        $ejecutadas = TesPagosParciales::where('id_pago', $comprobante->id_pago)
             ->vivos()
             ->whereNotNull('fecha_ejecucion')
-            ->when(!is_null($idFecha), fn($q) => $q->where('id_fecha_probable', $idFecha))
-            ->exists();
+            ->when(!is_null($mias), fn($q) => $q->whereIn('id_fecha_probable', $mias ?: [0]))
+            ->pluck('id_fecha_probable')
+            ->map(fn($f) => is_null($f) ? null : (int) $f)
+            ->unique();
+
+        $ejecutados = $ejecutadas->contains(fn($idFecha) => !$otroCubre($idFecha));
 
         return $ejecutados
             ? 'Ese comprobante respalda pagos ya ejecutados (con su débito y su asiento), así que no '
@@ -1049,31 +1059,141 @@ class TesPagosRepository
             ->get();
     }
 
-    public function findByCargarComprobantePago($archivo, $idPago, $idFechaProbable = null)
+    /** Tabla puente comprobante ↔ fechas del cronograma que respalda (R-00000661). */
+    public const TABLA_COMPROBANTE_FECHA = 'tb_tes_comprobante_pago_fecha';
+
+    /**
+     * Guarda un comprobante y las fechas del cronograma que respalda.
+     *
+     * Un comprobante puede respaldar VARIAS fechas (R-00000661, 2026-11-20: una sola foto de dos
+     * cheques). Cada fecha queda en `tb_tes_comprobante_pago_fecha`, que es la fuente de verdad.
+     * `id_fecha_probable` de la cabecera se sigue llenando cuando es UNA sola fecha, por
+     * compatibilidad; con varias queda NULL y manda el puente. Sin fechas (boleta sin
+     * cronograma) el comprobante cubre toda la boleta, como antes.
+     *
+     * @param int[] $idsFecha
+     */
+    public function findByCargarComprobantePago($archivo, $idPago, $idsFecha = [])
     {
-        return TestDetalleComprobantesPagoEntity::create([
+        $idsFecha = array_values(array_unique(array_map('intval', array_filter((array) $idsFecha, fn($f) => !is_null($f) && $f !== ''))));
+
+        $comprobante = TestDetalleComprobantesPagoEntity::create([
             'id_pago' => $idPago,
-            'id_fecha_probable' => $idFechaProbable,
+            'id_fecha_probable' => count($idsFecha) === 1 ? $idsFecha[0] : null,
             'nombre_archivo' => $archivo,
             'fecha_registra' => $this->fechaActual,
             'cod_usuario_registra' => $this->user->cod_usuario,
             'estado' => '1'
         ]);
+
+        foreach ($idsFecha as $idFecha) {
+            DB::table(self::TABLA_COMPROBANTE_FECHA)->insert([
+                'id_comprobante' => $comprobante->id_comprobante,
+                'id_fecha_probable' => $idFecha,
+                'estado' => 1,
+                'fecha_registra' => $this->fechaActual,
+                'cod_usuario_registra' => $this->user->cod_usuario,
+            ]);
+        }
+
+        return $comprobante;
     }
 
     /**
-     * A qué fecha del cronograma va cada comprobante que se está subiendo, o el motivo por el que
-     * no se puede adjuntar. Devuelve `[ [idFecha|null, ...], null ]` o `[ null, 'mensaje' ]`.
+     * Qué fechas respalda cada comprobante VIVO de la boleta: `[id_comprobante => int[]|null]`.
+     * `null` = toda la boleta (comprobante viejo o de una boleta sin cronograma).
      *
-     * El comprobante es lo que saca un pago de "Pagos a emitir" (2026-10-23), así que no se acepta
-     * a ciegas:
+     * - Con filas en el puente: las vigentes. Las dadas de baja (al anular el pago de esa fecha)
+     *   quedan como historia pero ya no respaldan nada.
+     * - Sin filas: la columna `id_fecha_probable` (formato 2026-10-23 a 2026-11-20); si es NULL,
+     *   toda la boleta. Así funciona igual aunque el puente no se haya poblado.
+     */
+    public static function coberturaDeComprobantes($idPago): array
+    {
+        $comprobantes = DB::table('tb_test_pago_detalle_comprobantes')
+            ->where('id_pago', $idPago)
+            ->where('estado', '1')
+            ->get(['id_comprobante', 'id_fecha_probable']);
+
+        if ($comprobantes->isEmpty()) {
+            return [];
+        }
+
+        $filas = DB::table(self::TABLA_COMPROBANTE_FECHA)
+            ->whereIn('id_comprobante', $comprobantes->pluck('id_comprobante'))
+            ->get(['id_comprobante', 'id_fecha_probable', 'estado'])
+            ->groupBy('id_comprobante');
+
+        $cobertura = [];
+        foreach ($comprobantes as $c) {
+            $mias = $filas->get($c->id_comprobante);
+            if ($mias && $mias->isNotEmpty()) {
+                $cobertura[(int) $c->id_comprobante] = $mias->where('estado', 1)
+                    ->pluck('id_fecha_probable')->map(fn($f) => (int) $f)->values()->all();
+            } else {
+                $cobertura[(int) $c->id_comprobante] = is_null($c->id_fecha_probable) ? null : [(int) $c->id_fecha_probable];
+            }
+        }
+
+        return $cobertura;
+    }
+
+    /**
+     * Condición SQL "el comprobante `$aliasComp` respalda la fecha `$colFecha`", con el mismo
+     * criterio que `coberturaDeComprobantes()`. Para el Excel de "Pagos a emitir".
+     */
+    public static function whereComprobanteCubreFecha($query, string $aliasComp, string $colFecha)
+    {
+        $tabla = self::TABLA_COMPROBANTE_FECHA;
+
+        return $query->where(fn($q) => $q
+            ->whereExists(fn($x) => $x->select(DB::raw(1))
+                ->from("{$tabla} as cf")
+                ->whereColumn('cf.id_comprobante', "{$aliasComp}.id_comprobante")
+                ->whereColumn('cf.id_fecha_probable', $colFecha)
+                ->where('cf.estado', 1))
+            ->orWhere(fn($sin) => $sin
+                ->whereNotExists(fn($x) => $x->select(DB::raw(1))
+                    ->from("{$tabla} as cf2")
+                    ->whereColumn('cf2.id_comprobante', "{$aliasComp}.id_comprobante"))
+                ->where(fn($col) => $col->whereNull("{$aliasComp}.id_fecha_probable")
+                    ->orWhereColumn("{$aliasComp}.id_fecha_probable", $colFecha))));
+    }
+
+    /**
+     * Fechas vigentes de un comprobante, para copiarlas al reemplazar su archivo. `[]` = cubre
+     * toda la boleta.
      *
-     * - **La fecha tiene que ser de esta boleta.** Si no viene y la boleta tiene una sola fecha, es
-     *   esa. Si tiene varias y no se dijo cuál, se corta: adivinar sacaría del Excel otra cuota.
+     * @return int[]
+     */
+    public function fechasDeComprobante($idComprobante): array
+    {
+        $comprobante = TestDetalleComprobantesPagoEntity::find($idComprobante);
+        if (is_null($comprobante)) {
+            return [];
+        }
+        $cobertura = self::coberturaDeComprobantes($comprobante->id_pago);
+        return $cobertura[(int) $idComprobante] ?? [];
+    }
+
+    /**
+     * A qué fechas del cronograma va cada comprobante que se está subiendo, o el motivo por el que
+     * no se puede adjuntar. Devuelve `[ [int[], ...], null ]` (una lista de fechas por archivo;
+     * vacía = boleta sin cronograma) o `[ null, 'mensaje' ]`.
+     *
+     * El comprobante es lo que EJECUTA los pagos de sus fechas (débito y asiento, 2026-10-28) y los
+     * saca de "Pagos a emitir", así que no se acepta a ciegas:
+     *
+     * - **Cada archivo dice qué fechas respalda: una o varias** (R-00000661, 2026-11-20; antes era
+     *   una sola). Si la boleta tiene una sola fecha y no se dijo, es esa. Si tiene varias y no se
+     *   marcó ninguna, se corta: asumir "todas" ejecutaría pagos que todavía no salieron.
      *   Una boleta sin cronograma (anticipo, circuito viejo) guarda el comprobante sin fecha.
-     * - **La fecha tiene que tener un pago cargado**, y cada eCheq su número real (no provisorio).
-     *   Un comprobante sobre un eCheq sin número lo sacaría del Excel y quedaría un instrumento que
-     *   nadie puede acreditar ni conciliar. La transferencia no lo necesita: el comprobante alcanza.
+     * - **Cada fecha tiene que ser de esta boleta y tener un pago cargado**, y cada eCheq su número
+     *   real (no provisorio). Un comprobante sobre un eCheq sin número lo sacaría del Excel y
+     *   quedaría un instrumento que nadie puede acreditar ni conciliar. La transferencia no lo
+     *   necesita: el comprobante alcanza.
+     *
+     * Acepta por archivo un id suelto (front anterior) o una lista de ids.
      *
      * Se llama DESPUÉS de `findByConfirmarPago()` (que guarda los números cargados en el modal) y
      * ANTES de escribir los archivos en disco, que el rollback no borra.
@@ -1087,27 +1207,33 @@ class TesPagosRepository
             ->all();
 
         $resueltas = [];
+        $aValidar = [];
         for ($i = 0; $i < $cantidad; $i++) {
-            $pedida = $fechasPedidas[$i] ?? null;
-            $pedida = ($pedida === null || $pedida === '') ? null : (int) $pedida;
+            $pedidas = $fechasPedidas[$i] ?? [];
+            $pedidas = is_array($pedidas) ? $pedidas : [$pedidas];
+            $pedidas = array_values(array_unique(array_map('intval', array_filter($pedidas, fn($f) => !is_null($f) && $f !== '' && (int) $f > 0))));
 
             if (empty($fechasBoleta)) {
-                $resueltas[] = null;
+                $resueltas[] = [];
+                $aValidar[] = null;
                 continue;
             }
-            if (is_null($pedida)) {
+            if (empty($pedidas)) {
                 if (count($fechasBoleta) !== 1) {
-                    return [null, 'Indicá a qué fecha de pago corresponde cada comprobante.'];
+                    return [null, 'Marcá a qué fecha o fechas de pago corresponde cada comprobante.'];
                 }
-                $pedida = $fechasBoleta[0];
+                $pedidas = [$fechasBoleta[0]];
             }
-            if (!in_array($pedida, $fechasBoleta, true)) {
-                return [null, 'El comprobante está asignado a una fecha que no es de esta orden.'];
+            foreach ($pedidas as $pedida) {
+                if (!in_array($pedida, $fechasBoleta, true)) {
+                    return [null, 'El comprobante está asignado a una fecha que no es de esta orden.'];
+                }
+                $aValidar[] = $pedida;
             }
-            $resueltas[] = $pedida;
+            $resueltas[] = $pedidas;
         }
 
-        foreach (array_unique($resueltas, SORT_REGULAR) as $idFecha) {
+        foreach (array_unique($aValidar, SORT_REGULAR) as $idFecha) {
             $pagos = DB::table('tb_tes_pago_parcial')
                 ->where('id_pago', $idPago)
                 ->when(!is_null($idFecha), fn($q) => $q->where('id_fecha_probable', $idFecha))

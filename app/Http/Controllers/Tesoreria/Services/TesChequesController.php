@@ -82,7 +82,7 @@ class TesChequesController extends Controller
 
         $data = $repoCheque->findByList($request->desde, $request->hasta);
 
-        return response()->json($data, 200);
+        return response()->json($this->soloDeLaRazon($data, $request), 200);
     }
 
     public function getVerAdjunto(TestChequesRepository $pago, ManejadorDeArchivosUtils $storageFile, Request $request)
@@ -93,5 +93,19 @@ class TesChequesController extends Controller
         $path .= "{$anioTrabaja}/$data->archivo_adjunto";
 
         return $storageFile->findByObtenerArchivo($path);
+    }
+
+    /**
+     * Pantalla Cuentas con razón social elegida arriba (2026-11-18): sólo lo de las cuentas de esa
+     * razón, así no se mezclan las entidades del grupo. Sin `id_razon`, como antes.
+     */
+    private function soloDeLaRazon($data, Request $request)
+    {
+        if (!$request->filled('id_razon')) {
+            return $data;
+        }
+        $ids = \App\Models\Tesoreria\TesCuentasBancariasEntity::where('id_razon', $request->id_razon)
+            ->pluck('id_cuenta_bancaria')->map(fn($i) => (int) $i)->all();
+        return collect($data)->filter(fn($r) => in_array((int) $r->id_cuenta_bancaria, $ids, true))->values();
     }
 }

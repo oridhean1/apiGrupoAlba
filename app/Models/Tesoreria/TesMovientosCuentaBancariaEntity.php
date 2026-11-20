@@ -21,7 +21,8 @@ class TesMovientosCuentaBancariaEntity extends Model
         'tipo_movimiento',
         'id_pago',
         'descripcion',
-        'id_operacion'
+        'id_operacion',
+        'id_orden_medio'
     ];
 
     public function cuenta()
@@ -42,5 +43,11 @@ class TesMovientosCuentaBancariaEntity extends Model
     public function matcheos()
     {
         return $this->hasMany(TesConciliacionMatcheoEntity::class, 'id_movimiento_interno', 'id_movimiento');
+    }
+
+    /** Medio de cobro (circuito de ingresos) que originó el movimiento. R-00000689 E2. */
+    public function medio()
+    {
+        return $this->hasOne(\App\Models\Tesoreria\Ingresos\TesIngOrdenMedioEntity::class, 'id_orden_medio', 'id_orden_medio');
     }
 }
