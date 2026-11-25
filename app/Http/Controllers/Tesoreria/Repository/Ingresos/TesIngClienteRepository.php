@@ -100,7 +100,12 @@ class TesIngClienteRepository
      * Saldo positivo = nos debe; negativo = a favor del cliente. Control: tiene que dar igual a
      * Σ saldo de facturas − Σ anticipos disponibles − Σ saldo a favor de NC (`control`).
      */
-    public function cuentaCorriente($idRazon, $idCliente, ?string $hasta = null): array
+    /**
+     * Movimientos con saldo acumulado. Con `$desde` (R-00000684) los movimientos anteriores se
+     * resumen en una fila SALDO_ANTERIOR, como en la cuenta corriente de prestadores; los saldos de
+     * deuda, anticipos y NC no cambian (son "a la fecha hasta").
+     */
+    public function cuentaCorriente($idRazon, $idCliente, ?string $hasta = null, ?string $desde = null): array
     {
         $comprobantes = DB::table('tb_tes_ing_comprobante as c')
             ->join('tb_tes_ing_tipo_comprobante as t', 't.id_tipo_comprobante', '=', 'c.id_tipo_comprobante')
@@ -112,12 +117,24 @@ class TesIngClienteRepository
             ->where('o.id_razon', $idRazon)->where('o.id_cliente', $idCliente)
             ->whereIn('o.id_estado', self::ESTADOS_EFECTIVOS)
             ->when($hasta, fn($q) => $q->where('o.fecha_cobro', '<=', $hasta))
-            ->get(['o.id_orden_cobranza', 'o.numero', 'o.fecha_cobro', 'o.saldo_anticipo',
+            ->get(['o.id_orden_cobranza', 'o.numero', 'o.fecha_cobro', 'o.saldo_anticipo', 'o.observaciones',
                 DB::raw('(SELECT COALESCE(SUM(importe),0) FROM tb_tes_ing_orden_medio m WHERE m.id_orden_cobranza = o.id_orden_cobranza) AS medios'),
                 DB::raw('(SELECT COALESCE(SUM(importe),0) FROM tb_tes_ing_retencion r WHERE r.id_orden_cobranza = o.id_orden_cobranza) AS retencion'),
                 DB::raw('(SELECT COALESCE(SUM(importe),0) FROM tb_tes_ing_anticipo_aplicacion a WHERE a.id_orden_cobranza = o.id_orden_cobranza AND a.anulado = 0) AS anticipos'),
                 DB::raw("(SELECT GROUP_CONCAT(CONCAT(LPAD(c.punto_venta,5,'0'),'-',LPAD(c.numero,8,'0')) SEPARATOR ', ') FROM tb_tes_ing_imputacion i JOIN tb_tes_ing_comprobante c ON c.id_comprobante = i.id_comprobante WHERE i.id_orden_cobranza = o.id_orden_cobranza AND i.anulado = 0) AS facturas"),
             ]);
+
+        // Renglones de medio de cobro de cada orden (para el Excel). Los cheques no tienen cuenta
+        // hasta depositarse: ahí la cuenta es la de depósito.
+        $medios = $ordenes->isEmpty() ? collect() : DB::table('tb_tes_ing_orden_medio as m')
+            ->join('tb_tes_formas_pago as f', 'f.id_forma_pago', '=', 'm.id_forma_pago')
+            ->leftJoin('tb_tes_cuentas_bancarias as cb', 'cb.id_cuenta_bancaria', '=', 'm.id_cuenta_bancaria')
+            ->leftJoin('tb_tes_cuentas_bancarias as cd', 'cd.id_cuenta_bancaria', '=', 'm.id_cuenta_deposito')
+            ->whereIn('m.id_orden_cobranza', $ordenes->pluck('id_orden_cobranza'))
+            ->orderBy('m.id_orden_medio')
+            ->get(['m.id_orden_cobranza', 'f.tipo_pago', 'm.referencia', 'm.importe',
+                DB::raw('COALESCE(cb.nombre_cuenta, cd.nombre_cuenta) AS cuenta')])
+            ->groupBy('id_orden_cobranza');
 
         $nro = fn($pv, $n) => sprintf('%05d-%08d', $pv, $n);
         $movs = [];
@@ -153,6 +170,14 @@ class TesIngClienteRepository
                 'haber' => round((float) $o->medios + (float) $o->retencion, 2),
                 'orden' => 2,
                 'id' => $o->id_orden_cobranza,
+                'medios' => ($medios[$o->id_orden_cobranza] ?? collect())->map(fn($m) => [
+                    'forma' => $m->tipo_pago,
+                    'cuenta' => $m->cuenta,
+                    'referencia' => $m->referencia,
+                    'importe' => (float) $m->importe,
+                ])->values()->all(),
+                'retencion' => (float) $o->retencion,
+                'observaciones' => $o->observaciones,
             ];
         }
 
@@ -164,6 +189,19 @@ class TesIngClienteRepository
         }
         unset($m);
 
+        $saldoAnterior = null;
+        if ($desde) {
+            $anteriores = array_filter($movs, fn($m) => $m['fecha'] < $desde);
+            $movs = array_values(array_filter($movs, fn($m) => $m['fecha'] >= $desde));
+            if ($anteriores) {
+                $saldoAnterior = end($anteriores)['saldo'];
+                array_unshift($movs, [
+                    'fecha' => $desde, 'tipo' => 'SALDO_ANTERIOR', 'comprobante' => 'Saldo anterior al período',
+                    'detalle' => '', 'debe' => 0, 'haber' => 0, 'orden' => 0, 'id' => 0, 'saldo' => $saldoAnterior,
+                ]);
+            }
+        }
+
         $pendientes = $this->pendientesPorAntiguedad($comprobantes);
         $anticipos = round($ordenes->sum(fn($o) => (float) $o->saldo_anticipo), 2);
         $deuda = round(array_sum(array_column($pendientes['facturas'], 'saldo')), 2);
@@ -172,6 +210,7 @@ class TesIngClienteRepository
 
         return [
             'movimientos' => $movs,
+            'saldo_anterior' => $saldoAnterior,
             'saldo' => $saldo,
             'deuda_facturas' => $deuda,
             'anticipos_disponibles' => $anticipos,

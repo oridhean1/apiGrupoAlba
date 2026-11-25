@@ -30,4 +30,9 @@ class TesIngOrdenCobranzaEntity extends Model
         'cod_usuario_modifica',
         'fecha_modifica',
     ];
+
+    public function cliente()
+    {
+        return $this->hasOne(TesIngClienteEntity::class, 'id_cliente', 'id_cliente');
+    }
 }

@@ -79,7 +79,7 @@ class TesCuentasBancariasRepository
      * `$fecha`: la fecha real del movimiento cuando no es hoy (un pago cuyo comprobante se sube días
      * después de salir). Sin ella, el movimiento queda con la fecha de carga. (2026-10-28)
      */
-    public function findByRegistrarMovimiento($id_cuenta_bancaria, $monto, $tipo_movimiento, $id_pago, $id_operacion, $obs, $fecha = null)
+    public function findByRegistrarMovimiento($id_cuenta_bancaria, $monto, $tipo_movimiento, $id_pago, $id_operacion, $obs, $fecha = null, $id_orden_medio = null)
     {
         return TesMovientosCuentaBancariaEntity::create([
             'id_cuenta_bancaria' => $id_cuenta_bancaria,
@@ -89,6 +89,7 @@ class TesCuentasBancariasRepository
             'tipo_movimiento' => $tipo_movimiento,
             'id_pago' => $id_pago,
             'id_operacion' => $id_operacion,
+            'id_orden_medio' => $id_orden_medio,
             'descripcion' => $obs
         ]);
     }

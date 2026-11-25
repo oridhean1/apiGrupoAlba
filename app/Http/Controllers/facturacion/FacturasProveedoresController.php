@@ -84,6 +84,11 @@ class FacturasProveedoresController extends Controller
             $query->where('id_tipo_factura', '=', (int) $request->id_tipo);
         }
 
+        // R-00000700: filtro que antes solo tenía la exportación
+        if (!is_null($request->id_tipo_comprobante)) {
+            $query->where('id_tipo_comprobante', $request->id_tipo_comprobante);
+        }
+
         if (!is_null($request->id_locatario)) {
             $query->where('id_razon', $request->id_locatario);
         }

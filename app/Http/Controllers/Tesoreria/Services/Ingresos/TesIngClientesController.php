@@ -2,7 +2,9 @@
 
 namespace App\Http\Controllers\Tesoreria\Services\Ingresos;
 
+use App\Exports\CuentaCorrienteClienteExport;
 use App\Http\Controllers\Tesoreria\Repository\Ingresos\TesIngClienteRepository;
+use Maatwebsite\Excel\Facades\Excel;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
@@ -41,7 +43,23 @@ class TesIngClientesController extends Controller
 
     public function getCuentaCorriente(Request $request, TesIngClienteRepository $repo)
     {
-        $request->validate(['id_razon' => 'required|integer', 'id_cliente' => 'required|integer', 'hasta' => 'nullable|date']);
-        return response()->json($repo->cuentaCorriente($request->input('id_razon'), $request->input('id_cliente'), $request->input('hasta')));
+        $request->validate(['id_razon' => 'required|integer', 'id_cliente' => 'required|integer', 'desde' => 'nullable|date', 'hasta' => 'nullable|date']);
+        return response()->json($repo->cuentaCorriente($request->input('id_razon'), $request->input('id_cliente'), $request->input('hasta'), $request->input('desde')));
+    }
+
+    /** GET ingresos/cuenta-corriente/excel?id_razon=&id_cliente=&desde=&hasta= — R-00000684 */
+    public function exportCuentaCorriente(Request $request, TesIngClienteRepository $repo)
+    {
+        $request->validate(['id_razon' => 'required|integer', 'id_cliente' => 'required|integer', 'desde' => 'nullable|date', 'hasta' => 'nullable|date']);
+
+        try {
+            return Excel::download(
+                new CuentaCorrienteClienteExport($repo, $request->input('id_razon'), $request->input('id_cliente'), $request->input('desde'), $request->input('hasta')),
+                'cuenta-corriente-cliente-' . $request->input('id_cliente') . '.xlsx'
+            );
+        } catch (\Throwable $e) {
+            Log::error('Error exportar cuenta corriente de cliente: ' . $e->getMessage());
+            return response()->json(['message' => 'Error al exportar la cuenta corriente'], 500);
+        }
     }
 }

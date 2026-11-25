@@ -40,30 +40,74 @@ class FacturaProveedorExport implements FromCollection, WithHeadings, ShouldAuto
         LEFT JOIN tb_facturacion_detalle_descuento tfdd ON tfdd.id_factura = vwm.id_factura
         LEFT JOIN vw_matriz_articulos ma ON ma.id_articulo = tfd.id_articulo";
 
+        // R-00000700: se exporta con los mismos filtros (y el mismo criterio) que la búsqueda de
+        // FacturasProveedoresController::getFacturasProveedoresWithComprobantes. Si se cambia uno, cambiar el otro.
+        $p = $this->params;
         $params = [];
         $where = [];
 
-        if (!empty($this->params->desde) && !empty($this->params->hasta)) {
-
-            /* $desdeObj = DateTime::createFromFormat('Y-m', $this->params->desde);
-            $desde = $desdeObj->format('m/Y'); 
-
-            $hastaObj = DateTime::createFromFormat('Y-m', $this->params->hasta);
-            $hasta = $hastaObj->format('m/Y'); */
-            
-            $where[] = " vwm.fecha_registra between  ? and ?";
-            $params[] = $this->params->desde;
-            $params[] = $this->params->hasta;
+        if (!is_null($p->id_tipo_imputacion) && $p->id_tipo_imputacion != '') {
+            $where[] = "vwm.id_tipo_imputacion = ?";
+            $params[] = $p->id_tipo_imputacion;
         }
 
-        if (!empty($this->params->locatario)) {
-            $where[] = "vwm.id_razon = ?";
-            $params[] = $this->params->locatario;
+        if ($p->desde && $p->hasta) {
+            $where[] = "vwm.fecha_registra BETWEEN ? AND ?";
+            $params[] = $p->desde;
+            $params[] = $p->hasta;
         }
 
-        if (!empty($this->params->id_tipo_comprobante)) {
+        if ($p->vencimiento_desde && $p->vencimiento_hasta) {
+            $where[] = "vwm.fecha_vencimiento BETWEEN ? AND ?";
+            $params[] = $p->vencimiento_desde;
+            $params[] = $p->vencimiento_hasta;
+        }
+
+        if (!is_null($p->id_tipo) && $p->id_tipo !== '') {
+            $where[] = "vwm.id_tipo_factura = ?";
+            $params[] = (int) $p->id_tipo;
+        }
+
+        if (!is_null($p->id_tipo_comprobante)) {
             $where[] = "vwm.id_tipo_comprobante = ?";
-            $params[] = $this->params->id_tipo_comprobante;
+            $params[] = $p->id_tipo_comprobante;
+        }
+
+        // "locatario" es el nombre que usaba el panel "Exportar datos"
+        $idRazon = $p->id_locatario ?? $p->locatario;
+        if (!is_null($idRazon)) {
+            $where[] = "vwm.id_razon = ?";
+            $params[] = $idRazon;
+        }
+
+        if (!is_null($p->num_comprobante)) {
+            $where[] = "vwm.comprobante LIKE ?";
+            $params[] = "%" . $p->num_comprobante . "%";
+        }
+
+        if (!is_null($p->cuit_prestador)) {
+            $where[] = "vwm.cuit LIKE ?";
+            $params[] = "%" . $p->cuit_prestador . "%";
+        }
+
+        if (!is_null($p->razon_social)) {
+            $where[] = "vwm.razon_social LIKE ?";
+            $params[] = "%" . $p->razon_social . "%";
+        }
+
+        if (!is_null($p->liquidacion)) {
+            $where[] = "vwm.num_liquidacion LIKE ?";
+            $params[] = "%" . $p->liquidacion . "%";
+        }
+
+        if (!is_null($p->estado)) {
+            $where[] = "vwm.estado = ?";
+            $params[] = $p->estado;
+        }
+
+        if (!is_null($p->estado_pago) && $p->estado_pago != '') {
+            $where[] = "vwm.estado_pago = ?";
+            $params[] = $p->estado_pago;
         }
 
         if (count($where)) {

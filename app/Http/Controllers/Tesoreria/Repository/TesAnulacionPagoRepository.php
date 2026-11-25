@@ -67,6 +67,7 @@ class TesAnulacionPagoRepository
             if (is_null($abono->fecha_ejecucion)) {
                 throw new \Exception('Ese pago todavía no tiene comprobante: no hace falta anularlo, se quita desde el pago.');
             }
+            $this->cortarSiEstaConciliado($abono->id_pago, $abono->id_cuenta_bancaria);
 
             if (!$this->revertirPorLineas($abono, $motivo)) {
                 throw new \Exception(
@@ -102,6 +103,7 @@ class TesAnulacionPagoRepository
             ->get();
 
         foreach ($boletas as $boleta) {
+            $this->cortarSiEstaConciliado($boleta->id_pago);
             $abonos = TesPagosParciales::where('id_pago', $boleta->id_pago)->vivos()->lockForUpdate()->get();
 
             foreach ($abonos as $abono) {
@@ -226,6 +228,19 @@ class TesAnulacionPagoRepository
         return true;
     }
 
+    /**
+     * Un pago cuyo débito ya se concilió con el extracto no se anula (R-00000689 P7: "no debería
+     * anularse un pago ya conciliado"). Hay que desconciliar la línea en el Visor de Conciliación
+     * primero, así la reversión queda a la vista de Tesorería.
+     */
+    private function cortarSiEstaConciliado($idPago, $idCuenta = null): void
+    {
+        $motivo = TesConciliacionMatchingRepository::motivoEgresoConciliado([$idPago], $idCuenta);
+        if (!is_null($motivo)) {
+            throw new \Exception($motivo);
+        }
+    }
+
     private function devolver($idCuenta, float $monto, $idPago, string $descripcion): void
     {
         $this->cuentas->findByDepositoCuenta($idCuenta, $monto);
@@ -256,15 +271,61 @@ class TesAnulacionPagoRepository
             return;
         }
 
+        $puente = TesPagosRepository::TABLA_COMPROBANTE_FECHA;
+        $baja = [
+            'estado' => '0',
+            'cod_usuario_elimina' => $this->user->cod_usuario ?? null,
+            'fecha_elimina' => $this->fechaActual,
+        ];
+
+        // Comprobantes sin filas en el puente (formato anterior al R-00000661): una sola fecha en
+        // la cabecera, o NULL = toda la boleta. Se dan de baja enteros, como antes.
         TestDetalleComprobantesPagoEntity::where('id_pago', $abono->id_pago)
             ->where('estado', '1')
+            ->whereNotExists(fn($x) => $x->select(DB::raw(1))->from($puente)
+                ->whereColumn("{$puente}.id_comprobante", 'tb_test_pago_detalle_comprobantes.id_comprobante'))
             ->where(fn($q) => is_null($idFecha)
                 ? $q->whereNull('id_fecha_probable')
                 : $q->where('id_fecha_probable', $idFecha))
+            ->update($baja);
+
+        if (is_null($idFecha)) {
+            return;
+        }
+
+        // Comprobantes que respaldan varias fechas (R-00000661): se da de baja SÓLO el vínculo con
+        // esta fecha, y queda anotado qué pago anulado lo motivó. Así se sigue sabiendo qué
+        // comprobante respaldaba al pago anulado, y el comprobante sigue respaldando sus otras
+        // fechas. Si ya no le queda ninguna vigente, se da de baja el comprobante.
+        $idsComprobante = DB::table("{$puente} as cf")
+            ->join('tb_test_pago_detalle_comprobantes as c', 'c.id_comprobante', '=', 'cf.id_comprobante')
+            ->where('c.id_pago', $abono->id_pago)
+            ->where('c.estado', '1')
+            ->where('cf.id_fecha_probable', $idFecha)
+            ->where('cf.estado', 1)
+            ->pluck('cf.id_comprobante');
+
+        if ($idsComprobante->isEmpty()) {
+            return;
+        }
+
+        DB::table($puente)
+            ->whereIn('id_comprobante', $idsComprobante)
+            ->where('id_fecha_probable', $idFecha)
+            ->where('estado', 1)
             ->update([
-                'estado' => '0',
-                'cod_usuario_elimina' => $this->user->cod_usuario ?? null,
-                'fecha_elimina' => $this->fechaActual,
+                'estado' => 0,
+                'fecha_baja' => $this->fechaActual,
+                'cod_usuario_baja' => $this->user->cod_usuario ?? null,
+                'id_pago_parcial_baja' => $abono->id_pago_parcial,
+                'motivo_baja' => mb_substr('Pago anulado: ' . $motivo, 0, 255),
             ]);
+
+        $sinFechas = $idsComprobante->filter(fn($id) => !DB::table($puente)
+            ->where('id_comprobante', $id)->where('estado', 1)->exists());
+
+        if ($sinFechas->isNotEmpty()) {
+            TestDetalleComprobantesPagoEntity::whereIn('id_comprobante', $sinFechas)->update($baja);
+        }
     }
 }
