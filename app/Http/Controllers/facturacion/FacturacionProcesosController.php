@@ -255,7 +255,7 @@ class FacturacionProcesosController extends Controller
 
                 // @EDICIÓN DE FACTURA EN AUDITORIA + HISTORIAL (R-00000694)
                 // El estado se lee de la base, no del front. Si está EN AUDITORIA (1 o 5), al
-                // guardar se descarta la auditoría (liquidaciones) y vuelve a PENDIENTE.
+                // guardar vuelve a PENDIENTE; la liquidación cargada se mantiene (decisión del cliente).
                 // Solo facturas de PRESTADOR: en proveedores el estado 1 es "AUDITADO" (otro
                 // circuito, sin liquidaciones) y su edición tiene que seguir igual que siempre.
                 $facturaActual = DB::table('tb_facturacion_datos')
@@ -367,10 +367,12 @@ class FacturacionProcesosController extends Controller
                 }
 
                 // @HISTORIAL DE LA EDICIÓN (R-00000694)
-                $auditoriaDescartada = null;
+                // Si estaba en auditoría: copia de cómo estaba la liquidación (solo lectura) y la
+                // factura vuelve a PENDIENTE. La liquidación no se toca.
+                $auditoriaAlEditar = null;
                 if ($editaEnAuditoria) {
-                    $auditoriaDescartada = $historialEdicion->capturarAuditoria($facturacion->id_factura);
-                    $historialEdicion->descartarAuditoria($facturacion->id_factura);
+                    $auditoriaAlEditar = $historialEdicion->capturarAuditoria($facturacion->id_factura);
+                    $historialEdicion->volverAPendiente($facturacion->id_factura);
                 }
 
                 $cambios = $historialEdicion->compararFotos(
@@ -386,7 +388,7 @@ class FacturacionProcesosController extends Controller
                         $estadoAnterior,
                         $editaEnAuditoria ? FacturaHistorialEdicionRepository::ESTADO_PENDIENTE : $estadoAnterior,
                         $cambios,
-                        $auditoriaDescartada
+                        $auditoriaAlEditar
                     );
                 }
             }

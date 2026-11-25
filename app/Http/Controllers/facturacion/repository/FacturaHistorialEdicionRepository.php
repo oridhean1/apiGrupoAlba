@@ -11,14 +11,16 @@ use Illuminate\Support\Facades\DB;
  * (quién, cuándo, de qué estado venía) y una fila por dato cambiado en
  * tb_facturacion_historial_cambio (valor anterior / valor nuevo, ya legibles: nombres, no ids).
  *
- * Si la factura estaba EN AUDITORIA (estado 1 o 5), la edición descarta la auditoría: las
- * liquidaciones que cargó el módulo Liquidaciones (prácticas y medicamentos, que son las que
- * generan los débitos) se copian completas a `auditoria_json` y se borran, y la factura vuelve
- * a PENDIENTE con los totales de liquidación en 0. Así se vuelve a auditar desde cero, y los
- * débitos anteriores quedan solo como consulta.
+ * Si la factura de prestador estaba EN AUDITORIA (estado 1 o 5), al editarla vuelve a PENDIENTE
+ * y se guarda en `auditoria_json` una copia de cómo estaba la liquidación (prácticas y
+ * medicamentos con sus débitos) en ese momento, como referencia.
  *
- * Dictámenes médicos y débitos internos (documentos adjuntos) NO se tocan: no son débitos y
- * la propuesta aceptada no los incluye.
+ * Definido por el cliente (respuesta del 2026-11-25):
+ *  - La liquidación cargada por auditoría SE MANTIENE: no se borra ni se modifica (ni líneas ni
+ *    totales de liquidación). El área de auditoría la revisa y corrige desde Liquidaciones, que
+ *    vuelve a pasar la factura a auditoría al guardar.
+ *  - No se edita si la factura tiene orden de pago vigente (ver FacturacionProcesosController).
+ *  - Dictámenes médicos y débitos internos quedan asociados a la factura (no se tocan).
  *
  * Nota: tb_facturacion_auditar / AuditarFacturaController no son la auditoría real (la tabla
  * está vacía en Alba y OSV y la columna monto_debitar no existe); por eso no se usan acá.
@@ -136,8 +138,8 @@ class FacturaHistorialEdicionRepository
     }
 
     /**
-     * Copia completa de la auditoría (liquidaciones de prácticas y de medicamentos con sus
-     * líneas) para dejarla en el historial antes de descartarla. Devuelve null si no hay nada.
+     * Copia de la liquidación (prácticas y medicamentos con sus líneas) tal como estaba al
+     * editar, para el historial. Solo lee: no modifica nada. Devuelve null si no hay nada.
      */
     public function capturarAuditoria($idFactura): ?array
     {
@@ -198,30 +200,13 @@ class FacturaHistorialEdicionRepository
     }
 
     /**
-     * Borra las liquidaciones de la factura y la deja PENDIENTE, con los totales de liquidación
-     * como recién cargada. Llamar siempre después de capturarAuditoria().
+     * Deja la factura en PENDIENTE. Solo cambia el estado: la liquidación cargada y sus totales
+     * se mantienen tal cual (decisión del cliente).
      */
-    public function descartarAuditoria($idFactura): void
+    public function volverAPendiente($idFactura): void
     {
-        $idsPracticas = DB::table('tb_liquidaciones')->where('id_factura', $idFactura)->pluck('id_liquidacion')->all();
-        if (!empty($idsPracticas)) {
-            DB::table('tb_liquidaciones_detalle')->whereIn('id_liquidacion', $idsPracticas)->delete();
-            DB::table('tb_liquidaciones')->whereIn('id_liquidacion', $idsPracticas)->delete();
-        }
-
-        $idsMedicamentos = DB::table('tb_liquidaciones_medicamentos')->where('id_factura', $idFactura)->pluck('id_liquidacion')->all();
-        if (!empty($idsMedicamentos)) {
-            DB::table('tb_liquidaciones_detalle_medicamentos')->whereIn('id_liquidacion', $idsMedicamentos)->delete();
-            DB::table('tb_liquidaciones_medicamentos')->whereIn('id_liquidacion', $idsMedicamentos)->delete();
-        }
-
-        DB::table('tb_facturacion_datos')->where('id_factura', $idFactura)->update([
-            'estado' => self::ESTADO_PENDIENTE,
-            'total_debitado_liquidacion' => 0,
-            'total_aprobado_liquidacion' => 0,
-            'total_facturado_liquidacion' => 0,
-            'fecha_liquidacion' => null,
-        ]);
+        DB::table('tb_facturacion_datos')->where('id_factura', $idFactura)
+            ->update(['estado' => self::ESTADO_PENDIENTE]);
     }
 
     public function registrarEdicion($idFactura, $codUsuario, $fecha, $estadoAnterior, $estadoNuevo, array $cambios, ?array $auditoria): int
@@ -232,8 +217,8 @@ class FacturaHistorialEdicionRepository
             'fecha' => $fecha,
             'estado_anterior' => (int) $estadoAnterior,
             'estado_nuevo' => (int) $estadoNuevo,
-            'auditoria_descartada' => is_null($auditoria) ? 0 : 1,
-            'total_debitado_descartado' => (float) ($auditoria['totales']['total_debitado_liquidacion'] ?? 0),
+            'con_auditoria' => is_null($auditoria) ? 0 : 1,
+            'total_debitado_al_editar' => (float) ($auditoria['totales']['total_debitado_liquidacion'] ?? 0),
             'auditoria_json' => is_null($auditoria) ? null : json_encode($auditoria, JSON_UNESCAPED_UNICODE),
         ]);
 
@@ -279,22 +264,22 @@ class FacturaHistorialEdicionRepository
                 'usuario' => $e->usuario ?? ('Usuario ' . $e->cod_usuario),
                 'estado_anterior' => $this->nombreEstado($e->estado_anterior),
                 'estado_nuevo' => $this->nombreEstado($e->estado_nuevo),
-                'auditoria_descartada' => (bool) $e->auditoria_descartada,
-                'total_debitado_descartado' => (float) $e->total_debitado_descartado,
+                'con_auditoria' => (bool) $e->con_auditoria,
+                'total_debitado_al_editar' => (float) $e->total_debitado_al_editar,
                 'cambios' => ($cambios[$e->id_edicion] ?? collect())->map(fn($c) => [
                     'campo' => $c->campo,
                     'valor_anterior' => $c->valor_anterior,
                     'valor_nuevo' => $c->valor_nuevo,
                 ])->values()->all(),
-                'debitos' => $this->debitosDescartados($auditoria),
+                'debitos' => $this->debitosAlEditar($auditoria),
             ];
         })->all();
     }
 
     // ───────────────────────── helpers ─────────────────────────
 
-    /** Líneas de la auditoría descartada para mostrar (prácticas y medicamentos). */
-    private function debitosDescartados(?array $auditoria): array
+    /** Líneas de la liquidación al momento de editar, para mostrar (prácticas y medicamentos). */
+    private function debitosAlEditar(?array $auditoria): array
     {
         if (is_null($auditoria)) {
             return [];
