@@ -1303,18 +1303,38 @@ class TestOrdenPagoRepository
         // directo se lo saltea: sin esto se podían mezclar dos en una OPA y el beneficiario
         // quedaba mal asignado para uno de los dos. (mismo criterio que findByIdFacturaMultiple,
         // 2026-08-13)
-        $beneficiarios = $facturas->pluck($campoBeneficiario)->unique()->values();
-
-        if ($beneficiarios->count() > 1) {
-            throw new \Exception(
-                "No se puede generar: las facturas seleccionadas pertenecen a distintos {$etiqueta}es."
-            );
-        }
-
-        $idBeneficiario = $beneficiarios->first();
-        if (empty($idBeneficiario)) {
+        //
+        // R-00000651: para prestador "mismo beneficiario" es "mismo CUIT". Las sedes de un
+        // prestador (OSDEPYM, Maternos, DAX LAB) están cargadas como prestadores distintos pero
+        // comparten CUIT y se pagan juntas. Sin CUIT válido se sigue comparando por id. La clave
+        // es la misma que usa la grilla: FacturasOpaRepository::claveBeneficiario().
+        if ($facturas->contains(fn($f) => empty($f->{$campoBeneficiario}))) {
             throw new \Exception("Las facturas seleccionadas no tienen {$etiqueta} asignado.");
         }
+
+        $cuits = $esProveedor
+            ? collect()
+            : DB::table('tb_prestador')
+                ->whereIn('cod_prestador', $facturas->pluck('id_prestador')->unique())
+                ->pluck('cuit', 'cod_prestador');
+
+        $claves = $facturas
+            ->map(fn($f) => FacturasOpaRepository::claveBeneficiario(
+                $esProveedor,
+                $f->{$campoBeneficiario},
+                $cuits[$f->{$campoBeneficiario}] ?? null
+            ))
+            ->unique();
+
+        if ($claves->count() > 1) {
+            throw new \Exception($esProveedor
+                ? 'No se puede generar: las facturas seleccionadas pertenecen a distintos proveedores.'
+                : 'No se puede generar: las facturas seleccionadas son de prestadores con distinto CUIT.');
+        }
+
+        // La cabecera lleva UN solo beneficiario: con varias sedes del mismo CUIT queda la de la
+        // primera factura elegida (el orden en que llegan del front).
+        $idBeneficiario = $facturas[$lineas->first()->id_factura]->{$campoBeneficiario};
 
         // ⚠️ Y todas de la MISMA RAZÓN SOCIAL.
         //

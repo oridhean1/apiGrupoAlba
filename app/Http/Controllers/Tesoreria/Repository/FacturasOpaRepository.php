@@ -211,6 +211,45 @@ class FacturasOpaRepository
      * @param  int|null    $excluirOpa  OPA en edición (su imputación no se descuenta del saldo).
      * @return array{data: array, total: int}
      */
+    /**
+     * Clave con la que se agrupan facturas en una misma OPA (R-00000651).
+     *
+     * Prestador: el CUIT, solo dígitos. Hay prestadores con varias sedes cargadas como prestadores
+     * distintos (OSDEPYM, Maternos, DAX LAB) que comparten CUIT y se pagan juntas. Si el CUIT no
+     * tiene 11 dígitos (vacío o basura, típico de los CAPS) se cae al `id_prestador`, para no
+     * mezclar prestadores distintos bajo un CUIT en blanco.
+     *
+     * Proveedor: sigue siendo el `id_proveedor`.
+     *
+     * Espera el alias `f` (tb_facturacion_datos) y `p` (tb_prestador / tb_proveedor) en la query.
+     * Tiene que dar lo mismo que claveBeneficiario() en PHP.
+     */
+    public static function sqlClaveBeneficiario(bool $esProveedor): string
+    {
+        if ($esProveedor) {
+            return "CONCAT('P:', f.id_proveedor)";
+        }
+
+        $cuit = "REPLACE(REPLACE(REPLACE(COALESCE(p.cuit, ''), '-', ''), ' ', ''), '.', '')";
+
+        return "CASE WHEN {$cuit} REGEXP '^[0-9]{11}$' THEN CONCAT('C:', {$cuit}) "
+            . "ELSE CONCAT('P:', f.id_prestador) END";
+    }
+
+    /** Lo mismo que sqlClaveBeneficiario(), en PHP. */
+    public static function claveBeneficiario(bool $esProveedor, $idBeneficiario, ?string $cuit): string
+    {
+        // Mismos caracteres que saca el SQL (guion, espacio, punto), no "todo lo que no sea dígito":
+        // si no, un CUIT con otro separador daría clave distinta en la grilla y en el guardado.
+        $digitos = str_replace(['-', ' ', '.'], '', (string) $cuit);
+
+        if (!$esProveedor && preg_match('/^\d{11}$/', $digitos)) {
+            return 'C:' . $digitos;
+        }
+
+        return 'P:' . $idBeneficiario;
+    }
+
     public function listarFacturasParaOpa($params = null, $excluirOpa = null): array
     {
         // Saldo imputable calculado en SQL. Tiene que dar lo mismo que saldoImputableFactura():
@@ -285,6 +324,16 @@ class FacturasOpaRepository
                 );
             }
 
+            // R-00000651: con una selección en curso la grilla se acota por CLAVE DE AGRUPACIÓN,
+            // que para prestador es el CUIT (así entran todas las sedes que lo comparten). Ver
+            // sqlClaveBeneficiario().
+            if (!empty($params->clave_beneficiario)) {
+                $query->whereRaw(
+                    self::sqlClaveBeneficiario($esProveedor) . ' = ?',
+                    [$params->clave_beneficiario]
+                );
+            }
+
             // La grilla se acota por prestador Y razon social juntos: el mismo prestador le puede
             // facturar a dos empresas del grupo, y esas facturas necesitan ordenes separadas.
             if (!empty($params->id_locatorio)) {
@@ -326,6 +375,8 @@ class FacturasOpaRepository
             // factura de proveedor lleva el `id_proveedor`: el beneficiario es uno solo y la
             // pantalla no tiene por que saber de cual de las dos tablas salio.
             DB::raw(($esProveedor ? 'f.id_proveedor' : 'f.id_prestador') . ' as id_prestador'),
+            // Con qué se agrupa la selección (R-00000651). Ver sqlClaveBeneficiario().
+            DB::raw(self::sqlClaveBeneficiario($esProveedor) . ' as clave_beneficiario'),
             // Cual de nuestras empresas le debe la factura. La orden se paga desde una cuenta que
             // pertenece a UNA razon social, asi que la seleccion no puede cruzarlas. (2026-09-16)
             'f.id_locatorio',
