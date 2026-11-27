@@ -208,6 +208,13 @@ class TesConciliacionMatchingRepository
             $score += 15;
             $reglas[] = 'Proveedor coincide';
         }
+        // Finanzas (2026-11-27): el eCheq se cierra con SU fecha (la que debita el banco), no con la
+        // de carga de la OPA. Si la línea del extracto cae ese día, suma.
+        if ($extracto->fecha && $abono->fecha_emision_echeq
+            && \Carbon\Carbon::parse($extracto->fecha)->toDateString() === \Carbon\Carbon::parse($abono->fecha_emision_echeq)->toDateString()) {
+            $score += 10;
+            $reglas[] = 'Fecha del eCheq coincide';
+        }
         return [min(100, $score), $reglas];
     }
 
