@@ -23,7 +23,9 @@ class TesExtractoBancariosRepository
     public function findByList($desde, $hasta, $idRazon = null, $idEntidadBancaria = null, $estado = null)
     {
         return $this->queryConDetalle()
-            ->whereBetween('fecha', [$desde, $hasta])
+            // Fechas opcionales: vacías = sin límite (con BETWEEN '' AND '' no traía nada).
+            ->when($desde, fn ($q) => $q->whereDate('fecha', '>=', $desde))
+            ->when($hasta, fn ($q) => $q->whereDate('fecha', '<=', $hasta))
             ->when($idRazon, fn ($q) => $q->where('id_razon', $idRazon))
             ->when($idEntidadBancaria, fn ($q) => $this->filtrarPorBanco($q, $idEntidadBancaria))
             ->when($estado, fn ($q) => $q->where('estado_conciliacion', $estado))
@@ -81,11 +83,11 @@ class TesExtractoBancariosRepository
     /**
      * Confirma o rechaza el match sugerido por el motor (o uno elegido a mano por el usuario).
      */
-    public function findByConfirmarMatch($idExtracto, $aprobar, $idMovimientoInterno = null, $observaciones = null, $sinContraparte = false)
+    public function findByConfirmarMatch($idExtracto, $aprobar, $idMovimientoInterno = null, $observaciones = null)
     {
         // Una sola transacción: confirmar un eCheq lo acredita (asiento + movimiento) y eso tiene
         // que quedar junto con la conciliación, o nada.
-        return \Illuminate\Support\Facades\DB::transaction(function () use ($idExtracto, $aprobar, $idMovimientoInterno, $observaciones, $sinContraparte) {
+        return \Illuminate\Support\Facades\DB::transaction(function () use ($idExtracto, $aprobar, $idMovimientoInterno, $observaciones) {
             $extracto = TesExtractosBancariosEntity::lockForUpdate()->findOrFail($idExtracto);
             $matcheo = TesConciliacionMatcheoEntity::where('id_extracto_bancario', $idExtracto)
                 ->latest('id_matching')
@@ -100,11 +102,7 @@ class TesExtractoBancariosRepository
                 throw new \Exception('Esta línea se registró con asiento propio. Para deshacerla usá "Anular registro".');
             }
 
-            if ($sinContraparte) {
-                // "Conciliado sin contraparte" (comisión, etc.): no se usa la sugerencia.
-                $matcheo->id_movimiento_interno = null;
-                $matcheo->id_pago_parcial = null;
-            } elseif ($idMovimientoInterno) {
+            if ($idMovimientoInterno) {
                 $matcheo->id_movimiento_interno = $idMovimientoInterno; // el usuario eligió un candidato distinto al sugerido
                 $matcheo->id_pago_parcial = null;
             }
@@ -117,9 +115,16 @@ class TesExtractoBancariosRepository
             }
 
             // El movimiento puede venir elegido a mano: misma cuenta (⇒ misma razón), mismo sentido y
-            // no conciliado contra otra línea. Sin candidato = "conciliado sin contraparte" (comisión, etc.).
+            // no conciliado contra otra línea.
             if ($aprobar && $matcheo->id_movimiento_interno) {
                 $matching->validarParaConfirmar($extracto, $matcheo->id_movimiento_interno, $extracto->id_extracto);
+            }
+
+            // Sin movimiento no se concilia: el "conciliado sin contraparte" cerraba la línea sin asiento
+            // ni movimiento y el saldo quedaba distinto del banco. Se quitó a pedido del cliente
+            // (2026-11-27): lo que no nació en Tesorería se concilia con "Registrar con asiento".
+            if ($aprobar && !$matcheo->id_movimiento_interno) {
+                throw new \Exception('Para conciliar la línea hace falta un movimiento de Tesorería. Si no nació en Tesorería (comisión, impuesto, traspaso…), usá "Registrar con asiento".');
             }
 
             $matcheo->estado = $aprobar ? 1 : 0;
