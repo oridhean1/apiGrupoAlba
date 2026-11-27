@@ -29,8 +29,10 @@ class ExtractoBancarioCygnusSheetImport implements ToCollection, WithStartRow
     /** @var \Illuminate\Support\Collection cuentas bancarias de la razón social, con su entidadBancaria cargada */
     private $cuentasRazon;
     private TesConciliacionMatchingRepository $matching;
+    /** Cuenta elegida al cargar: se aplica a todas las líneas (un extracto = una cuenta). */
+    private $idCuentaElegida;
 
-    public function __construct($idRazon, $obs, TesConciliacionMatchingRepository $matching)
+    public function __construct($idRazon, $obs, TesConciliacionMatchingRepository $matching, $idCuentaElegida = null)
     {
         $this->id_razon = $idRazon;
         $this->obs = $obs;
@@ -39,6 +41,11 @@ class ExtractoBancarioCygnusSheetImport implements ToCollection, WithStartRow
         $this->cuentasRazon = TesCuentasBancariasEntity::with('entidadBancaria')
             ->where('id_razon', $idRazon)
             ->get();
+        // La cuenta elegida tiene que ser de la razón social: si no, corta (regla de razón social).
+        if ($idCuentaElegida && !$this->cuentasRazon->contains('id_cuenta_bancaria', (int) $idCuentaElegida)) {
+            throw new \Exception('La cuenta bancaria elegida no pertenece a la razón social seleccionada.');
+        }
+        $this->idCuentaElegida = $idCuentaElegida ? (int) $idCuentaElegida : null;
     }
 
     public function collection(Collection $rows)
@@ -58,7 +65,8 @@ class ExtractoBancarioCygnusSheetImport implements ToCollection, WithStartRow
                     // Macro informa el CUIT de la contraparte en el concepto ("TRANSF:...-33718968289").
                     $detalleCuit ??= $this->cuitDeTexto($row[2] ?? null);
                     $bancoFila = $row[1] ?? '-';
-                    $idCuentaBancaria = $this->resolverCuentaBancaria($bancoFila);
+                    // Cuenta elegida al cargar (OSV: tres cuentas del Nación) o, si no, por el nombre del banco.
+                    $idCuentaBancaria = $this->idCuentaElegida ?? $this->resolverCuentaBancaria($bancoFila);
 
                     // Modelo transitorio (no se guarda) solo para poder reusar el motor de matching tal cual.
                     $extractoTransient = new TesExtractosBancariosEntity([
@@ -124,6 +132,8 @@ class ExtractoBancarioCygnusSheetImport implements ToCollection, WithStartRow
                             'abono' => $abono?->toArray(),
                         ]] : [],
                     ];
+                } catch (\DomainException $e) {
+                    throw $e; // falta elegir la cuenta: corta toda la carga, no descarta la fila
                 } catch (\Exception $e) {
                     Log::error('Error previsualizando fila ' . $nextRow . ': ' . $e->getMessage());
                 }
@@ -157,6 +167,12 @@ class ExtractoBancarioCygnusSheetImport implements ToCollection, WithStartRow
             }
             return stripos($descripcion, $bancoFila) !== false || stripos($bancoFila, $descripcion) !== false;
         });
+
+        // Varias cuentas del mismo banco (OSV: tres del Nación) y no se eligió la cuenta: no se adivina.
+        if ($coincidencias->count() > 1) {
+            throw new \DomainException("El banco \"{$bancoFila}\" tiene varias cuentas en esta razón social ("
+                . $coincidencias->pluck('nombre_cuenta')->implode(', ') . '). Elegí de qué cuenta es el extracto.');
+        }
 
         return $coincidencias->count() === 1 ? $coincidencias->first()->id_cuenta_bancaria : null;
     }
@@ -192,10 +208,10 @@ class ExtractoBancarioCygnusSheetImport implements ToCollection, WithStartRow
             return false;
         }
 
-        $clave = TesExtractosBancariosEntity::claveLinea($this->id_razon, $bancoFila, $extracto->fecha, $extracto->concepto, $extracto->importe);
+        $clave = TesExtractosBancariosEntity::claveLinea($this->id_razon, $bancoFila, $extracto->fecha, $extracto->concepto, $extracto->importe, $extracto->id_cuenta_bancaria);
         $this->ocurrencias[$clave] = ($this->ocurrencias[$clave] ?? 0) + 1;
         $this->existentes[$clave] ??= TesExtractosBancariosEntity::contarIguales(
-            $this->id_razon, $bancoFila, $extracto->fecha, $extracto->concepto, $extracto->importe
+            $this->id_razon, $bancoFila, $extracto->fecha, $extracto->concepto, $extracto->importe, $extracto->id_cuenta_bancaria
         );
 
         return $this->ocurrencias[$clave] <= $this->existentes[$clave];
@@ -282,19 +298,21 @@ class ExtractoBancarioCygnusImport implements WithMultipleSheets
     private $idRazon;
     private $obs;
     private TesConciliacionMatchingRepository $matching;
+    private $idCuenta;
     public $message;
     public $sheetImport;
 
-    public function __construct($idRazon, $obs, TesConciliacionMatchingRepository $matching)
+    public function __construct($idRazon, $obs, TesConciliacionMatchingRepository $matching, $idCuenta = null)
     {
         $this->idRazon = $idRazon;
         $this->obs = $obs;
         $this->matching = $matching;
+        $this->idCuenta = $idCuenta;
     }
 
     public function sheets(): array
     {
-        $sheet = new ExtractoBancarioCygnusSheetImport($this->idRazon, $this->obs, $this->matching);
+        $sheet = new ExtractoBancarioCygnusSheetImport($this->idRazon, $this->obs, $this->matching, $this->idCuenta);
         $this->message = &$sheet->message;
         $this->sheetImport = $sheet;
         return [0 => $sheet];

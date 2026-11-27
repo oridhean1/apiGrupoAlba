@@ -41,7 +41,7 @@ class TesExtractosBacariosController extends Controller
                 ], 409);
             }
 
-            $importacion = new \App\Imports\ExtractoBancarioCygnusImport($data->id_razon, $data->observaciones ?? null, $matching);
+            $importacion = new \App\Imports\ExtractoBancarioCygnusImport($data->id_razon, $data->observaciones ?? null, $matching, $data->id_cuenta_bancaria ?? null);
             Excel::import($importacion, $archivo);
 
             if ($importacion->message == 'INVALID') {
@@ -104,10 +104,15 @@ class TesExtractosBacariosController extends Controller
                 // Re-chequeo defensivo: puede haber pasado tiempo entre la previsualización y este guardado.
                 // Se compara por CANTIDAD (ver contarIguales): la N-ésima línea igual del lote se omite
                 // sólo si ya había N iguales guardadas ANTES de este lote (el conteo se cachea antes de insertar).
-                $clave = TesExtractosBancariosEntity::claveLinea($fila->id_razon, $fila->banco ?? null, $fila->fecha ?? null, $fila->concepto ?? null, $fila->importe ?? 0);
+                // La cuenta viene del front: se revalida que sea de la razón social de la línea.
+                if (!empty($fila->id_cuenta_bancaria) && !\App\Models\Tesoreria\TesCuentasBancariasEntity::where('id_cuenta_bancaria', $fila->id_cuenta_bancaria)->where('id_razon', $fila->id_razon)->exists()) {
+                    throw new \Exception('Una línea del extracto tiene una cuenta bancaria de otra razón social.');
+                }
+
+                $clave = TesExtractosBancariosEntity::claveLinea($fila->id_razon, $fila->banco ?? null, $fila->fecha ?? null, $fila->concepto ?? null, $fila->importe ?? 0, $fila->id_cuenta_bancaria ?? null);
                 $ocurrencias[$clave] = ($ocurrencias[$clave] ?? 0) + 1;
                 $existentes[$clave] ??= TesExtractosBancariosEntity::contarIguales(
-                    $fila->id_razon, $fila->banco ?? null, $fila->fecha ?? null, $fila->concepto ?? null, $fila->importe ?? 0
+                    $fila->id_razon, $fila->banco ?? null, $fila->fecha ?? null, $fila->concepto ?? null, $fila->importe ?? 0, $fila->id_cuenta_bancaria ?? null
                 );
                 $yaExiste = $ocurrencias[$clave] <= $existentes[$clave];
 

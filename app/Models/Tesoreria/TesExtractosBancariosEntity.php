@@ -74,9 +74,12 @@ class TesExtractosBancariosEntity extends Model
      * Se compara por CANTIDAD, no por existencia: el banco puede informar dos operaciones reales
      * idénticas el mismo día (R-00000689 P3) y la segunda no es un duplicado.
      */
-    public static function contarIguales($idRazon, $banco, $fecha, $concepto, $importe): int
+    public static function contarIguales($idRazon, $banco, $fecha, $concepto, $importe, $idCuenta = null): int
     {
+        // La cuenta entra en la comparación: OSV tiene tres cuentas del mismo banco y una
+        // comisión igual el mismo día en dos de ellas son dos líneas distintas (2026-11-27).
         return static::where('id_razon', $idRazon)
+            ->when($idCuenta, fn ($q) => $q->where('id_cuenta_bancaria', $idCuenta), fn ($q) => $q->whereNull('id_cuenta_bancaria'))
             ->where('banco', $banco)
             ->where('fecha', $fecha)
             ->where('concepto', $concepto)
@@ -85,8 +88,8 @@ class TesExtractosBancariosEntity extends Model
     }
 
     /** Clave para numerar las ocurrencias de una misma línea dentro de un archivo o lote. */
-    public static function claveLinea($idRazon, $banco, $fecha, $concepto, $importe): string
+    public static function claveLinea($idRazon, $banco, $fecha, $concepto, $importe, $idCuenta = null): string
     {
-        return implode('|', [$idRazon, $banco, $fecha, $concepto, number_format((float) $importe, 2, '.', '')]);
+        return implode('|', [$idRazon, $idCuenta, $banco, $fecha, $concepto, number_format((float) $importe, 2, '.', '')]);
     }
 }
