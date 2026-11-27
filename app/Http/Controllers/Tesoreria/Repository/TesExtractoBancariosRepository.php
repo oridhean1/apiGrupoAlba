@@ -23,7 +23,9 @@ class TesExtractoBancariosRepository
     public function findByList($desde, $hasta, $idRazon = null, $idEntidadBancaria = null, $estado = null)
     {
         return $this->queryConDetalle()
-            ->whereBetween('fecha', [$desde, $hasta])
+            // Fechas opcionales: vacías = sin límite (con BETWEEN '' AND '' no traía nada).
+            ->when($desde, fn ($q) => $q->whereDate('fecha', '>=', $desde))
+            ->when($hasta, fn ($q) => $q->whereDate('fecha', '<=', $hasta))
             ->when($idRazon, fn ($q) => $q->where('id_razon', $idRazon))
             ->when($idEntidadBancaria, fn ($q) => $this->filtrarPorBanco($q, $idEntidadBancaria))
             ->when($estado, fn ($q) => $q->where('estado_conciliacion', $estado))
