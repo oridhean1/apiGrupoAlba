@@ -132,6 +132,11 @@ class TesExtractosBacariosController extends Controller
                     ]), $idAbonoMatch);
                 }
 
+                // Sin movimiento no se concilia (se quitó el "conciliado sin contraparte", 2026-11-27).
+                if ($aprobar && empty($fila->id_movimiento_match)) {
+                    throw new \Exception('Hay una línea tildada sin movimiento de Tesorería para conciliar (' . ($fila->concepto ?? '') . '). Destildala y registrala desde el Visor.');
+                }
+
                 // Lo que se concilia en esta carga pasa por las mismas guardas que el visor.
                 if ($aprobar && !empty($fila->id_movimiento_match)) {
                     if (in_array($fila->id_movimiento_match, $movimientosAprobados)) {
@@ -258,8 +263,7 @@ class TesExtractosBacariosController extends Controller
                 $request->id_extracto,
                 (bool) $request->aprobar,
                 $request->id_movimiento_interno,
-                $request->observaciones,
-                $request->boolean('sin_contraparte')
+                $request->observaciones
             );
 
             return response()->json([
