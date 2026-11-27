@@ -5,6 +5,7 @@ namespace App\Http\Controllers\facturacion;
 use App\Http\Controllers\Contabilidad\Repository\AsientoContableRepository;
 use App\Http\Controllers\Contabilidad\Repository\PeriodosContablesRepository;
 use App\Http\Controllers\facturacion\repository\FacturaRepository;
+use App\Http\Controllers\facturacion\repository\FacturaHistorialEdicionRepository;
 use App\Http\Controllers\Tesoreria\Repository\TesPagosRepository;
 use App\Http\Controllers\Tesoreria\Repository\TestOrdenPagoRepository;
 use App\Http\Controllers\Contabilidad\Repository\AsientosFacturacionHistorialRepository;
@@ -31,6 +32,7 @@ class FacturacionProcesosController extends Controller
         AsientosFacturacionHistorialRepository $historialAsientosRepository,
         GeneradorCodigosUtils $generadorCodigos,
         PeriodosContablesRepository $periodoContableRepositorio,
+        FacturaHistorialEdicionRepository $historialEdicion,
         Request $request
     ) {
         DB::beginTransaction();
@@ -251,6 +253,36 @@ class FacturacionProcesosController extends Controller
                 // MODIFICAR FACTURA EXISTENTE CON HISTORIAL CONTABLE
                 // ============================================================
 
+                // @EDICIÓN DE FACTURA EN AUDITORIA + HISTORIAL (R-00000694)
+                // El estado se lee de la base, no del front. Si está EN AUDITORIA (1 o 5), al
+                // guardar vuelve a PENDIENTE; la liquidación cargada se mantiene (decisión del cliente).
+                // Solo facturas de PRESTADOR: en proveedores el estado 1 es "AUDITADO" (otro
+                // circuito, sin liquidaciones) y su edición tiene que seguir igual que siempre.
+                $facturaActual = DB::table('tb_facturacion_datos')
+                    ->where('id_factura', $cabecera->id_factura)
+                    ->first(['estado', 'id_prestador', 'id_proveedor']);
+                $estadoAnterior = (int) $facturaActual->estado;
+                $editaEnAuditoria = $historialEdicion->esFacturaPrestador($facturaActual)
+                    && $historialEdicion->estaEnAuditoria($estadoAnterior);
+
+                if ($editaEnAuditoria) {
+                    // Misma regla que cambiar-estado: una factura con orden de pago vigente no se
+                    // toca (cambiaría monto/prestador de algo que Tesorería ya tiene en curso).
+                    $opaVigente = $tesoreria->findByOpaVigenteFactura($cabecera->id_factura);
+                    if (!is_null($opaVigente)) {
+                        DB::rollBack();
+                        $estadoOpa = \App\Models\Tesoreria\TesEstadoOrdenPagoEntity::find($opaVigente->id_estado_orden_pago);
+                        return response()->json([
+                            'message' => 'No se puede editar la factura: tiene la orden de pago '
+                                . $opaVigente->num_orden_pago . ' en estado '
+                                . ($estadoOpa->descripcion_estado ?? $opaVigente->id_estado_orden_pago)
+                                . '. Para modificarla, primero debe anularse o rechazarse esa orden de pago.'
+                        ], 409);
+                    }
+                }
+
+                $fotoAntes = $historialEdicion->capturarFactura($cabecera->id_factura);
+
                 // Verificar si la factura tiene asientos contables
                 $tieneAsientos = $historialAsientosRepository->facturaTieneAsientos($cabecera->id_factura);
 
@@ -333,6 +365,32 @@ class FacturacionProcesosController extends Controller
                 if ($opa != null) {
                     $tesPagosRepository->findByUpdateOpaPagoFacturaLiquidaciones($opa->id_orden_pago, $facturacion->total_neto);
                 }
+
+                // @HISTORIAL DE LA EDICIÓN (R-00000694)
+                // Si estaba en auditoría: copia de cómo estaba la liquidación (solo lectura) y la
+                // factura vuelve a PENDIENTE. La liquidación no se toca.
+                $auditoriaAlEditar = null;
+                if ($editaEnAuditoria) {
+                    $auditoriaAlEditar = $historialEdicion->capturarAuditoria($facturacion->id_factura);
+                    $historialEdicion->volverAPendiente($facturacion->id_factura);
+                }
+
+                $cambios = $historialEdicion->compararFotos(
+                    $fotoAntes,
+                    $historialEdicion->capturarFactura($facturacion->id_factura)
+                );
+
+                if (count($cambios) > 0 || $editaEnAuditoria) {
+                    $historialEdicion->registrarEdicion(
+                        $facturacion->id_factura,
+                        $user->cod_usuario,
+                        $fechaActual,
+                        $estadoAnterior,
+                        $editaEnAuditoria ? FacturaHistorialEdicionRepository::ESTADO_PENDIENTE : $estadoAnterior,
+                        $cambios,
+                        $auditoriaAlEditar
+                    );
+                }
             }
 
             DB::commit();
@@ -348,6 +406,12 @@ class FacturacionProcesosController extends Controller
     public function getBuscarFacturaId(FacturaRepository $repo, Request $request)
     {
         return response()->json($repo->findByIdFactura($request->id));
+    }
+
+    /** Historial de ediciones de una factura (R-00000694). */
+    public function getHistorialEdicion(FacturaHistorialEdicionRepository $historialEdicion, Request $request)
+    {
+        return response()->json($historialEdicion->listarPorFactura($request->id));
     }
 
     public function deleteFacturaDetalle(
